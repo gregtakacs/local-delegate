@@ -1,0 +1,74 @@
+#!/bin/bash
+# delegate-shot — headless screenshot with flags that fail loudly instead of silently.
+#
+#   delegate-shot OUT.png SRC [WxH]      SRC = an .html file, or an http(s):// URL
+#                                         (e.g. a dev server you started: http://localhost:3000/me)
+#   delegate-shot --probe                 build/doctor self-test; writes nothing lasting
+#
+# Writes OUT.png and OUT.log. OUT.log is chromium's stderr, which is the only way to get
+# console errors out of a page that renders but throws — read it even when the PNG looks fine.
+#
+# WHY A WRAPPER: the chromium flags below are load-bearing. Hand-rolled, a missing
+# --no-sandbox or --disable-dev-shm-usage produces a hang or crash that a model reliably
+# misdiagnoses as "my HTML is broken" and then "fixes" correct code. --headless=new is tried
+# before --headless because Debian moves that flag under security updates.
+#
+# WHY A DEFAULT DIR: a relative OUT lands under $DELEGATE_EVIDENCE_DIR (durable, visible to
+# the reviewer) rather than the CWD, so evidence never becomes an untracked file in the repo.
+set -euo pipefail
+
+evidence=${DELEGATE_EVIDENCE_DIR:-/tmp/delegate-evidence}
+
+if [ "${1:-}" = "--probe" ]; then
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT
+  printf '<!doctype html><html><body style="margin:0;background:#0a0"><h1>probe</h1></body></html>' \
+    > "$tmp/p.html"
+  "$0" "$tmp/p.png" "$tmp/p.html" 320x200
+  [ -s "$tmp/p.png" ] || { echo "delegate-shot: probe png is empty" >&2; exit 1; }
+  echo "delegate-shot: probe OK ($(wc -c <"$tmp/p.png") byte png)"
+  exit 0
+fi
+
+if [ "$#" -lt 2 ]; then
+  echo "usage: delegate-shot OUT.png SRC(.html|URL) [WxH] | --probe" >&2
+  exit 2
+fi
+
+out=$1
+src=$2
+size=${3:-1280x800}
+
+case "$out" in
+  /*) ;;
+  *)  out="$evidence/$out" ;;
+esac
+
+case "$src" in
+  http://*|https://*) url=$src ;;
+  *)
+    [ -f "$src" ] || { echo "delegate-shot: no such file: $src" >&2; exit 2; }
+    url="file://$(realpath "$src")"
+    ;;
+esac
+
+mkdir -p "$(dirname "$out")" || { echo "delegate-shot: cannot write $(dirname "$out")" >&2; exit 3; }
+bin=$(command -v chromium || command -v chromium-browser || command -v google-chrome-stable \
+      || command -v google-chrome) || { echo "delegate-shot: no chromium available" >&2; exit 127; }
+
+common=(
+  --no-sandbox --disable-gpu --disable-dev-shm-usage
+  --allow-file-access-from-files --hide-scrollbars --mute-audio
+  --window-size="${size/x/,}" --virtual-time-budget=8000
+  --enable-logging=stderr --screenshot="$out" "$url"
+)
+
+for flag in --headless=new --headless; do
+  if "$bin" "$flag" "${common[@]}" 2> "${out%.png}.log" && [ -s "$out" ]; then
+    echo "delegate-shot: wrote $out (console log: ${out%.png}.log)"
+    exit 0
+  fi
+done
+
+echo "delegate-shot: chromium failed; see ${out%.png}.log" >&2
+exit 1
