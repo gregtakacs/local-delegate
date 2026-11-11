@@ -900,6 +900,9 @@ cmd_run() {
     printf 'ORB_FILE=%q\nORB_LABEL=%q\nORB_BASE_MAC=%q\nORB_SERIAL=%q\nORB_IP=%q\nORB_FLASH=%q\n' \
       "$ORB_FILE" "$ORB_LABEL" "$ORB_BASE_MAC" "$ORB_SERIAL" "$ORB_IP" "${ORB_FLASH:-0}"
     printf 'GRANTS=%q\nALLOW=%q\n' "$GRANTS" "$ALLOW"
+    # the chain this step belongs to, when `delegate chain` started it (it exports DELEGATE_CHAIN):
+    # `delegate top` groups the step under its chain and names the plan that resumes it.
+    printf 'CHAIN=%q\n' "${DELEGATE_CHAIN:-}"
   } > "$TASK_DIR/meta.env"
   mv "$gtmp" "$(grants_file)"
   lock_task
@@ -1084,6 +1087,12 @@ cmd_finish() {
   finalize_round "$n" "$rd" "$VERIFY" 143 "$start" "$end"
 }
 
+# The live view of every running round, in the terminal: no dashboard, no curses, stdlib only.
+# Everything it prints (and `list` below) comes from lib/taskstate.py, so the two cannot disagree.
+cmd_top() {
+  exec python3 "$DELEGATE_HOME/lib/taskstate.py" top --state "$DELEGATE_STATE" "$@"
+}
+
 cmd_peek() {
   local id=${1:-}; [ -n "$id" ] || die "usage: delegate peek ID"
   load_task "$id"
@@ -1171,18 +1180,15 @@ cmd_diff() {
 }
 
 cmd_list() {
-  local d any=0
-  printf '%-40s %-6s %-9s %s\n' TASK ROUNDS STATUS WORKTREE
-  for d in "$DELEGATE_STATE"/*/; do
-    [ -f "$d/meta.env" ] || continue
-    any=1
-    ( . "$d/meta.env"; TASK_DIR=${d%/}
-      n=$(last_round); st=-
-      [ -f "$TASK_DIR/rounds/$n/report.json" ] && st=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["status"])' "$TASK_DIR/rounds/$n/report.json")
-      [ -d "$TASK_DIR/lock" ] && st=running
-      printf '%-40s %-6s %-9s %s\n' "$ID" "$n" "$st" "$WORKTREE" )
-  done
-  [ "$any" = 1 ] || echo "(no tasks)"
+  # The states are lib/taskstate.py's, the single definition: `interrupted` (a round whose harness
+  # died before its report) and `verifying` show here too, not just on `delegate top`.
+  local out id rounds st worktree
+  out=$(python3 "$DELEGATE_HOME/lib/taskstate.py" statuses --state "$DELEGATE_STATE")
+  [ -n "$out" ] || { echo "(no tasks)"; return 0; }
+  printf '%-40s %-6s %-24s %s\n' TASK ROUNDS STATUS WORKTREE
+  while IFS=$'\t' read -r id rounds st worktree; do
+    printf '%-40s %-6s %-24s %s\n' "$id" "$rounds" "$st" "$worktree"
+  done <<< "$out"
 }
 
 # A round whose worker reported planted instructions or a prompt injection keeps its evidence:
@@ -1328,6 +1334,10 @@ delegate — hand implementation work to a self-hosted coding model, then review
                                    remove tasks idle N days (default DELEGATE_PRUNE_DAYS=14; `run`
                                    does this by itself), and with --caches the shared caches
   delegate peek ID                 compact snapshot of the current round (a few hundred tokens)
+  delegate top [ID] [--once] [--interval S] [--all]
+                                   live view of every round, refreshed every 2 s in your own terminal
+                                   (no dashboard needed): state, elapsed, steps, tokens, current item,
+                                   last action; --once prints one frame and exits (scripts, SSH)
   delegate chain PLAN.json [--status | --clean]
                                    run a planned slice unattended: each step on the previous step's
                                    branch, accepted only when done + verified, failures retried in-session
@@ -1368,6 +1378,7 @@ main() {
     finish) cmd_finish "$@" ;;
     prune) cmd_prune "$@" ;;
     peek) cmd_peek "$@" ;;
+    top) cmd_top "$@" ;;
     chain) exec python3 "$DELEGATE_HOME/lib/chain.py" "$@" ;;
     report) cmd_report "$@" ;;
     diff) cmd_diff "$@" ;;
