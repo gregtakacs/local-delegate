@@ -1,7 +1,8 @@
 # delegate-worker — the box the implementing model works in.
 #
 # It is a toolchain, not a sandbox you configure per repo: node + npm/pnpm/yarn (corepack),
-# python3, git, and a headless chromium for the pixel-verification loop in
+# python3, git, a C/C++ toolchain (host tests that compile C, native npm modules), and a
+# headless chromium for the pixel-verification loop in
 # opencode/rules/verify-ui.md. The worker gets the task's worktree and nothing else from
 # the host: no docker socket, no home directory, no SSH keys, no root.
 #
@@ -14,6 +15,7 @@ ARG OPENCODE_VERSION=1.18.30
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl git unzip zip xz-utils jq less procps \
       python3 python3-venv python3-pip \
+      build-essential \
       openssl postgresql-client \
       iproute2 iputils-ping netcat-openbsd python3-serial \
       chromium fonts-liberation fonts-dejavu-core fonts-noto-color-emoji \
