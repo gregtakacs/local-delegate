@@ -46,6 +46,12 @@ the repo path, and the branch to build on. If any of these is missing, ask once,
    a migration against `$DATABASE_URL`. The verify gate replaces your per-step review. Use
    `"service": "postgres"` for database work, `"read": [...]` for code to port from another
    repo, `"hard": true` only for steps with real algorithmic content, `"retries": 2`.
+   **"Don't touch" guards compare against the previous step, never the slice base.** Each step
+   runs on the previous step's branch, so `git diff --exit-code <slice-base> -- PATHS` in step N
+   also sees what steps 1..N-1 changed on purpose and can never pass (this broke G4, A1, H4 and
+   SF1). Guard step N with `git diff --exit-code delegate/<step N-1 name> -- PATHS` (step 1
+   against the slice base). Never fix an impossible guard or security check by deleting it:
+   fix what it compares against, or replace it with a stronger behavioural test.
 6. Commit the specs and the plan on the slice branch (repo commit conventions; the commit
    says what the specs plan, not who wrote them).
 
