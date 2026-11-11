@@ -58,4 +58,4 @@ Any change outside `docs/specs/`.
 
 `python3 -c "import json,os;p=json.load(open('docs/specs/<slice>-chain.json'));assert p['steps'];[open(s['spec']) for s in p['steps']];assert os.path.getsize('docs/specs/<slice>-design.md')>3000;print('ok',len(p['steps']),'steps')" && git diff --name-only HEAD | grep -v '^docs/specs/' | (! grep .)`
 
-A scope gate written `… | grep -v X | (! grep .)` passes only without `set -o pipefail`: under pipefail the empty, in-scope case fails too (grep -v exits 1). In a verify that sets pipefail, write it `! git diff --name-only | grep -qvE 'X'`.
+A scope gate written `… | grep -v X | (! grep .)` passes only without `set -o pipefail`: under pipefail the empty, in-scope case fails too (grep -v exits 1). In a verify that sets pipefail, write it `! git diff --name-only | grep -qvE 'X'`. In a chain, a step's scope gate diffs against the branch that step starts from (`delegate/<previous step>`; the chain's base only for step 1): diffed against the chain base, step 2 inherits step 1's files and can never pass.
