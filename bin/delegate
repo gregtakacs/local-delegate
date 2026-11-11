@@ -1233,7 +1233,7 @@ cmd_rm() {
   quarantine_if_flagged "$TASK_DIR" "$id"
   rm -rf "$TASK_DIR"
   if [ "$DELEGATE_PROGRESS" = 1 ]; then    # its card leaves the dashboard now (best-effort)
-    python3 "$DELEGATE_HOME/lib/progress.py" gone --url "${DELEGATE_PROGRESS_URL:-${BASE_URL%/}}" \
+    python3 "$DELEGATE_HOME/lib/progress.py" gone --url "${DELEGATE_PROGRESS_URL:-$(u=${BASE_URL:-${DELEGATE_BASE_URLS%% *}}; printf %s "${u%/}")}" \
       --key-file "${DELEGATE_PROGRESS_KEY_FILE:-$DELEGATE_API_KEY_FILE}" --task "$id" 2>/dev/null || true
   fi
   note "removed $id"
