@@ -215,12 +215,21 @@ slice once, runs the chain, and checks the result once.
 `delegate top` is the same view with no server: it reads the state dirs and refreshes in place
 (Ctrl-C quits, 2 s by default, `--interval S`). No lock, no writes, nothing sent anywhere.
 
-- **Claude leads** first, when the Claude Code hook is installed: each agent's phase, how long,
-  its own tokens, and the worker tokens of the tasks its commands started. Read from
-  `$XDG_CACHE_HOME/claude-agent-progress`, so a lead shows even while its worker runs on a worker host.
-- **Chains** group the steps of each chain that has tasks here, with the plan to re-run.
-- **Tasks**: state, id, round, elapsed, `steps/tools(failures)`, tokens out, the worker's current
-  todo item and its last action. Running and verifying sort first.
+- **Claude leads** first, when the Claude Code hook is installed: each lead is a header line —
+  phase, its description, how long — with a line under it of its own tokens and the worker tokens of
+  the work its commands started, and *that work nested beneath it*: its chains (steps indented under
+  the chain), then the tasks it started directly. A lead that has stopped posting for over 30 minutes
+  reads `stale?` where its phase was, since its process may simply be gone; a lead that reported
+  `finished` is dropped an hour later (counted on the last line, and back with `--all`). Leads are
+  read from `$XDG_CACHE_HOME/claude-agent-progress`, so one shows even while its worker runs on a
+  worker host.
+- **Not started by a lead** holds the rest: chains (with the plan to re-run) and loose tasks. A chain
+  step whose `meta.env` predates `CHAIN=` is placed there from the chain's own state file and plan,
+  so grouping does not depend on when the task was started.
+- **Task rows**: state, id, round, elapsed, `steps/tools(failures)`, tokens out, the worker's current
+  todo item and its last action. Running and verifying sort first. The lead header lines share these
+  columns (phase over state, description over id), and everything is built from one column plan, so
+  a narrow terminal drops whole columns rather than drifting.
 - Then the counts, and one line per **interrupted** round: the round whose harness died between the
   worker stopping and its report — `delegate finish ID`, or `delegate chain PLAN` for a chain step.
 
