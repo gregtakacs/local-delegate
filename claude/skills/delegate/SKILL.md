@@ -1,6 +1,6 @@
 ---
 name: delegate
-description: The DEFAULT way to implement anything bigger than a small edit when the self-hosted `delegate` worker is available. The local model designs the slice (design doc, step specs, chain plan) and types the code; Claude orchestrates, reviews the plan, verifies the result and lands it. Use it whenever the user asks to delegate/offload/"send to the local model"/"use the worker", AND unprompted in ordinary conversation whenever you judge that the implementation savings outweigh the orchestration overhead (several files or steps, a slice of a written design, scaffolds, endpoints, tests, migrations, pattern-following refactors, ports). Not for tiny edits (under ~30 lines), debugging an unknown cause, urgent one-line fixes, or pure design discussion.
+description: The DEFAULT way to implement anything bigger than a small edit when the self-hosted `delegate` worker is available. The local model designs the slice (design doc, step specs, chain plan) and types the code; Claude orchestrates, reviews the plan, verifies the result and lands it. Use it whenever the user asks to delegate/offload/"send to the local model"/"use the worker", AND unprompted in ordinary conversation whenever you judge that the implementation savings outweigh the orchestration overhead (several files or steps, a slice of a written design, scaffolds, endpoints, tests, migrations, pattern-following refactors, ports). Not for tiny edits (under ~30 lines), debugging an unknown cause, urgent one-line fixes, or pure design discussion. Never unprompted for visual or audio design (looks, themes, art, icons, layouts, colour, typography, sound): those stay with Claude unless the user deliberately asks for them to be delegated.
 ---
 
 # Delegating implementation to the local worker
@@ -40,6 +40,13 @@ not. Skip a phase only for a reason you can name.
   anything whose acceptance you can write as commands.
 - Don't delegate: under ~30 lines, an unknown-cause bug, an urgent fix, or the user wanting it
   done by hand.
+- **Never delegate design or audiovisual work unprompted.** Looks, themes, art, icons, layouts,
+  colour, typography, motion and sound stay with you: designing them and producing them. This is
+  where the local model is weakest (2026-11-11: its eight-look icon and plane art passed every
+  test, but two sets failed at true size, and its look furniture drifted generic). Delegate it
+  only when the user deliberately asks for that piece to be delegated. A slice that mixes both
+  kinds is split: the worker builds the plumbing (code, tests, wiring) against art and look specs
+  you wrote, and you do the visual part yourself.
 - In conversation, when you choose this unprompted, say so in one line ("I'll hand this to the
   local worker: design, then a chain; I'll verify"), so the user can say no.
 
@@ -127,8 +134,10 @@ tests for existing behaviour, a pattern-following refactor, porting code, glue.
 Keep for yourself: the decisions the user owns (and the calls on owner questions),
 reviewing the plan, verifying the result, security-sensitive cores (auth flows, crypto,
 permission checks: a Claude lead specs them and you review them line by line), debugging
-where the cause is unknown, and anything under ~30 lines (the spec would cost more than the
-edit). A slice's ordinary design work goes to the local worker (Phase 1 above).
+where the cause is unknown, anything under ~30 lines (the spec would cost more than the
+edit), and visual or audio design and production (looks, art, icons, layouts, colour, type,
+sound) unless the user asks for it to be delegated. A slice's ordinary engineering design work
+goes to the local worker (Phase 1 above).
 
 Split a big slice into steps of roughly **one coherent change, < ~1500 lines of diff,
 < ~90 min of worker time**. Independent steps can run in parallel (separate tasks, max ~3
