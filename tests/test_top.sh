@@ -100,7 +100,7 @@ NO_COLOR=1 COLUMNS=120 "$here/bin/delegate" top --once --color > $T/c2
 check "--color forces colour onto a pipe"               'grep -q "$E\[" $T/c1'
 check "NO_COLOR beats --color"                          '! grep -q "$E" $T/c2'
 
-# ------------------------------------------------- the Claude leads above the tasks ---------
+# ------------------------------------------- the Claude leads, and what is nested under them -
 python3 - "$XDG_CACHE_HOME/claude-agent-progress/aaaa.json" <<'PY'
 import json, sys, time
 json.dump({"desc": "spec writer", "phase": "delegating", "started_at": time.time() - 900,
@@ -119,6 +119,109 @@ check "quarantined tasks are not listed"                'mkdir -p $DELEGATE_STAT
 check "nor is the chains dir itself a task"             '! ts statuses | grep -qE "^(chains|locks|quarantine)	"'
 check "a CHAIN in meta.env names the chain and its plan" \
   'printf "CHAIN=w4\n" >> $DELEGATE_STATE/t-run/meta.env && [ "$(j t-run chain)" = w4 ] && [ "$(j t-run chain_plan)" = "$T/plan.json" ]'
+
+leadchk() { # NAME OUT IN NTASKS: one line of `leads`, the numeric fields compared
+  ts leads | python3 -c '
+import sys
+name, out, inp, n = sys.argv[1:]
+rows = [l.split("\t") for l in sys.stdin.read().splitlines()]
+r = [x for x in rows if x[0] == name]
+sys.exit(0 if r and (int(r[0][3]), int(r[0][4]), int(r[0][6])) == (int(out), int(inp), int(n)) else 1)
+' "$1" "$2" "$3" "$4"
+}
+
+# ------------------------------------------------------------------ the tree ----------------
+# A second lead, which started a chain rather than single tasks: its steps belong under IT, not in
+# a flat Chains section, and the work no lead claimed has to be visibly somebody else's.
+printf '{"name":"w9","plan":"%s/plan9.json","steps":{}}\n' "$T" > $DELEGATE_STATE/chains/w9.json
+python3 - "$T/plan9.json" <<'PY'
+import json, sys
+json.dump({"repo": "/srv/repos/api", "steps": [{"name": "add-auth", "spec": "specs/auth.md", "verify": "make test"}]},
+          open(sys.argv[1], "w"))
+PY
+mk api-add-auth none                                     # and its meta.env says nothing about w9
+python3 - "$XDG_CACHE_HOME/claude-agent-progress/cccc.json" <<'PY'
+import json, sys, time
+json.dump({"desc": "chain driver", "phase": "working", "started_at": time.time() - 130,
+           "last_post": time.time(), "children": ["chain:w9"],
+           "usage": {"output_tokens": 3000000, "input_tokens": 900000,
+                     "cache_read_input_tokens": 8700000}}, open(sys.argv[1], "w"))
+PY
+ts top --once > $T/tree
+ln_() { grep -n -- "$1" $T/tree | head -1 | cut -d: -f1; }
+check "a step of a lead's chain is placed from its plan, with no CHAIN in meta.env" \
+  '[ "$(j api-add-auth chain)" = w9 ] && [ "$(j api-add-auth chain_plan)" = "$T/plan9.json" ]'
+check "the lead's row comes before its chain"           '[ "$(ln_ "chain driver")" -lt "$(ln_ "  w9 (")" ]'
+check "and the step is indented under the chain"        '[ "$(ln_ "  w9 (")" -lt "$(ln_ "^    .*api-add-auth")" ]'
+check "a chain step is shown once: not again directly under its lead" \
+  '! grep -q "^  [a-z-]* *api-add-auth" $T/tree && grep -q "^    .*api-add-auth" $T/tree'
+check "and its lead counts it once"                     'grep -A1 "chain driver" $T/tree | grep -q "1 task(s) 1.2k out"'
+check "a lead's own tasks are indented under its row"   '[ "$(ln_ "spec writer")" -lt "$(ln_ "  t-run")" ]'
+check "work no lead claimed sits under its own heading" \
+  '[ "$(ln_ "chain driver")" -lt "$(ln_ "Not started by a lead")" ] && [ "$(ln_ "Not started by a lead")" -lt "$(ln_ "  t-int")" ]'
+check "the frame says how many leads there are"         'grep -qE "2 lead\(s\) ·" $T/tree'
+check "a lead header line shares the task rows' columns" \
+  'python3 - $T/tree "spec writer" "t-run" <<P
+import sys
+path, name, tid = sys.argv[1:]
+ls = open(path).read().splitlines()
+lead = next(l for l in ls if name in l)
+task = next(l for l in ls if l.startswith("  ") and tid in l.split()[:3])
+sys.exit(0 if lead.index(name) + len(task) - len(task.lstrip(" ")) == task.index(tid) and lead == lead.lstrip(" ") else 1)
+P'
+
+# ---------------------------------------------- a lead's tokens, in whatever shape it wrote -
+check "the raw API names, with cache reads counted as input" 'leadchk "chain driver" 3000000 9600000 1'
+check "millions print as M and not as 9600k"            'ts top --once | grep -q "3.0M out / 9.6M in"'
+python3 - "$XDG_CACHE_HOME/claude-agent-progress/dddd.json" <<'PY'
+import json, sys, time
+json.dump({"desc": "flat tokens", "phase": "waiting", "started_at": time.time() - 60,
+           "last_post": time.time(), "children": [],
+           "output": 812, "input": 1900, "cache_read": 900}, open(sys.argv[1], "w"))
+PY
+check "or flat on the state file itself, with no usage dict" 'leadchk "flat tokens" 812 2800 0'
+check "a lead with nothing under it still gets a row"   'ts top --once | grep -q "flat tokens" && ts top --once | grep -q "0 task(s) 0 out"'
+
+# ------------------------------------------------------- a lead that stopped posting to it ---
+python3 - "$XDG_CACHE_HOME/claude-agent-progress/eeee.json" <<'PY'
+import json, sys, time
+now = time.time()
+json.dump({"desc": "gone quiet", "phase": "working", "started_at": now - 5000,
+           "last_post": now - 2400, "children": ["task:t-int"]}, open(sys.argv[1], "w"))
+PY
+python3 - "$XDG_CACHE_HOME/claude-agent-progress/ffff.json" <<'PY'
+import json, sys, time
+json.dump({"desc": "wrapped up", "phase": "finished", "started_at": time.time() - 9000,
+           "last_post": time.time() - 5000, "usage": {"output": 1200}}, open(sys.argv[1], "w"))
+PY
+touch -d '40 minutes ago' $XDG_CACHE_HOME/claude-agent-progress/eeee.json     # a dead process writes nothing
+touch -d '83 minutes ago' $XDG_CACHE_HOME/claude-agent-progress/ffff.json
+COLUMNS=200 ts top --once > $T/stale
+check "a working lead silent 40 min reads stale, not working" \
+  'grep -q "stale? *gone quiet" $T/stale && ! grep -q "working *gone quiet" $T/stale'
+check "and says how long since it last posted"          'grep -q "quiet 40m" $T/stale'
+check "a lead finished an hour ago is not shown"        '! grep -q "wrapped up" $T/stale'
+check "the count line says a lead was hidden"           'grep -q "1 finished lead(s) hidden" $T/stale'
+check "--all shows the finished lead too"               'COLUMNS=200 ts top --once --all | grep -q "wrapped up"'
+mv $DELEGATE_STATE/t-int $DELEGATE_STATE/quarantine/
+check "the stale lead is still shown after its task went" 'ts top --once | grep -q "stale? *gone quiet"'
+check "with nothing left under it, and a hint why"      \
+  'COLUMNS=200 ts top --once > $T/gone; grep -q "0 task(s) 0 out · quiet 40m" $T/gone && grep -q "may have died" $T/gone'
+python3 - "$XDG_CACHE_HOME/claude-agent-progress/eeee.json" <<'PY'
+import json, sys, time
+d = json.load(open(sys.argv[1])); d["last_post"] = time.time() - 90000; json.dump(d, open(sys.argv[1], "w"))
+PY
+touch -d '25 hours ago' $XDG_CACHE_HOME/claude-agent-progress/eeee.json
+check "and one silent for a day is gone from the view"  '! ts leads | grep -q "gone quiet"'
+python3 - "$XDG_CACHE_HOME/claude-agent-progress/gggg.json" <<'PY'
+import json, sys, time
+json.dump({"desc": "second claim", "phase": "waiting", "started_at": time.time() - 30,
+           "last_post": time.time(), "children": ["task:t-run", "task:nosuch-here"]}, open(sys.argv[1], "w"))
+PY
+check "a task already shown under another lead is not shown twice" \
+  'COLUMNS=200 ts top --once > $T/claim; [ "$(grep -c "  t-run" $T/claim)" = 1 ]'
+check "and its own row says what is actually under it, not what it once started" \
+  'grep -A1 "second claim" $T/claim | grep -q "0 task(s) 0 out"'
 
 # ------------------------------------------------------------------ broken inputs ----------
 b=$DELEGATE_STATE/t-broken; mkdir -p $b/rounds/1; : > $b/meta.env          # meta.env with nothing in it

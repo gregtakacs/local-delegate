@@ -37,7 +37,7 @@ RES = "\033[0m"
 CODE = {"running": "\033[32m", "verifying": "\033[36m", "interrupted": "\033[31m", "aborted": "\033[31m",
         "worker-error": "\033[31m", "timeout": "\033[31m", "truncated": "\033[31m", "no-status": "\033[33m",
         "partial": "\033[33m", "blocked": "\033[33m", "done-but-verify-failed": "\033[33m",
-        "done": "\033[2m", "new": "\033[2m"}
+        "done": "\033[2m", "new": "\033[2m", "stale?": "\033[33m", "finished": "\033[2m"}
 
 
 def default_state_dir():
@@ -165,21 +165,75 @@ def last_action(st):
     return line[:100]
 
 
-def chain_of(tid, state_dir, meta):
-    """The chain a task belongs to: recorded in its meta.env, else in a chain state file."""
-    if meta.get("CHAIN"):
-        name = meta["CHAIN"]
-        st = read_json(Path(state_dir) / "chains" / f"{name}.json") or {}
-        return name, str(st.get("plan") or "")
+_CHAIN_CACHE = {}
+
+
+def chain_index(state_dir):
+    """Where each task belongs, from $DELEGATE_STATE/chains/*.json and the plans they point at:
+    {"exact": {task id: (chain, plan)}, "suffix": {"-<step name>": (chain, plan)}}.
+
+    The plans are what name the steps and the repo, so this places tasks whose meta.env has no
+    CHAIN (started before it was recorded): their ids are chain.py's task_id(repo, step) -- the
+    same rule, imported rather than copied -- plus the 48-character form `delegate run` actually
+    cuts them to. A chain state file that records no plan (older chains recorded none) still
+    places its steps, by the step names it does hold. Cached per state dir, keyed on the files' mtimes.
+    """
+    empty = {"exact": {}, "suffix": {}}
     try:
         files = sorted((Path(state_dir) / "chains").glob("*.json"))
     except OSError:
-        return "", ""
+        return empty
+    if not files:
+        _CHAIN_CACHE.pop(str(state_dir), None)
+        return empty
+    sig = tuple((f.name, _mtime(f)) for f in files)
+    hit = _CHAIN_CACHE.get(str(state_dir))
+    if hit and hit[0] == sig:
+        return hit[1]
+    out = {"exact": {}, "suffix": {}}
+    chain_lib = None
+    try:
+        if str(LIB) not in sys.path:
+            sys.path.insert(0, str(LIB))
+        import chain as chain_lib                                    # noqa: F811 (the one task_id rule)
+    except Exception:                                                # noqa: BLE001 (no plan map then)
+        chain_lib = None
     for f in files:
         st = read_json(f) or {}
-        for step in (st.get("steps") or {}):
-            if tid.endswith("-" + str(step)):
-                return str(st.get("name") or f.stem), str(st.get("plan") or "")
+        name, plan_path = str(st.get("name") or f.stem), str(st.get("plan") or "")
+        names = [str(k) for k in (st.get("steps") or {})]
+        plan = read_json(plan_path) if plan_path else None
+        if isinstance(plan, dict) and isinstance(plan.get("steps"), list) and plan.get("repo"):
+            repo = str(plan["repo"])
+            for s in plan["steps"]:
+                if isinstance(s, dict) and s.get("name"):
+                    names.append(str(s["name"]))
+        for n in names:
+            out["suffix"].setdefault("-" + n[:48], (name, plan_path))
+            if chain_lib and isinstance(plan, dict) and plan.get("repo"):
+                tid = chain_lib.task_id(str(plan["repo"]), {"name": n})
+                out["exact"][tid] = (name, plan_path)
+                cut = f"{Path(str(plan['repo'])).name}-{n[:48]}"     # what cmd_run's slugify leaves
+                out["exact"][cut] = (name, plan_path)
+    _CHAIN_CACHE[str(state_dir)] = (sig, out)
+    return out
+
+
+def chain_of(tid, state_dir, meta):
+    """The chain a task belongs to, and the plan that re-runs it: its meta.env first, then the
+    chain state files and the plans they point at (see chain_index)."""
+    idx = chain_index(state_dir)
+    if meta.get("CHAIN"):
+        name = meta["CHAIN"]
+        plan = idx["exact"].get(tid, ("", ""))[1] if idx["exact"].get(tid, ("", ""))[0] == name else ""
+        if not plan:
+            plan = str((read_json(Path(state_dir) / "chains" / f"{name}.json") or {}).get("plan") or "")
+        return name, plan
+    if tid in idx["exact"]:
+        return idx["exact"][tid]
+    for key, val in idx["suffix"].items():
+        if tid.endswith(key):
+            return val
     return "", ""
 
 
@@ -295,9 +349,34 @@ def all_states(state_dir=None, now=None):
 
 
 # ---------------------------------------------------------------------- Claude leads ----
+OUT_KEYS = ("output", "output_tokens", "out")
+IN_KEYS = ("input", "input_tokens", "in")
+CACHE_READ_KEYS = ("cache_read", "cache_read_input_tokens", "cache_read_tokens")
+STALE_AFTER, HIDDEN_AFTER = 1800, 3600             # a quiet lead: shown stale, then hidden
+
+
+def lead_usage(st):
+    """The lead's own tokens, however its state file happens to spell them: the hook's own
+    aggregation (input/cache_read/output), the raw API names, or flat at the top level. `in` is
+    fresh plus cache reads, which is what the dashboard's "in" means for an agent."""
+    for src in (st.get("usage") or {}, st.get("tokens") or {}, st):
+        if not isinstance(src, dict):
+            continue
+        out = next((_num(src[k]) for k in OUT_KEYS if k in src), None)
+        inp = next((_num(src[k]) for k in IN_KEYS if k in src), None)
+        if out is None and inp is None:
+            continue
+        cache = next((_num(src[k]) for k in CACHE_READ_KEYS if k in src), 0)
+        return _num(out), _num(inp) + _num(cache)
+    return 0, 0
+
+
 def leads(now=None, tasks=None, cache_dir=None):
-    """The Claude agents in ~/.cache/claude-agent-progress, updated in the last 24 h, with the
-    worker tokens of the tasks and chains their commands started (`children` of the state file)."""
+    """The Claude agents in ~/.cache/claude-agent-progress, updated in the last 24 h: their phase,
+    elapsed, their own tokens, the worker tokens of the tasks and chains their commands started
+    (`children`), and whether to show them at all. A lead whose process died without saying so
+    keeps its last phase; after 30 min of silence it is shown `stale?`, and a finished one is
+    hidden after an hour."""
     now = time.time() if now is None else now
     tasks = all_states() if tasks is None else tasks
     by_id = {t["id"]: t for t in tasks}
@@ -312,29 +391,34 @@ def leads(now=None, tasks=None, cache_dir=None):
         if not isinstance(st, dict):
             continue
         updated = max(_mtime(f), _num(st.get("last_post")))
-        if now - updated > DAY:
+        quiet = now - updated
+        if quiet > DAY:
             continue
         kids = [str(k) for k in (st.get("children") or [])]
-        hit = {}
+        hit, direct = {}, []
         for k in kids:
             if k.startswith("task:"):
                 t = by_id.get(k[5:])
                 if t:
                     hit[t["id"]] = t
+                    direct.append(t["id"])
             elif k.startswith("chain:"):
                 for t in tasks:
                     if t["chain"] and t["chain"] == k[6:]:
                         hit[t["id"]] = t
-        usage = st.get("usage") or {}
+        out, inp = lead_usage(st)
+        phase = str(st.get("phase") or "")
         started = _num(st.get("started_at")) or now
         rows.append({"name": str(st.get("desc") or f.stem), "agent": f.stem,
-                     "phase": str(st.get("phase") or ""), "updated": now - updated,
-                     "elapsed": max(0.0, now - started),
-                     "out": _num(usage.get("output")),
-                     "inp": _num(usage.get("input")) + _num(usage.get("cache_read")),
+                     "phase": phase, "quiet": quiet,
+                     "stale": phase not in ("finished",) and quiet > STALE_AFTER,
+                     "hidden": phase == "finished" and quiet > HIDDEN_AFTER,
+                     "elapsed": max(0.0, now - started), "out": out, "inp": inp,
                      "worker_out": sum(t["output_tokens"] for t in hit.values()),
-                     "tasks": len(hit), "kids": len(kids), "children": kids})
-    return sorted(rows, key=lambda r: -r["updated"])
+                     "tasks": len(hit), "kids": len(kids), "children": kids,
+                     "task_ids": direct, "chain_names": sorted(set(
+                         k[6:] for k in kids if k.startswith("chain:")))})
+    return sorted(rows, key=lambda r: -r["quiet"])            # the one that posted most recently first
 
 
 # ---------------------------------------------------------------------------- rendering ----
@@ -370,12 +454,15 @@ def _clip(s, w):
 
 
 def fmt_tokens(n):
+    """Tokens, short. A lead's input is cache reads and runs into the millions, so it needs an M."""
     n = _num(n)
     if n < 1000:
         return str(n)
     if n < 100000:
         return f"{n / 1000:.1f}k"
-    return f"{n / 1000:.0f}k"
+    if n < 1000000:
+        return f"{n / 1000:.0f}k"
+    return f"{n / 1000000:.1f}M"
 
 
 def fmt_elapsed(sec):
@@ -394,24 +481,41 @@ def _cell(text, code, w, on):
 SHORT = {"done-but-verify-failed": "verify-failed"}          # the state column is narrow
 
 
-def row(t, width, on, indent=""):
-    """One task: state, id, round, elapsed, steps/tools(failed), tokens out, current item, last
-    action. The id gives way first on a narrow terminal, then the todo, then the action."""
-    stt = _clip(SHORT.get(t["state"], t["state"]), 13)
-    stats = _clip(f"{t['steps']}st {t['tool_calls']}t({t['tool_errors']}f)", 15)
-    mid = [(f"r{t['round']}" if t["round"] else "-", 4), (fmt_elapsed(t["elapsed"]), 7),
-           (stats, 15), (fmt_tokens(t["output_tokens"]), 7)]
-    while mid and len(indent) + 14 + sum(w + 1 for _, w in mid) + 13 > width:
-        mid.remove(max(mid, key=lambda c: c[1]))        # too narrow: the middle columns go first
-    fixed = len(indent) + 14 + sum(w + 1 for _, w in mid)
-    avail = max(0, width - fixed)
-    idw = max(12, min(38, avail - 1))
+MID = ("round", 4), ("elapsed", 7), ("stats", 15), ("tokens", 7)
+
+
+def _layout(width, indent, idw_cap=38):
+    """The one column plan every row of the frame is built from, so a lead's header line and its
+    steps' lines share column positions: (mid columns kept, id width, todo width, action width).
+    Too narrow: the middle columns give way, largest first, then the id, then the todo, then the action.
+    `idw_cap` is how wide the id column may get: the frame passes the widest id it is about to show,
+    so short ids do not eat the columns a worker's current item would otherwise have."""
+    cols = list(MID)
+    while cols and indent + 14 + sum(w + 1 for _, w in cols) + 13 > width:
+        cols.remove(max(cols, key=lambda c: c[1]))
+    avail = max(0, width - indent - 14 - sum(w + 1 for _, w in cols))
+    idw = max(12, min(idw_cap, avail - 1))
     tail = max(0, avail - idw - 1)
     todo_w = min(30, max(0, tail - 20))
-    act_w = max(0, tail - todo_w - 1)
+    return cols, idw, todo_w, max(0, tail - todo_w - 1)
+
+
+def idw_hint(tasks, lead_rows=()):
+    """The id column, bucketed to a multiple of 8 columns so it does not jitter every refresh."""
+    w = max([disp_w(t["id"]) for t in tasks] + [disp_w(r["name"]) for r in lead_rows] + [12])
+    return min(38, max(12, (w + 7) // 8 * 8))
+
+
+def row(t, width, on, indent="", cap=38):
+    """One task: state, id, round, elapsed, steps/tools(failed), tokens out, current item, last action."""
+    cols, idw, todo_w, act_w = _layout(width, len(indent), cap)
+    txt = {"round": f"r{t['round']}" if t["round"] else "-", "elapsed": fmt_elapsed(t["elapsed"]),
+           "stats": f"{t['steps']}st {t['tool_calls']}t({t['tool_errors']}f)",
+           "tokens": fmt_tokens(t["output_tokens"])}
+    stt = _clip(SHORT.get(t["state"], t["state"]), 13)
     line = indent + _cell(stt, CODE.get(t["state"], ""), 14, on) + _cell(_clip(t["id"], idw), "", idw + 1, on)
-    for txt, w in mid:
-        line += _cell(txt, "", w + 1, on)
+    for name, w in cols:
+        line += _cell(_clip(txt[name], w), "", w + 1, on)
     if todo_w:
         line += _cell(_clip(t["todo"], todo_w), "", todo_w, on) + " "
     if act_w:
@@ -419,52 +523,95 @@ def row(t, width, on, indent=""):
     return line.rstrip()
 
 
+def lead_row(r, width, on, indent="", cap=38):
+    """A Claude lead as two lines: a header row in the task rows' own columns (its phase where a
+    state goes, its description where a task id goes, its elapsed time in the elapsed column), and
+    under it its tokens -- its own, and its workers'. The tokens get the line to themselves because
+    on an 80-column terminal they would otherwise be clipped away, and a lead's own output is the
+    point of showing it. A lead quiet for over half an hour reads `stale?` where its phase was: its
+    process may be gone, and the state file cannot tell us."""
+    cols, idw, _, _ = _layout(width, len(indent), cap)
+    gap = sum(w + 1 for name, w in cols if name == "round")        # leave the round column blank
+    phase = "stale?" if r["stale"] else r["phase"]
+    head = (indent + _cell(_clip(phase, 13), CODE.get(phase, ""), 14, on)
+            + _cell(_clip(r["name"], idw), "", idw + 1, on) + " " * gap
+            + _cell(fmt_elapsed(r["elapsed"]), "", 8, on))
+    parts = [f"own {fmt_tokens(r['out'])} out / {fmt_tokens(r['inp'])} in",
+             f"{r['tasks']} task(s) {fmt_tokens(r['worker_out'])} out"]
+    if r["quiet"] > 120:
+        parts.append(f"quiet {fmt_elapsed(r['quiet'])}")
+    if r["stale"]:
+        parts.append("no post for over 30m: it may have died")
+    return [head.rstrip(), _ind(len(indent) + 2, " · ".join(parts), width)]
+
+
 def _ind(n, s, width):
     """Indent without _clip eating it: _clip collapses runs of space, leading ones included."""
     return " " * n + _clip(s, max(0, width - n))
 
 
-def frame(tasks, lead_rows, args, width, now, hidden):
+def _chain_lines(name, ts, width, on, indent, cap, plan=""):
+    """One chain and its steps, at `indent`; its steps sorted by id."""
+    done = sum(1 for t in ts if t["status"] == "done")
+    plan = plan or next((t["chain_plan"] for t in ts if t["chain_plan"]), "")
+    out = [_ind(indent, f"{name} ({done}/{len(ts)} done){(' ' + plan) if plan else ''}", width)]
+    out += [row(t, width, on, indent=" " * (indent + 2), cap=cap) for t in sorted(ts, key=lambda t: t["id"])]
+    return out
+
+
+def _by_activity(ts):
+    return sorted(ts, key=lambda t: (t["state"] != "running", t["state"] != "verifying", -t["last_activity"]))
+
+
+def frame(tasks, lead_rows, args, width, now, hidden, hidden_leads=0):
+    """One frame, nested by who started what: each lead is a header row with its chains (steps
+    indented below) and the tasks it started directly under it; then the chains and tasks no lead
+    claims. Everything is clipped to the terminal width."""
     on = args.color_ansi
+    cap = idw_hint(tasks, lead_rows)
     L = []
     hdr = (f"delegate top · {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(now))} · "
-           f"{args.state} · {len(tasks)} task(s)")
+           f"{args.state} · {len(tasks)} task(s) · {len(lead_rows)} lead(s)")
     if hidden:
         hdr += f" · {hidden} finished >24h hidden (--all)"
     if args.watch:
         hdr += " · Ctrl-C quits"
     L.append(_clip(hdr, width))
-    if lead_rows:
-        L += ["", _clip("Claude leads", width)]
-        for r in lead_rows:
-            s = (f"{_clip(r['name'], 28):<28} {_clip(r['phase'], 12):<12} {fmt_elapsed(r['elapsed']):>7}"
-                 f"  own {fmt_tokens(r['out'])} out / {fmt_tokens(r['inp'])} in"
-                 f"  workers {r['tasks']} task(s) {fmt_tokens(r['worker_out'])} out")
-            if r["updated"] > 120:
-                s += f"  (quiet {fmt_elapsed(r['updated'])})"
-            L.append(_ind(2, s, width))
-    chains = {}
-    plain = []
-    for t in tasks:
-        (chains.setdefault(t["chain"], []) if t["chain"] else plain).append(t)
-    if chains:
-        L += ["", _clip("Chains", width)]
-        for name in sorted(chains):
-            ts = chains[name]
-            plan = next((t["chain_plan"] for t in ts if t["chain_plan"]), "")
-            done = sum(1 for t in ts if t["status"] == "done")
-            L.append(_ind(2, f"{name} ({done}/{len(ts)} done){(' ' + plan) if plan else ''}", width))
-            for t in sorted(ts, key=lambda t: t["id"]):
-                L.append(row(t, width, on, indent="    "))
-    if plain:
-        L += ["", _clip("Tasks", width)]
-        for t in sorted(plain, key=lambda t: (t["state"] != "running", t["state"] != "verifying", -t["last_activity"])):
-            L.append(row(t, width, on))
+
+    left = {t["id"]: t for t in tasks}
+    for r in lead_rows:
+        chains = {c: ts for c in r["chain_names"]
+                  for ts in [[t for t in left.values() if t["chain"] == c]] if ts}
+        under = {t["id"] for ts in chains.values() for t in ts}    # a step is shown once: under its chain
+        direct = [left[i] for i in r["task_ids"] if i in left and i not in under]
+        mine = [t for ts in chains.values() for t in ts] + direct
+        # its own row counts what is here to show, so the line and the tree under it cannot disagree
+        L += [""] + lead_row(dict(r, tasks=len(mine),
+                                  worker_out=sum(t["output_tokens"] for t in mine)), width, on, cap=cap)
+        for c in sorted(chains):
+            L += _chain_lines(c, chains[c], width, on, 2, cap)
+            for t in chains[c]:
+                left.pop(t["id"], None)
+        if direct:
+            L += [row(t, width, on, indent="  ", cap=cap) for t in _by_activity(direct)]
+            for t in direct:
+                left.pop(t["id"], None)
+    rest_chains, loose = {}, []
+    for t in left.values():
+        (rest_chains.setdefault(t["chain"], []) if t["chain"] else loose).append(t)
+    if rest_chains or loose:
+        L += ["", _clip("Not started by a lead", width)]
+        for c in sorted(rest_chains):
+            L += _chain_lines(c, rest_chains[c], width, on, 2, cap)
+        L += [row(t, width, on, indent="  ", cap=cap) for t in _by_activity(loose)]
     counts = {}
     for t in tasks:
         counts[t["state"]] = counts.get(t["state"], 0) + 1
+    note = " ·  ".join(f"{v} {k}" for k, v in sorted(counts.items())) or "no tasks"
+    if hidden_leads:                                             # off the header: a narrow one would clip it
+        note += f" ·  {hidden_leads} finished lead(s) hidden (--all)"
     L.append("")
-    L.append(_ind(2, " ·  ".join(f"{v} {k}" for k, v in sorted(counts.items())) or "no tasks", width))
+    L.append(_ind(2, note, width))
     for t in tasks:
         if t["interrupted"]:
             L.append(_ind(2, f"interrupted: {t['id']} -> {t['resume']}", width))
@@ -532,7 +679,8 @@ def cmd_top(argv):
     ap.add_argument("id", nargs="?", default="")
     ap.add_argument("--once", action="store_true", help="print one frame, no clearing, and exit")
     ap.add_argument("--interval", default="2", help="refresh seconds (default 2)")
-    ap.add_argument("--all", action="store_true", dest="all_", help="include tasks finished more than 24 h ago")
+    ap.add_argument("--all", action="store_true", dest="all_",
+                    help="include tasks finished more than 24 h ago, and leads finished over an hour ago")
     ap.add_argument("--state", default="", help="task state dir (default $DELEGATE_STATE)")
     ap.add_argument("--cache", default="", help="Claude agent state dir (default $XDG_CACHE_HOME/claude-agent-progress)")
     ap.add_argument("--color", action="store_true", help="force ANSI colours even when piped")
@@ -556,8 +704,10 @@ def cmd_top(argv):
         while True:
             now = time.time()
             tasks, hidden = visible_tasks(a, now)
+            rows = leads(now, tasks, a.cache)
+            shown = rows if a.all_ else [r for r in rows if not r["hidden"]]
             a.width = shutil.get_terminal_size((120, 40)).columns
-            lines = frame(tasks, leads(now, tasks, a.cache), a, a.width, now, hidden)
+            lines = frame(tasks, shown, a, a.width, now, hidden, len(rows) - len(shown))
             sys.stdout.write(("\033[2J\033[H" if a.watch else "") + "\n".join(lines) + "\n")
             sys.stdout.flush()
             if not a.watch:
