@@ -333,6 +333,15 @@ def main():
     u = agent_usage(d.get("transcript_path"), agent)
     if u:
         body["usage"] = u
+        # kept locally too, so `delegate top` shows a lead's own tokens without stackd
+        with open(STATE_DIR / f"{agent}.lock", "w") as lk:
+            fcntl.flock(lk, fcntl.LOCK_EX)
+            try:
+                cur = json.loads(sf.read_text())
+                cur["usage"] = u
+                sf.write_text(json.dumps(cur))
+            except (OSError, ValueError):
+                pass
     if not st.get("prompt_sent"):
         p = agent_prompt(d.get("transcript_path"), agent)
         if p:
