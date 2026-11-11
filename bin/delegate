@@ -972,7 +972,13 @@ cmd_continue() {
   need_config
   load_task "$id"
   [ -d "$WORKTREE" ] || die "worktree $WORKTREE is gone"
-  [ "$verify_set" = 1 ] || verify=$VERIFY
+  if [ "$verify_set" = 1 ]; then
+    # a new --verify is the task's verify from now on: later rounds, `delegate verify` and a
+    # chain's retries all run it (before, it held for this one round only)
+    [ "$verify" = "$VERIFY" ] || { meta_set VERIFY "$verify"; note "verify for $id is now: $verify"; }
+  else
+    verify=$VERIFY
+  fi
   [ -n "$model" ] && MODEL=$model
   local n; n=$(( $(last_round) + 1 ))
   BASE_URL=$(pick_base_url) || die "no endpoint answered"
@@ -1179,6 +1185,27 @@ cmd_list() {
   [ "$any" = 1 ] || echo "(no tasks)"
 }
 
+# A round whose worker reported planted instructions or a prompt injection keeps its evidence:
+# before a task's state is removed (rm, prune, chain --clean), any round whose final message or
+# report matches is copied to $DELEGATE_STATE/quarantine/<id>-<time>/ (events, report, prompt,
+# the worker's last message), so where the text came from can still be traced.
+quarantine_if_flagged() { # TASK_DIR ID
+  local d=$1 id=$2 r hit="" q
+  [ -d "$d/rounds" ] || return 0
+  for r in "$d"/rounds/*/; do
+    [ -f "$r/events.jsonl" ] || continue
+    if python3 "$DELEGATE_HOME/lib/report.py" flagged "$r/events.jsonl" "$r/report.json" >/dev/null 2>&1; then
+      hit="$hit ${r%/}"
+    fi
+  done
+  [ -n "$hit" ] || return 0
+  q="$DELEGATE_STATE/quarantine/$id-$(date +%Y%m%d-%H%M%S)"
+  mkdir -p "$q"
+  for r in $hit; do cp -a "$r" "$q/round-$(basename "$r")"; done
+  cp -a "$d/meta.env" "$d/spec.md" "$q/" 2>/dev/null || true
+  warn "kept the evidence of $id's flagged round(s) in $q (the worker reported planted instructions or an injection)"
+}
+
 cmd_rm() {
   local id=${1:-}; [ -n "$id" ] || die "usage: delegate rm ID [--delete-branch]"; shift
   local delbranch=0; [ "${1:-}" = --delete-branch ] && delbranch=1
@@ -1197,6 +1224,7 @@ cmd_rm() {
     docker network rm "$(svc_net)" >/dev/null 2>&1 || true
   fi
   grant_unlock
+  quarantine_if_flagged "$TASK_DIR" "$id"
   rm -rf "$TASK_DIR"
   if [ "$DELEGATE_PROGRESS" = 1 ]; then    # its card leaves the dashboard now (best-effort)
     python3 "$DELEGATE_HOME/lib/progress.py" gone --url "${DELEGATE_PROGRESS_URL:-${BASE_URL%/}}" \

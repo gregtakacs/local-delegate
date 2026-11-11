@@ -16,6 +16,7 @@ if [ "$cmd" = run ]; then
   id="repo-$name"
   [ -n "${EDIT:-}" ] && echo "$name" >> "$EDIT"     # in-place tests: the "worker" edits the checkout
 elif [ "$cmd" = continue ]; then id=$1; name=${id#repo-}; cp "$2" "$DELEGATE_STATE/last-retry-$name"
+  [ "${3:-}" = --verify ] && printf '%s\n' "$4" >> "$DELEGATE_STATE/retry-verify-$name"
 else exit 0; fi
 d=$DELEGATE_STATE/$id/rounds; mkdir -p $d; n=$(( $(ls $d | wc -l) + 1 )); mkdir $d/$n
 st=$(sed -n "${n}p" "$SCRIPT/$name"); st=${st:-done}
@@ -70,5 +71,14 @@ EDIT=$T/repo/work.txt GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=
   python3 $here/lib/chain.py $T/hplan.json >/dev/null 2>&1; rc=$?
 check "in place passes --here and never --base" '[ $rc = 0 ] && [ -f $DELEGATE_STATE/saw-here ] && [ ! -f $DELEGATE_STATE/bases ]'
 check "in place commits one per accepted step" '[ "$(git -C $T/repo log --format=%s $head0..HEAD | tr "\n" ,)" = "h: b,h: a," ] && [ -z "$(git -C $T/repo status --porcelain)" ]'
+
+# 7. a retry runs the plan's verify as it is now, not the one the task started with (an edited plan takes effect)
+rm -rf $DELEGATE_STATE; mkdir -p $DELEGATE_STATE
+printf 'done-but-verify-failed\ndone-but-verify-failed\ndone\n' > $SCRIPT/a; printf 'done\n' > $SCRIPT/b
+printf '{"name":"t","repo":"%s","base":"main","retries":1,"steps":[{"name":"a","spec":"docs/a.md","verify":"old-check"},{"name":"b","spec":"docs/b.md","verify":"true"}]}' "$T/repo" > $T/plan.json
+python3 $here/lib/chain.py $T/plan.json >/dev/null 2>&1
+sed -i 's/old-check/new-check/' $T/plan.json
+python3 $here/lib/chain.py $T/plan.json >/dev/null 2>&1; rc=$?
+check "an edited plan's verify reaches the retry" '[ "$(head -1 $DELEGATE_STATE/retry-verify-a)" = old-check ] && [ "$(tail -1 $DELEGATE_STATE/retry-verify-a)" = new-check ] && [ $rc = 0 ]'
 
 exit $fail

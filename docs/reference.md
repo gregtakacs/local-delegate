@@ -117,6 +117,10 @@ Follow-ups: `delegate continue ID -m "first item" -m "second item"` (each `-m` i
 item), or a file, or `-` for stdin. `delegate stop ID` aborts a running round. The worker's
 partial work is still committed, and the round reports as `aborted`.
 
+`continue --verify CMD` replaces the task's verify from then on (later rounds, `delegate verify`, and a chain's retries), and a chain retry always runs the plan's current verify, so editing a step's verify in the plan and re-running the chain takes effect.
+
+**Flagged rounds are kept.** When a worker's closing message reports planted instructions, a prompt injection or an exfiltration attempt, `delegate rm` (and `prune`, `chain --clean`) copies that round's events, report and prompt to `$DELEGATE_STATE/quarantine/<id>-<time>/` before removing the task, so the source can still be traced. Nothing else is kept.
+
 ### Grants: named access beyond the sandbox (`--grant NAME`)
 
 Everything a task may reach beyond the default sandbox is a **grant**: a TOML file you write in

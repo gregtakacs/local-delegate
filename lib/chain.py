@@ -295,7 +295,9 @@ def run(plan):
             note(f"{label}: {stt} — retry {tries}/{retries} in the same session")
             msg_file = STATE / tid / "chain-retry.md"
             msg_file.write_text(retry_message(rep or {}, tid, n))
-            subprocess.run([DELEGATE, "continue", tid, str(msg_file)], stdout=subprocess.DEVNULL)
+            # the plan's verify, not the one the task was started with: an edited plan takes effect
+            subprocess.run([DELEGATE, "continue", tid, str(msg_file), "--verify", s["verify"]],
+                           stdout=subprocess.DEVNULL)
         base = f"delegate/{s['name']}"
 
     # Whole-slice summary for the orchestrator's one review.
