@@ -9,7 +9,7 @@ export DELEGATE_STATE=$T/state DELEGATE_CHAIN_BIN=$T/fake-delegate
 mkdir -p $DELEGATE_STATE $T/repo/docs && git -C $T/repo init -q -b main && touch $T/repo/docs/a.md $T/repo/docs/b.md && git -C $T/repo add -A && git -C $T/repo -c user.name=t -c user.email=t@t commit -qm i
 cat > $T/fake-delegate <<'F'
 #!/bin/bash
-# fake: run SPEC --repo R --name N ... | continue ID FILE | rm ID ; statuses from $SCRIPT/<name> (one per round)
+# fake: run SPEC --repo R --name N ... | continue ID FILE | finish ID ; statuses from $SCRIPT/<name> (one per round)
 cmd=$1; shift
 if [ "$cmd" = run ]; then
   while [ $# -gt 0 ]; do case "$1" in --name) name=$2; shift 2;; --base) echo "$2" >> "$DELEGATE_STATE/bases"; shift 2;; --here) touch "$DELEGATE_STATE/saw-here"; shift;; *) shift;; esac; done
@@ -17,6 +17,13 @@ if [ "$cmd" = run ]; then
   [ -n "${EDIT:-}" ] && echo "$name" >> "$EDIT"     # in-place tests: the "worker" edits the checkout
 elif [ "$cmd" = continue ]; then id=$1; name=${id#repo-}; cp "$2" "$DELEGATE_STATE/last-retry-$name"
   [ "${3:-}" = --verify ] && printf '%s\n' "$4" >> "$DELEGATE_STATE/retry-verify-$name"
+elif [ "$cmd" = finish ]; then id=$1; name=${id#repo-}; echo "$id" >> "$DELEGATE_STATE/finished"
+  # plays `delegate finish`: the round dir already exists; write the report the dead harness owes
+  d=$DELEGATE_STATE/$id/rounds; n=$(ls $d 2>/dev/null | sort -n | tail -1); [ -n "$n" ] || exit 0
+  st=$(sed -n "${n}p" "$SCRIPT/$name"); st=${st:-done}
+  [ "$st" = no-report ] && exit 0
+  printf '{"status":"%s","verify_rc":%s}\n' "$st" "$([ "$st" = done-but-verify-failed ] && echo 1 || echo 0)" > $d/$n/report.json
+  exit 0
 else exit 0; fi
 d=$DELEGATE_STATE/$id/rounds; mkdir -p $d; n=$(( $(ls $d | wc -l) + 1 )); mkdir $d/$n
 st=$(sed -n "${n}p" "$SCRIPT/$name"); st=${st:-done}
@@ -80,5 +87,25 @@ python3 $here/lib/chain.py $T/plan.json >/dev/null 2>&1
 sed -i 's/old-check/new-check/' $T/plan.json
 python3 $here/lib/chain.py $T/plan.json >/dev/null 2>&1; rc=$?
 check "an edited plan's verify reaches the retry" '[ "$(head -1 $DELEGATE_STATE/retry-verify-a)" = old-check ] && [ "$(tail -1 $DELEGATE_STATE/retry-verify-a)" = new-check ] && [ $rc = 0 ]'
+
+# 8. a step whose last round was interrupted (its harness died before writing a report): the chain
+#    finishes that round rather than abandoning it, and goes on with the chain
+rm -rf $DELEGATE_STATE; mkdir -p $DELEGATE_STATE
+printf 'done\ndone\n' > $SCRIPT/a; printf 'done\n' > $SCRIPT/b; plan 2
+mkdir -p $DELEGATE_STATE/repo-a/rounds/2          # round 1 already accepted; round 2 has no report
+python3 $here/lib/chain.py $T/plan.json > $T/o8 2>&1; rc=$?
+check "an interrupted step is finished, not skipped" '[ $rc = 0 ] && grep -q "was interrupted" $T/o8'
+check "finish was the command run"                   '[ "$(cat $DELEGATE_STATE/finished)" = repo-a ] && [ -f $DELEGATE_STATE/repo-a/rounds/2/report.json ]'
+check "it did not start another round of that step"  '[ ! -d $DELEGATE_STATE/repo-a/rounds/3 ] && [ -d $DELEGATE_STATE/repo-b/rounds/1 ]'
+
+# 9. `delegate finish` failing (still no report) stops the chain with the command to run by hand
+rm -rf $DELEGATE_STATE; mkdir -p $DELEGATE_STATE
+printf 'done\nno-report\n' > $SCRIPT/a; printf 'done\n' > $SCRIPT/b
+mkdir -p $DELEGATE_STATE/repo-a/rounds/2
+python3 $here/lib/chain.py $T/plan.json --status > $T/s9 2>&1
+check "chain --status calls the round interrupted" 'grep -q interrupted $T/s9'
+python3 $here/lib/chain.py $T/plan.json > $T/o9 2>&1; rc=$?
+check "a round that cannot be finished stops the chain" '[ $rc = 2 ] && grep -q "no report" $T/o9 && grep -q "delegate finish repo-a" $T/o9'
+check "and the next step never starts"                  '[ ! -d $DELEGATE_STATE/repo-b ]'
 
 exit $fail

@@ -31,7 +31,9 @@ slice, one commit per round. A step is accepted only when the harness status is 
 back into the same session (verify output tail, or what went wrong) up to `retries` times.
 It stops — exit 3 — when a step is still failing, or at once on `blocked` (a decision only
 the orchestrator can make). Re-running the same command resumes from the failed step:
-fix its spec or answer its question first, then run again.
+fix its spec or answer its question first, then run again. A step whose last round was
+interrupted (its harness died before writing the report) is finished first, with
+`delegate finish`, and the chain decides on the report that produces.
 
 In place ("here": true, no "base"): every step runs `delegate run --here` in the plan's repo
 checkout itself, natively, in sequence, so the user watches the edits land live. The checkout
@@ -48,6 +50,9 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import taskstate                                                      # the task states top/list use
 
 ME = Path(__file__).resolve()
 DELEGATE = os.environ.get("DELEGATE_CHAIN_BIN") or str(ME.parent.parent / "bin" / "delegate")   # override: tests
@@ -189,13 +194,14 @@ def save_state(plan, st):
 
 
 def status(plan):
+    """One row per step, with the same states `delegate top` and `delegate list` print (so an
+    interrupted step — its harness died before the report — reads `interrupted` here too)."""
     rows = []
     for i, s in enumerate(plan["steps"], 1):
         tid = task_id(plan["repo"], s)
         n, rep = last_report(tid)
-        locked = (STATE / tid / "lock").exists()
-        st = "running" if locked else (rep or {}).get("status", "not started" if n is None else "?")
-        rows.append((i, s["name"], st, n or 0))
+        st = taskstate.state(str(STATE / tid), state_dir=str(STATE)).get("state") or "new"
+        rows.append((i, s["name"], "not started" if st == "new" else st, n or 0))
     return rows
 
 
@@ -241,6 +247,7 @@ def run(plan):
     if st.get("finished") or not st.get("steps"):
         st = {"name": plan["name"], "started": t0, "steps": {}}
     st["steps"] = st.get("steps") or {}
+    st["plan"] = plan["_path"]              # so `delegate top` can name the command that resumes it
     if here:
         common += ["--here"]
         any_started = any(last_report(task_id(plan["repo"], s))[0] is not None for s in plan["steps"])
@@ -261,6 +268,16 @@ def run(plan):
                 commit_step(plan, s, st)
             base = f"delegate/{s['name']}"
             continue
+        if n is not None and rep is None and not (STATE / tid / "lock").is_dir():
+            # The round's harness died (killed, host restarted) after the worker stopped and before
+            # the report: the work is uncommitted and unverified, and its status is unknown. Finish
+            # it the way `delegate finish` does (commit/snapshot, verify, report) and decide on that.
+            note(f"{label}: round {n} was interrupted (no report) — finishing it")
+            r = subprocess.run([DELEGATE, "finish", tid], stdout=subprocess.DEVNULL)
+            n, rep = last_report(tid)
+            if rep is None:
+                die(f"{label}: finishing round {n} produced no report (exit {r.returncode}): "
+                    f"`delegate finish {tid}` (then `delegate report {tid}`)", 2)
         hard = ["--hard"] if s.get("hard") else []
         if n is None:
             note(f"{label}: starting " + ("in place" if here else f"from {base}"))

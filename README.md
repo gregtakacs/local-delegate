@@ -99,6 +99,13 @@ git -C ~/src/my-app merge --squash delegate/health && git -C ~/src/my-app commit
 delegate rm my-app-health --delete-branch
 ```
 
+To watch it, or all of them, in this terminal: `delegate top` (Ctrl-C quits, `--once` for one
+frame, `delegate top ID` for one task's recent actions). It nests the work under the Claude lead
+that started it, with the tokens each side spent. Chain and round states come from the same
+files, so `top`, `list` and `chain --status` cannot disagree. A round whose harness died before it
+wrote its report shows as **interrupted** and `top` prints the command that picks it back up.
+No dashboard, no network.
+
 With Claude Code you don't type any of this. Say what you want built: the installed skill makes
 delegating the **default for anything bigger than a small edit**. Claude tells you in one line when
 it hands work to the local model, and you can say no.
