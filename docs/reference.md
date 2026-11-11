@@ -93,6 +93,7 @@ delegate diff app-add-handles                  # diffstat since base
 delegate diff app-add-handles -- src/auth.ts   # content of chosen files
 delegate exec app-add-handles -- npx prisma migrate status
 delegate continue app-add-handles feedback.md  # next round, same session
+delegate top                                   # every round, live, in this terminal (Ctrl-C quits)
 git -C ~/src/app merge --squash delegate/add-handles && git -C ~/src/app commit
 delegate rm app-add-handles --delete-branch
 ```
@@ -112,6 +113,8 @@ delegate rm app-add-handles --delete-branch
 `delegate peek ID` prints a compact snapshot of the current round (state, steps, tool calls,
 tokens, the worker's plan, the last few actions). It's about 250 tokens, compared with the raw
 event log's tens of thousands, so an orchestrator can answer "how's it going?" cheaply.
+`delegate top ID` is the same thing refreshed, and `delegate top` is every task at once
+(see *Watching locally* below).
 
 Follow-ups: `delegate continue ID -m "first item" -m "second item"` (each `-m` is one numbered
 item), or a file, or `-` for stdin. `delegate stop ID` aborts a running round. The worker's
@@ -206,6 +209,32 @@ exit 3 on `blocked` or when a step keeps failing, and re-running resumes from th
 `--status` shows where it is and `--clean` removes the chain's tasks. The `delegate-lead`
 Claude Code agent (`claude/agents/`, installed by `install.sh`) uses this: it plans the
 slice once, runs the chain, and checks the result once.
+
+### Watching locally: `delegate top`
+
+`delegate top` is the same view with no server: it reads the state dirs and refreshes in place
+(Ctrl-C quits, 2 s by default, `--interval S`). No lock, no writes, nothing sent anywhere.
+
+- **Claude leads** first, when the Claude Code hook is installed: each agent's phase, how long,
+  its own tokens, and the worker tokens of the tasks its commands started. Read from
+  `$XDG_CACHE_HOME/claude-agent-progress`, so a lead shows even while its worker runs on a worker host.
+- **Chains** group the steps of each chain that has tasks here, with the plan to re-run.
+- **Tasks**: state, id, round, elapsed, `steps/tools(failures)`, tokens out, the worker's current
+  todo item and its last action. Running and verifying sort first.
+- Then the counts, and one line per **interrupted** round: the round whose harness died between the
+  worker stopping and its report — `delegate finish ID`, or `delegate chain PLAN` for a chain step.
+
+`--once` prints one frame and exits (that is also what happens when stdout isn't a terminal, so
+piping it to a log works); `--all` includes tasks finished more than 24 h ago; `--color` forces
+colour onto a pipe, and `NO_COLOR` turns it off wherever `--color` does the opposite.
+`delegate top ID` shows that one task: `delegate peek` plus its state, chain and lead.
+
+The states come from `lib/taskstate.py`, which `delegate list`, `delegate chain` and `top` all
+read: **running** (a round's lock exists and it has no report yet), **verifying** (its `verify.log`
+is newer than its events — `delegate verify` and `exec` land here too), **interrupted**, **new**, or
+the status in its `report.json`. The numbers of a round still in flight are parsed from its
+`events.jsonl` with the same code the dashboard reporter uses; a finished round's come from its
+`report.json`, so a restarted machine reports the same thing it did before.
 
 ### Watching live rounds
 
@@ -359,6 +388,7 @@ runs them against any revision of the worker rules. See [evals/README.md](../eva
 ```
 bin/delegate                  the CLI (bash)
 lib/report.py                 events.jsonl + git + verify -> report.md / report.json
+lib/taskstate.py              one read-only task state -> `top`, `list`, `chain` (and a CLI)
 lib/probe.py                  tool-calling probe used by doctor
 lib/render-opencode-config.py DELEGATE_* env -> opencode.json (one provider, key by file)
 opencode/                     worker rules, UI-verification rules, plugins (mounted live into
