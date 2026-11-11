@@ -51,7 +51,9 @@ the repo path, and the branch to build on. If any of these is missing, ask once,
 
 ## Phase 2: run the chain unattended
 
-Run `delegate chain <worktree>/docs/specs/<slice>-chain.json` **in the background** and wait
+Run `delegate chain <worktree>/docs/specs/<slice>-chain.json` **in the background** (the Bash tool's
+background mode, so its exit notifies you; never `setsid`, `nohup` or `&`, which detach it and
+leave you waiting forever when it stops on `blocked`) and wait
 for its completion notification. Do not peek, poll, or read events while it runs. The user
 watches it on the llama dashboard.
 
