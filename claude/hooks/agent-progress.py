@@ -114,6 +114,17 @@ def slugify(v):
     return v[:48]
 
 
+def effective_cwd(prefix, cwd):
+    """The directory a command is in by the time it reaches a point: the hook's cwd, moved by
+    every `cd DIR` before that point (leads write `cd WORKTREE && delegate chain plan.json`)."""
+    here = cwd or "."
+    for m in re.finditer(r"(?:^|[\s;&|(])cd\s+(\"[^\"]*\"|'[^']*'|[^\s;&|)]+)", prefix):
+        d = m.group(1).strip("\"'")
+        d = os.path.expanduser(d)
+        here = d if os.path.isabs(d) else os.path.normpath(os.path.join(here, d))
+    return here
+
+
 def delegate_children(cmd, cwd):
     """The delegate tasks a Bash command starts or continues, as dashboard keys: task ids
     ("task:<id>") and chains ("chain:<plan name>", each of whose steps reports the chain).
@@ -122,6 +133,7 @@ def delegate_children(cmd, cwd):
     out = []
     for m in re.finditer(r"(?:^|[\s;&|(])delegate\s+(run|continue|chain)\s+([^;&|]*)", cmd):
         verb = m.group(1)
+        cwd_here = effective_cwd(cmd[:m.start()], cwd)
         try:
             args = shlex.split(m.group(2))
         except ValueError:
@@ -132,10 +144,10 @@ def delegate_children(cmd, cwd):
         elif verb == "run":
             opt = {args[i]: args[i + 1] for i in range(len(args) - 1) if args[i] in ("--name", "--repo")}
             if opt.get("--name"):
-                repo = opt.get("--repo") or cwd or "."
+                repo = opt.get("--repo") or cwd_here or "."
                 repo = os.path.expanduser(repo)
                 if not os.path.isabs(repo):
-                    repo = os.path.join(cwd or ".", repo)
+                    repo = os.path.join(cwd_here or ".", repo)
                 try:
                     import subprocess
                     top = subprocess.run(["git", "-C", repo, "rev-parse", "--show-toplevel"], capture_output=True,
@@ -146,7 +158,7 @@ def delegate_children(cmd, cwd):
         elif verb == "chain" and args and not args[0].startswith("-"):
             plan = Path(os.path.expanduser(args[0]))
             if not plan.is_absolute():
-                plan = Path(cwd or ".") / plan
+                plan = Path(cwd_here or ".") / plan
             try:
                 name = json.loads(plan.read_text()).get("name")
                 if name:
