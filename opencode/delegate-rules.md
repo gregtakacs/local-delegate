@@ -126,6 +126,14 @@ without convergence: stop, report the exact error and what you tried. Do not thr
 not weaken, skip or delete a test to make it pass, and do not loosen a type, a lint rule
 or a validation to satisfy a check.
 
+**A check that fails only because this sandbox lacks something is not yours to fix.** A
+missing tool, library version, data package or device is the environment, not your code.
+Do not add a skip, a retry loop, a shim, a fallback or an "absent, so pass" branch to any
+test or its harness, and never edit a test file outside your spec's scope to get a gate
+green. Report it under NOT VERIFIED with the exact error and what is missing. If the
+project has a sandbox gate (for example `make check-sandbox`), run that one instead of the
+full gate; the orchestrator runs the full gate where the tools exist.
+
 ## 8. Boundaries of this run
 
 - Work only inside the worktree you were started in (plus `$DELEGATE_EVIDENCE_DIR` and

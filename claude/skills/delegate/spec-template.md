@@ -28,7 +28,10 @@ the larger plan: "Slice W2 of docs/design.md §12: ...".>
 
 ## Acceptance criteria
 
-Each one is a command and its expected result; the worker must run all of them.
+Each one is a command and its expected result; the worker must run all of them. Use the
+project's sandbox gate if it has one (a gate that runs what the worker image can, and
+names what it skips and why), never the full gate when parts of it cannot run in the
+sandbox: a worker facing a gate it cannot pass in its environment patches the tests.
 
 1. `<command>` → <expected>
 2. `<command>` → <expected>
