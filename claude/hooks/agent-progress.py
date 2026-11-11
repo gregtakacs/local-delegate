@@ -17,6 +17,8 @@ import fcntl
 import hashlib
 import json
 import os
+import re
+import shlex
 import socket
 import sys
 import time
@@ -104,6 +106,81 @@ def agent_prompt(transcript_path, agent_id):
     except (OSError, ValueError, TypeError):
         pass
     return ""
+
+
+def slugify(v):
+    """bin/delegate's slugify: the task id is <repo dir>-<slug of --name>."""
+    v = re.sub(r"[^a-z0-9._-]+", "-", str(v).lower()).strip("-")
+    return v[:48]
+
+
+def delegate_children(cmd, cwd):
+    """The delegate tasks a Bash command starts or continues, as dashboard keys: task ids
+    ("task:<id>") and chains ("chain:<plan name>", each of whose steps reports the chain).
+    Subagents get no agent id in their environment, so the lead is linked to its worker
+    rounds from its own commands instead."""
+    out = []
+    for m in re.finditer(r"(?:^|[\s;&|(])delegate\s+(run|continue|chain)\s+([^;&|]*)", cmd):
+        verb = m.group(1)
+        try:
+            args = shlex.split(m.group(2))
+        except ValueError:
+            args = m.group(2).split()
+        if verb == "continue":
+            if args and not args[0].startswith("-"):
+                out.append("task:" + args[0])
+        elif verb == "run":
+            opt = {args[i]: args[i + 1] for i in range(len(args) - 1) if args[i] in ("--name", "--repo")}
+            if opt.get("--name"):
+                repo = opt.get("--repo") or cwd or "."
+                repo = os.path.expanduser(repo)
+                if not os.path.isabs(repo):
+                    repo = os.path.join(cwd or ".", repo)
+                try:
+                    import subprocess
+                    top = subprocess.run(["git", "-C", repo, "rev-parse", "--show-toplevel"], capture_output=True,
+                                         text=True, timeout=3).stdout.strip() or repo
+                except Exception:  # noqa: BLE001
+                    top = repo
+                out.append(f"task:{Path(top).name}-{slugify(opt['--name'])}")
+        elif verb == "chain" and args and not args[0].startswith("-"):
+            plan = Path(os.path.expanduser(args[0]))
+            if not plan.is_absolute():
+                plan = Path(cwd or ".") / plan
+            try:
+                name = json.loads(plan.read_text()).get("name")
+                if name:
+                    out.append("chain:" + str(name)[:120])
+            except (OSError, ValueError, AttributeError):
+                pass
+    return out
+
+
+def agent_usage(transcript_path, agent_id):
+    """The agent's own token use so far, summed from its transcript (each API message once)."""
+    tot = {"input": 0, "cache_read": 0, "cache_write": 0, "output": 0}
+    seen = set()
+    try:
+        t = Path(transcript_path).with_suffix("") / "subagents" / f"agent-{agent_id}.jsonl"
+        with open(t, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if '"usage"' not in line:
+                    continue
+                try:
+                    msg = (json.loads(line).get("message") or {})
+                except ValueError:
+                    continue
+                u, mid = msg.get("usage"), msg.get("id")
+                if not isinstance(u, dict) or not mid or mid in seen:
+                    continue
+                seen.add(mid)
+                tot["input"] += int(u.get("input_tokens") or 0)
+                tot["cache_read"] += int(u.get("cache_read_input_tokens") or 0)
+                tot["cache_write"] += int(u.get("cache_creation_input_tokens") or 0)
+                tot["output"] += int(u.get("output_tokens") or 0)
+    except (OSError, TypeError):
+        return None
+    return tot
 
 
 def post(cfg, body):
@@ -198,7 +275,10 @@ def main():
                     st["recent"][-1]["text"] = ("report: " + msg)[:300]
             else:
                 st["handed_back"] = False          # working again after a hand-back: a new stretch
-            if tool == "Bash" and "delegate " in txt and any(f"delegate {v}" in txt for v in ("run", "continue")):
+            if tool == "Bash" and "delegate " in txt:
+                kids = delegate_children(str((d.get("tool_input") or {}).get("command") or ""), d.get("cwd") or "")
+                st["children"] = list(dict.fromkeys((st.get("children") or []) + kids))[-200:]
+            if tool == "Bash" and "delegate " in txt and any(f"delegate {v}" in txt for v in ("run", "continue", "chain")):
                 st["phase"] = "delegating"
             elif tool == "Bash" and "delegate peek" in txt:
                 st["phase"] = "checking a round"
@@ -236,7 +316,11 @@ def main():
         "steps": None, "tool_calls": st["tool_calls"], "tool_errors": st["tool_errors"],
         "todos": st["todos"], "recent": st["recent"], "last_text": st.get("last_text", ""),
         "final": final, "status": "finished" if final else None,   # waiting = live, no dismiss
+        "children": st.get("children") or [],
     }
+    u = agent_usage(d.get("transcript_path"), agent)
+    if u:
+        body["usage"] = u
     if not st.get("prompt_sent"):
         p = agent_prompt(d.get("transcript_path"), agent)
         if p:

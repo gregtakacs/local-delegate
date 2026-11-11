@@ -63,6 +63,7 @@ class State:
     def __init__(self, worktree):
         self.worktree = worktree
         self.steps = self.tool_calls = self.tool_errors = self.out_tokens = self.ctx = 0
+        self.in_tokens = self.cached_tokens = 0     # the round's whole input: fresh and cache hits
         self.todos = []
         self.recent = []
         self.last_text = ""
@@ -96,6 +97,8 @@ class State:
             self.steps += 1
             tk = p.get("tokens") or {}
             self.out_tokens += int(tk.get("output") or 0)
+            self.in_tokens += int(tk.get("input") or 0)
+            self.cached_tokens += int((tk.get("cache") or {}).get("read") or 0)
             self.ctx = int(tk.get("input") or 0) + int((tk.get("cache") or {}).get("read") or 0)
         elif t == "error":
             msg = " ".join(str(((e.get("error") or {}).get("data") or {}).get("message") or e.get("error")).split())
@@ -156,7 +159,11 @@ def main():
                 "model": a.model, "host": a.host, "phase": phase or "worker",
                 "started_at": a.started, "steps": st.steps, "tool_calls": st.tool_calls,
                 "tool_errors": st.tool_errors, "output_tokens": st.out_tokens,
-                "context_tokens": st.ctx, "todos": st.todos, "recent": st.recent[-RECENT:],
+                "context_tokens": st.ctx, "input_tokens": st.in_tokens, "cached_tokens": st.cached_tokens,
+                # the agent that started this round (DELEGATE_PARENT, set for a Claude agent's
+                # commands), so the dashboard can total a lead's worker rounds on its card
+                "parent": os.environ.get("DELEGATE_PARENT", "")[:120],
+                "todos": st.todos, "recent": st.recent[-RECENT:],
                 "last_text": st.last_text, "nudges": {k: v for k, v in nudges.items() if v},
                 "final": final, "status": status,
                 # how the round runs, for the dashboard's mode chips
@@ -225,6 +232,23 @@ def main():
             post()
             last_post = time.time()
         time.sleep(0.5)
+
+
+def gone(argv):
+    """`delegate rm` ran: tell stackd the task is gone, so its card leaves the board. A finished
+    round otherwise stays on the board while its task exists (or until it is dismissed)."""
+    ap = argparse.ArgumentParser(prog="progress.py gone")
+    for k in ("url", "key-file", "task"):
+        ap.add_argument("--" + k, default="")
+    a = ap.parse_args(argv)
+    try:
+        key = open(a.key_file).read().strip()
+        req = urllib.request.Request(a.url.rstrip("/") + "/agents/progress", method="POST",
+                                     data=json.dumps({"task": a.task, "removed": True}).encode(),
+                                     headers={"Authorization": "Bearer " + key, "content-type": "application/json"})
+        urllib.request.urlopen(req, timeout=5).read()
+    except Exception as e:  # noqa: BLE001 — display-only
+        print(f"progress: cannot report the removal: {e}", file=sys.stderr)
 
 
 def peek(argv):
@@ -306,6 +330,9 @@ def peek(argv):
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "gone":
+        gone(sys.argv[2:])
+        sys.exit(0)
     if len(sys.argv) > 1 and sys.argv[1] == "peek":
         peek(sys.argv[2:])
     else:
