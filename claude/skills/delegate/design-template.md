@@ -41,6 +41,9 @@ what must not change. Write each one so it can go into the step specs word for w
    steps. Each step is one coherent change, under ~1500 lines and ~90 minutes.
 3. `docs/specs/<slice>-chain.json`:
    `{"name":"<slice>","repo":"../..","base":"<BASE>","retries":2,"steps":[…]}`.
+   - A step gets `"hard": true` when it has real algorithmic content **or** guards a security
+     boundary: validating untrusted input, building commands or paths from it, auth or tokens,
+     sandboxing, permission checks, crypto. Every other step gets `"hard": false`.
    - Every verify runs the real toolchain and the repo's full gate, plus the step's own tests.
      Use `set -o pipefail` when it pipes.
    - A plan for a different repo uses an absolute `"repo"` and bare spec file names.
