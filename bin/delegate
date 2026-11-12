@@ -38,6 +38,8 @@ expand() { local p=$1; case "$p" in "~"|"~/"*) p="$HOME${p#\~}";; esac; printf '
 : "${DELEGATE_REASONING:=1}"
 : "${DELEGATE_RUNNER:=docker}"
 : "${DELEGATE_IMAGE:=delegate-worker:local}"
+: "${DELEGATE_IMAGE_STALE:=error}"      # error | warn | rebuild — what an image built from another tree costs you
+: "${DELEGATE_IMAGE_ALLOW_STALE:=0}"    # 1: keep this image whatever the stamp says (deliberate hot-patch)
 : "${DELEGATE_WORKTREES:=$HOME/delegate-worktrees}"
 : "${DELEGATE_STATE:=${XDG_STATE_HOME:-$HOME/.local/state}/delegate}"
 : "${DELEGATE_CACHE:=${XDG_CACHE_HOME:-$HOME/.cache}/delegate}"   # caches shared by every task
@@ -793,6 +795,7 @@ cmd_run() {
   [ -z "$service" ] || [ "$DELEGATE_RUNNER" = docker ] || die "--service needs DELEGATE_RUNNER=docker"
   case "$egress" in filtered|open) ;; *) die "--egress must be filtered or open" ;; esac
   need_config
+  check_image_fresh
   # old tasks go by themselves: anything idle DELEGATE_PRUNE_DAYS days (0 turns it off)
   [ "${DELEGATE_PRUNE_DAYS:-0}" -gt 0 ] 2>/dev/null && cmd_prune --quiet
   if [ "$github" = 1 ]; then
@@ -973,6 +976,7 @@ cmd_continue() {
   [ -n "$fb" ] || [ ${#msgs[@]} -gt 0 ] || die "continue: give a feedback file, - (stdin), or -m \"text\""
   [ -z "$fb" ] || [ "$fb" = - ] || [ -r "$fb" ] || die "continue: cannot read $fb"
   need_config
+  check_image_fresh
   load_task "$id"
   [ -d "$WORKTREE" ] || die "worktree $WORKTREE is gone"
   if [ "$verify_set" = 1 ]; then
@@ -1239,10 +1243,50 @@ cmd_rm() {
   note "removed $id"
 }
 
+# -- image freshness ------------------------------------------------------------
+# The image IS part of the toolchain contract, and a tag name says nothing about
+# which tree it was built from: an old image under a newer tree silently keeps the
+# bug the last rebuild fixed (2026-11-12: a bookworm-based tag, git 2.39.5, no
+# --attr-source — every git call of the codehub D2 suite failed in the sandbox and
+# passed on the host, and it took three paid model rounds to see it). `delegate
+# build` stamps the tag with a hash over every file the Dockerfiles read; run and
+# continue compare one `docker image inspect` against the current tree BEFORE the
+# worker wakes, and doctor reports the verdict.
+context_stamp() { # the content hash of everything both worker images are built from
+  ( cd "$DELEGATE_HOME" &&
+    { find worker opencode lib/render-opencode-config.py -type f -print0 |
+        LC_ALL=C sort -z | xargs -0 sha256sum; } | sha256sum | cut -c1-64 )
+}
+image_stamp() { # IMAGE — the stamp a tag carries, "" when it carries none
+  docker image inspect -f '{{range $k, $v := .Config.Labels}}{{if eq $k "io.delegate.stamp"}}{{$v}}{{end}}{{end}}' "$1" 2>/dev/null | head -1
+}
+image_freshness() { # IMAGE — fresh | stale | unstamped
+  local want have
+  want=$(context_stamp); have=$(image_stamp "$1")
+  if [ -z "$have" ]; then echo unstamped
+  elif [ "$have" = "$want" ]; then echo fresh
+  else echo stale
+  fi
+}
+check_image_fresh() { # docker runner only; DELEGATE_IMAGE_STALE=error|warn|rebuild
+  [ "$DELEGATE_RUNNER" = docker ] || return 0
+  [ "$DELEGATE_IMAGE_ALLOW_STALE" = 1 ] && return 0
+  docker image inspect "$DELEGATE_IMAGE" >/dev/null 2>&1 || die "image $DELEGATE_IMAGE not present — run: delegate build"
+  local fresh; fresh=$(image_freshness "$DELEGATE_IMAGE")
+  [ "$fresh" = fresh ] && return 0
+  case "$DELEGATE_IMAGE_STALE" in
+    rebuild) note "image $DELEGATE_IMAGE is $fresh for this tree — rebuilding"; cmd_build
+             [ "$(image_freshness "$DELEGATE_IMAGE")" = fresh ] || die "image still $fresh after rebuild" ;;
+    warn)    note "image $DELEGATE_IMAGE is $fresh for this tree: run 'delegate build' (DELEGATE_IMAGE_STALE=error refuses, DELEGATE_IMAGE_ALLOW_STALE=1 keeps it)" ;;
+    *)       die "image $DELEGATE_IMAGE is $fresh for this tree: run 'delegate build' (DELEGATE_IMAGE_STALE=warn downgrades, DELEGATE_IMAGE_ALLOW_STALE=1 skips this check)" ;;
+  esac
+}
+
 cmd_build() {
   command -v docker >/dev/null || die "docker is not installed"
-  docker build -t "$DELEGATE_IMAGE" -f "$DELEGATE_HOME/worker/Dockerfile" "$@" "$DELEGATE_HOME"
-  docker build -t "$DELEGATE_EGRESS_IMAGE" -f "$DELEGATE_HOME/worker/egress.Dockerfile" "$DELEGATE_HOME"
+  local stamp; stamp=$(context_stamp)
+  docker build --label "io.delegate.stamp=$stamp" -t "$DELEGATE_IMAGE" -f "$DELEGATE_HOME/worker/Dockerfile" "$@" "$DELEGATE_HOME"
+  docker build --label "io.delegate.stamp=$stamp" -t "$DELEGATE_EGRESS_IMAGE" -f "$DELEGATE_HOME/worker/egress.Dockerfile" "$DELEGATE_HOME"
   # a running proxy on the old image is replaced on the next task (its config label changes)
   local v
   for v in delegate-cache delegate-npm; do
@@ -1261,7 +1305,11 @@ cmd_doctor() {
   need_config
   if [ "$DELEGATE_RUNNER" = docker ]; then
     if docker image inspect "$DELEGATE_IMAGE" >/dev/null 2>&1; then
-      echo "image:    $DELEGATE_IMAGE ok ($(docker run --rm --entrypoint opencode "$DELEGATE_IMAGE" --version) opencode)"
+      local fresh; fresh=$(image_freshness "$DELEGATE_IMAGE")
+      echo "image:    $DELEGATE_IMAGE ok ($(docker run --rm --entrypoint opencode "$DELEGATE_IMAGE" --version) opencode, $fresh)"
+      if [ "$fresh" != fresh ]; then
+        echo "          built from a different tree than $DELEGATE_HOME — run: delegate build"; ok=0
+      fi
       docker run --rm --entrypoint delegate-shot "$DELEGATE_IMAGE" --probe | sed 's/^/          /'
     else
       echo "image:    $DELEGATE_IMAGE MISSING — run: delegate build"; ok=0
