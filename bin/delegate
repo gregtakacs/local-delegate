@@ -490,7 +490,7 @@ run_worker_docker() {
     -e DELEGATE_MODEL="$MODEL" -e DELEGATE_MODEL_HARD="$DELEGATE_MODEL_HARD" \
     -e DELEGATE_CONTEXT="$DELEGATE_CONTEXT" -e DELEGATE_OUTPUT="$DELEGATE_OUTPUT" \
     -e DELEGATE_VISION="$DELEGATE_VISION" -e DELEGATE_REASONING="$DELEGATE_REASONING" \
-    -e DELEGATE_EVIDENCE_DIR="$evidence" -e DELEGATE_TASK="$ID" \
+    -e DELEGATE_EVIDENCE_DIR="$evidence" -e DELEGATE_TASK="$ID" -e DELEGATE_WORKTREE="$WORKTREE" \
     "${args[@]}" "${extra[@]}" -w "$WORKTREE" "$DELEGATE_IMAGE" "$@"
 }
 
@@ -504,7 +504,7 @@ run_worker_native() {
   DELEGATE_API_KEY_FILE="$DELEGATE_API_KEY_FILE" DELEGATE_MODEL_HARD="$DELEGATE_MODEL_HARD" \
   DELEGATE_CONTEXT="$DELEGATE_CONTEXT" DELEGATE_OUTPUT="$DELEGATE_OUTPUT" \
   DELEGATE_VISION="$DELEGATE_VISION" DELEGATE_REASONING="$DELEGATE_REASONING" \
-  DELEGATE_READ_PATHS="$(grant_reads)" \
+  DELEGATE_READ_PATHS="$(grant_reads)" DELEGATE_WORKTREE="$WORKTREE" \
     python3 "$DELEGATE_HOME/lib/render-opencode-config.py" "$cfg" > "$cfg/opencode.json"
   # HOME is per task so opencode's config, session store and plugins are isolated from your
   # own opencode setup; npm keeps your real cache so installs stay fast. Caches ($HOME/.cache,

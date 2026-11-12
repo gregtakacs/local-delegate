@@ -42,6 +42,25 @@ def model_entry(name):
     return m
 
 
+worktree = env("DELEGATE_WORKTREE") or os.getcwd()
+
+
+def edit_denies(path):
+    """`edit` deny patterns for one directory, in every spelling opencode may match.
+
+    opencode matches `edit` rules against the file path RELATIVE to the worktree
+    (`../../.config/opencode/rules/x.md`), not the absolute path, so an absolute pattern alone
+    never matches and the deny is silently a no-op. (`external_directory` rules, by contrast,
+    are matched against absolute paths.) Emit both forms.
+    """
+    path = os.path.realpath(path)
+    pats = [f"{path}/**"]
+    rel = os.path.relpath(path, os.path.realpath(worktree))
+    if rel != ".":
+        pats.append(f"{rel}/**")
+    return pats
+
+
 external = {"*": "deny", "/tmp/**": "allow", f"{cfg_dir}/**": "allow"}
 if evidence:
     external[f"{evidence}/**"] = "allow"
@@ -69,7 +88,7 @@ config = {
         # file tools. The real boundary is the container (docker runner) — bash is not
         # path-scoped by these rules.
         "external_directory": external,
-        "edit": {f"{cfg_dir}/**": "deny", **{f"{r}/**": "deny" for r in reads}},
+        "edit": {p: "deny" for d in [cfg_dir, *reads] for p in edit_denies(d)},
         "bash": "allow",
         "webfetch": "allow",
         "doom_loop": "allow",
