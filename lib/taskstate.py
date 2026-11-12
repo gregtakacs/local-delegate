@@ -37,6 +37,7 @@ RES = "\033[0m"
 CODE = {"running": "\033[32m", "verifying": "\033[36m", "interrupted": "\033[31m", "aborted": "\033[31m",
         "worker-error": "\033[31m", "timeout": "\033[31m", "truncated": "\033[31m", "no-status": "\033[33m",
         "partial": "\033[33m", "blocked": "\033[33m", "done-but-verify-failed": "\033[33m",
+        "accepted": "\033[32m",
         "done": "\033[2m", "new": "\033[2m", "stale?": "\033[33m", "finished": "\033[2m"}
 
 
@@ -284,6 +285,15 @@ def state(task_dir, now=None, state_dir=None):
             # just started. Something is running on this task, so don't show it as finished.
             if locked and _mtime(d / "lock") > _mtime(rj):
                 sub = "verifying"
+
+    # `delegate accept`: the delegator overrode a failed outcome (after reproducing and
+    # reproducing-away, e.g. a stale-image verify failure), or landed the work. The round's own
+    # report keeps the failure — evidence stays as written; the task shows accepted instead.
+    # The overlay stops the moment the state it accepted has moved on (a newer round, a retry).
+    if not locked:
+        acc = read_json(d / "accept.json")
+        if acc and acc.get("round") == n and acc.get("status_before") == status:
+            status, sub = "accepted", ""
 
     worktree = meta.get("WORKTREE") or ""
     live = rep is None and n > 0                        # no report yet: the events are the truth
