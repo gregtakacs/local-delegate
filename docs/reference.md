@@ -206,7 +206,12 @@ one after another, each on the previous step's branch. A step is accepted only w
 says done **and** its verify command passes. Otherwise the failure (the verify output tail, or
 what went wrong) goes back into the same session, up to `retries` times. The chain stops with
 exit 3 on `blocked` or when a step keeps failing, and re-running resumes from that step.
-`--status` shows where it is and `--clean` removes the chain's tasks. The `delegate-lead`
+`--status` shows where it is and `--clean` removes the chain's tasks. `delegate wait PLAN.json`
+(or `delegate chain PLAN.json --wait`) blocks its own process until the chain stops: its runner,
+the pid each run records in the chain's state, is gone and no step is running. It exits 0 when
+every step is done, 3 when one is blocked or failed, and 124 after `--timeout S`. It never
+searches process names, so it cannot mistake itself for the chain. Run it, like the chain, as a
+background job whose exit you are told about, never in the foreground of an agent's session. The `delegate-lead`
 Claude Code agent (`claude/agents/`, installed by `install.sh`) uses this: it plans the
 slice once, runs the chain, and checks the result once.
 

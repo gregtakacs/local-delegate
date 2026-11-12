@@ -108,4 +108,37 @@ python3 $here/lib/chain.py $T/plan.json > $T/o9 2>&1; rc=$?
 check "a round that cannot be finished stops the chain" '[ $rc = 2 ] && grep -q "no report" $T/o9 && grep -q "delegate finish repo-a" $T/o9'
 check "and the next step never starts"                  '[ ! -d $DELEGATE_STATE/repo-b ]'
 
+# 10. --wait: returns 0 on a finished chain, 3 on a blocked one, and holds while the runner lives
+rm -rf $DELEGATE_STATE; mkdir -p $DELEGATE_STATE
+printf 'done\n' > $SCRIPT/a; printf 'done\n' > $SCRIPT/b; plan 2
+python3 $here/lib/chain.py $T/plan.json >/dev/null 2>&1
+python3 $here/lib/chain.py $T/plan.json --wait --interval 0.1 > $T/w10 2>&1; rc=$?
+check "wait on a finished chain exits 0 with the status" '[ $rc = 0 ] && grep -q "chain t" $T/w10'
+check "the run recorded its pid for wait"               'grep -q pid $DELEGATE_STATE/chains/t.json'
+rm -rf $DELEGATE_STATE; mkdir -p $DELEGATE_STATE
+printf 'blocked\n' > $SCRIPT/a
+python3 $here/lib/chain.py $T/plan.json >/dev/null 2>&1
+python3 $here/lib/chain.py $T/plan.json --wait --interval 0.1 >/dev/null 2>&1; rc=$?
+check "wait on a blocked chain exits 3" '[ $rc = 3 ]'
+# a live runner (a process whose command line names chain.py) holds wait until its timeout
+cp $here/lib/chain.py $T/chain.py; ( exec -a python3 python3 -c 'import time; time.sleep(30)' $T/chain.py ) & live=$!
+python3 - "$DELEGATE_STATE/chains/t.json" "$live" <<'P'
+import json, sys
+p, pid = sys.argv[1], int(sys.argv[2]); d = json.load(open(p)); d["pid"] = pid; json.dump(d, open(p, "w"))
+P
+python3 $here/lib/chain.py $T/plan.json --wait --interval 0.1 --timeout 0.5 >/dev/null 2>&1; rc=$?
+check "a live runner holds wait until its timeout (124)" '[ $rc = 124 ]'
+kill $live 2>/dev/null; wait $live 2>/dev/null
+python3 $here/lib/chain.py $T/plan.json --wait --interval 0.1 --timeout 5 >/dev/null 2>&1; rc=$?
+check "once the runner is gone, wait returns the chain's state" '[ $rc = 3 ]'
+# a pid reused by an unrelated process is not a runner
+sleep 30 & other=$!
+python3 - "$DELEGATE_STATE/chains/t.json" "$other" <<'P'
+import json, sys
+p, pid = sys.argv[1], int(sys.argv[2]); d = json.load(open(p)); d["pid"] = pid; json.dump(d, open(p, "w"))
+P
+python3 $here/lib/chain.py $T/plan.json --wait --interval 0.1 --timeout 2 >/dev/null 2>&1; rc=$?
+check "a reused pid (not chain.py) does not hold wait" '[ $rc = 3 ]'
+kill $other 2>/dev/null; wait $other 2>/dev/null
+
 exit $fail

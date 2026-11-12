@@ -90,8 +90,16 @@ and runs the chain itself.
   it to the design branch.
 
 **Phase 3: run the chains.**
-- Start `delegate chain PLAN.json` in the background, one per slice. Independent slices run in
-  parallel, with at most ~3 worker tasks on one GPU across all chains.
+- Start `delegate chain PLAN.json` as a **tracked background task** (the Bash tool's background
+  mode), one per slice, so the session is told the moment it exits. Never with a shell `&` inside a
+  foreground command: nothing tracks that, and the chain can finish unseen for hours. Independent
+  slices run in parallel, with at most ~3 worker tasks on one GPU across all chains.
+- **Resuming** after answering a step (`delegate continue … ; delegate chain …`) is the same: one
+  tracked background task. If a chain is already running untracked, start `delegate wait PLAN.json`
+  as a tracked background task: it blocks only its own process until the chain stops (exit 0 all
+  done, 3 blocked or failed, 124 on `--timeout`). Never run `delegate wait` in the foreground of a
+  conversation, and never hand-roll a watcher with `pgrep -f '<text>'`: it matches its own command
+  line and never returns.
 - Base each chain on the design branch, so the `Plan:` commit travels with the slice.
 - Steps that need a special toolchain run with `DELEGATE_IMAGE=<image>` exported.
 - Don't watch. You act on the end-of-chain report.

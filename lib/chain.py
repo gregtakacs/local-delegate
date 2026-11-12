@@ -4,6 +4,16 @@
   delegate chain PLAN.json            run (or resume) the chain
   delegate chain PLAN.json --status   where the chain is, without running anything
   delegate chain PLAN.json --clean    remove the chain's tasks (worktrees, sidecars; branches kept)
+  delegate chain PLAN.json --wait [--timeout S] [--interval S]
+  delegate wait  PLAN.json [...]      the same: block THIS process until the chain stops
+
+`--wait` returns when nothing of the chain is running: its runner (the pid a run records in
+the chain's state) is gone and no step is running, verifying or committing. Exit 0 when every
+step is done; 3 when one is blocked, partial, failed or interrupted (the status says which);
+124 when --timeout passes first. It watches that one pid and the steps' own state, never a
+process-name search (which matches the watcher's own command line). It blocks only its own
+process: an orchestrating session starts it as a tracked background task and is told when it
+exits; it never runs it in the foreground of a conversation.
 
 PLAN.json (written by the orchestrator, normally next to the specs):
   {
@@ -248,6 +258,8 @@ def run(plan):
         st = {"name": plan["name"], "started": t0, "steps": {}}
     st["steps"] = st.get("steps") or {}
     st["plan"] = plan["_path"]              # so `delegate top` can name the command that resumes it
+    st["pid"] = os.getpid()                 # so `delegate wait` can tell a live runner from a dead one
+    save_state(plan, st)
     if here:
         common += ["--here"]
         any_started = any(last_report(task_id(plan["repo"], s))[0] is not None for s in plan["steps"])
@@ -363,6 +375,49 @@ def clean(plan):
         pass
 
 
+ACTIVE = ("running", "verifying", "committing")
+
+
+def runner_alive(plan):
+    """True while the pid the last run recorded is still a live process."""
+    pid = (load_state(plan) or {}).get("pid")
+    if not pid:
+        return False
+    try:
+        os.kill(int(pid), 0)
+    except (OSError, ValueError):
+        return False
+    try:                                    # a reused pid is not our runner (Linux; elsewhere trust kill)
+        cmd = Path("/proc/%d/cmdline" % int(pid)).read_bytes().replace(b"\0", b" ")
+        return b"chain.py" in cmd
+    except OSError:
+        return True
+
+
+def wait(plan, timeout=None, interval=20):
+    """Block this process until the chain stops (see the module doc); returns the exit code."""
+    t0 = time.time()
+    while True:
+        rows = status(plan)
+        busy = runner_alive(plan) or any(st in ACTIVE for _, _, st, _ in rows)
+        if not busy:
+            print_status(plan)
+            return 0 if all(st == "done" for _, _, st, _ in rows) else 3
+        if timeout is not None and time.time() - t0 >= timeout:
+            print_status(plan)
+            print("delegate wait: still running after %ds" % timeout)
+            return 124
+        time.sleep(interval)
+
+
+def _opt(args, name, default):
+    if name in args:
+        i = args.index(name)
+        if i + 1 < len(args):
+            return float(args[i + 1])
+    return default
+
+
 def main():
     args = sys.argv[1:]
     if not args or args[0] in ("-h", "--help"):
@@ -373,6 +428,8 @@ def main():
         print_status(plan)
     elif "--clean" in args:
         clean(plan)
+    elif "--wait" in args:
+        sys.exit(wait(plan, _opt(args, "--timeout", None), _opt(args, "--interval", 20)))
     else:
         run(plan)
 
