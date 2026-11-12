@@ -48,6 +48,14 @@ else
   say "Claude Code skill -> $skill_dir/delegate (use /delegate, or just ask Claude to delegate)"
 fi
 
+# opencode as orchestrator: let the skill load without a permission prompt and let agents
+# read it. Merges only entries that are absent; never rewrites values you set.
+if command -v opencode >/dev/null; then
+  python3 "$here/lib/merge-opencode-permissions.py" \
+    --skill-dir "$skill_dir/delegate" --real-dir "$here/claude/skills/delegate" \
+    || say "NOTE: opencode config not merged; see the message above"
+fi
+
 if [ "$key_stdin" = 1 ]; then
   key_file=$cfg_dir/api-key
   if [ -e "$key_file" ]; then say "api key file exists, not overwritten: $key_file"

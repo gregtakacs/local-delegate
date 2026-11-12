@@ -1372,6 +1372,15 @@ cmd_doctor() {
   else
     echo "opencode: $(command -v opencode) $(opencode --version)"
   fi
+  if command -v opencode >/dev/null 2>&1; then
+    if python3 "$DELEGATE_HOME/lib/merge-opencode-permissions.py" --check \
+         --skill-dir "${CLAUDE_SKILLS_DIR:-$HOME/.claude/skills}/delegate" \
+         --real-dir "$DELEGATE_HOME/claude/skills/delegate" 2>/dev/null; then
+      echo "skill:    opencode config lets the delegate skill load"
+    else
+      echo "skill:    WARN — opencode may not load/prompt-free the delegate skill; re-run install.sh"
+    fi
+  fi
   u=$(pick_base_url) || { echo "endpoint: NONE of [$DELEGATE_BASE_URLS] answered /models"; exit 1; }
   if [ "$DELEGATE_RUNNER" = docker ] && [ "$DELEGATE_EGRESS" = filtered ]; then
     ID=doctor-$$ EGRESS=filtered
