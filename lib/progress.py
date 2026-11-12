@@ -31,6 +31,19 @@ def short_path(p, worktree):
     return p
 
 
+def norm_todos(todos):
+    """A worker's todo list as dicts. Models sometimes send it as a JSON string or as plain
+    strings; a malformed list must never crash the reporter or the chain that reads it."""
+    if isinstance(todos, str):
+        try:
+            todos = json.loads(todos)
+        except ValueError:
+            return []
+    if not isinstance(todos, list):
+        return []
+    return [t if isinstance(t, dict) else {"content": str(t), "status": ""} for t in todos]
+
+
 def tool_line(part, worktree):
     tool = part.get("tool") or "?"
     st = part.get("state") or {}
@@ -44,7 +57,7 @@ def tool_line(part, worktree):
     elif tool in ("grep", "glob"):
         txt = (inp.get("pattern") or "") + (f"  in {short_path(inp.get('path'), worktree)}" if inp.get("path") else "")
     elif tool in ("todowrite", "todo"):
-        todos = inp.get("todos") or []
+        todos = norm_todos(inp.get("todos"))
         done = sum(1 for t in todos if t.get("status") == "completed")
         txt = f"plan updated: {done}/{len(todos)} done"
     elif tool == "webfetch":
@@ -85,7 +98,7 @@ class State:
             if ok is False:
                 self.tool_errors += 1
             if kind in ("todowrite", "todo"):
-                todos = ((p.get("state") or {}).get("input") or {}).get("todos")
+                todos = norm_todos(((p.get("state") or {}).get("input") or {}).get("todos"))
                 if todos:
                     self.todos = [{"content": x.get("content"), "status": x.get("status")} for x in todos]
         elif t == "text":
