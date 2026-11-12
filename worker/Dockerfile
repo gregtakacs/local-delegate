@@ -8,7 +8,12 @@
 #
 # The fonts are load-bearing, not cosmetic: without them chromium rasterises text blank and
 # the model "fixes" correct CSS chasing a font bug that only exists in here.
-FROM node:24-bookworm-slim
+#
+# Trixie, not bookworm: bookworm's git is 2.39.5, which has no ``--attr-source`` (git 2.42+), so a
+# repo that hardens read-only git runs with that flag fails *every* git call in here — the gate
+# rejects the argv before git reads anything — while passing on any host with a current git. Trixie
+# ships 2.47.3. Check ``git --version`` before downgrading the base.
+FROM node:24-trixie-slim
 
 ARG OPENCODE_VERSION=1.18.30
 
