@@ -264,6 +264,31 @@ def gone(argv):
         print(f"progress: cannot report the removal: {e}", file=sys.stderr)
 
 
+def accepted(argv):
+    """`delegate accept` ran: a round that ended failed was closed by the delegator as
+    delegator-verified. Patch the live card (and that round's history entry) to `accepted`
+    with the note, instead of re-posting a full snapshot — a fresh record would blank the
+    round's plan/feed. Best-effort, like every other progress post: if the card already aged
+    off the board, there is nothing to recolour and the terminal archive still tells the truth."""
+    ap = argparse.ArgumentParser(prog="progress.py accepted")
+    for k in ("url", "key-file", "task"):
+        ap.add_argument("--" + k, default="")
+    ap.add_argument("--round", type=int, default=0)
+    ap.add_argument("--status-before", default="")
+    ap.add_argument("--note", default="")
+    a = ap.parse_args(argv)
+    try:
+        key = open(a.key_file).read().strip()
+        body = {"task": a.task, "round": a.round,
+                "accept": {"note": a.note, "status_before": a.status_before}}
+        req = urllib.request.Request(a.url.rstrip("/") + "/agents/progress", method="POST",
+                                     data=json.dumps(body).encode(),
+                                     headers={"Authorization": "Bearer " + key, "content-type": "application/json"})
+        urllib.request.urlopen(req, timeout=5).read()
+    except Exception as e:  # noqa: BLE001 — display-only
+        print(f"progress: cannot report the accept: {e}", file=sys.stderr)
+
+
 def peek(argv):
     """One compact text snapshot of a round, for an orchestrator asked "how's it going?".
     Same data as the dashboard card; a few hundred tokens, never the raw event log."""
@@ -345,6 +370,9 @@ def peek(argv):
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "gone":
         gone(sys.argv[2:])
+        sys.exit(0)
+    if len(sys.argv) > 1 and sys.argv[1] == "accepted":
+        accepted(sys.argv[2:])
         sys.exit(0)
     if len(sys.argv) > 1 and sys.argv[1] == "peek":
         peek(sys.argv[2:])
