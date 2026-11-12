@@ -81,6 +81,11 @@ and runs the chain itself.
 - Spec paths resolve: the chain looks in the repo first, then next to the plan file, so a plan
   for another repo uses bare file names.
 - Nothing in the plan contradicts the design's rulings.
+- **Every step that guards a boundary runs `"hard": true`:** validating untrusted input,
+  building commands or paths from it, auth or tokens, sandboxing, permission checks, crypto.
+  Set it yourself when the plan doesn't. A local design marks steps by algorithmic
+  difficulty only: in one measured slice it ran the command runner and the security step on
+  the normal model, and every bug that reached review sat in exactly those two steps.
 - Accept each owner question or change it, and log the call. Fix the plan in place, and commit
   it to the design branch.
 
@@ -185,7 +190,8 @@ delegate run SPEC.md --repo /path/to/repo --name <short-slug> \
   the worker may do to a device.
 - The worker's network is filtered by default: model endpoint + public internet, no LAN.
   `--egress open` only when the task genuinely needs a LAN service, and say so to the user.
-- `--hard` uses the high-effort model variant — for steps with real algorithmic content.
+- `--hard` uses the high-effort model variant — for steps with real algorithmic content, and
+  by default for any step that guards a security boundary (see Phase 2).
 - The task id is `<repo>-<slug>`; the command prints a report when the round ends.
 
 ### Supervised, in place (`--here`)
