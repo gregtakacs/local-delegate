@@ -23,6 +23,18 @@ HEARTBEAT = 20.0   # post even when nothing changed, so a long silent stretch (t
                    # a slow verify) never looks like a dead harness to stackd (stale after 120 s)
 RECENT = 30
 
+# Where the round's wall-clock went. Every completed tool call's own state.time is summed into
+# one of these buckets; whatever the elapsed window has left over is model time (inference +
+# any harness overhead between the round's events), so the dashboard can show a duty-cycle
+# without guessing: a round that reads "87% exec" really did spend 87% of its clock in bash.
+TOOL_BUCKETS = {
+    "bash": "exec",
+    "read": "files", "write": "files", "edit": "files", "multiedit": "files",
+    "multi_edit": "files", "apply_patch": "files", "list": "files",
+    "grep": "search", "glob": "search",
+    "webfetch": "web", "websearch": "web",
+}
+
 
 def short_path(p, worktree):
     p = str(p or "")
@@ -81,6 +93,9 @@ class State:
         self.recent = []
         self.last_text = ""
         self.seen_tools = {}   # part id -> index in recent (tool parts update in place)
+        self.busy = {}         # bucket (exec/files/search/web/other) -> ms of completed tool time
+        self.busy_n = {}       # bucket -> count of completed calls in it (for "32 bash calls" tooltips)
+        self.busy_pid = set()  # part ids already counted, so an update line does not double-count
 
     def add(self, e):
         t = e.get("type")
@@ -97,6 +112,16 @@ class State:
                 self.seen_tools[pid] = len(self.recent) - 1
             if ok is False:
                 self.tool_errors += 1
+            if ok is True and pid and pid not in self.busy_pid:
+                # a completed call, first time we see it finished: its state.time.start..end is
+                # the wall-clock the harness spent running it. Count once, ever.
+                tm = (p.get("state") or {}).get("time") or {}
+                s, e = tm.get("start"), tm.get("end")
+                if isinstance(s, (int, float)) and isinstance(e, (int, float)) and e >= s:
+                    self.busy_pid.add(pid)
+                    b = TOOL_BUCKETS.get(kind, "other")
+                    self.busy[b] = self.busy.get(b, 0) + (e - s)
+                    self.busy_n[b] = self.busy_n.get(b, 0) + 1
             if kind in ("todowrite", "todo"):
                 todos = norm_todos(((p.get("state") or {}).get("input") or {}).get("todos"))
                 if todos:
@@ -173,6 +198,9 @@ def main():
                 "started_at": a.started, "steps": st.steps, "tool_calls": st.tool_calls,
                 "tool_errors": st.tool_errors, "output_tokens": st.out_tokens,
                 "context_tokens": st.ctx, "input_tokens": st.in_tokens, "cached_tokens": st.cached_tokens,
+                # where the round's wall-clock went, ms per bucket: the dashboard tiles it against
+                # the elapsed window (started_at..now) to show inference vs exec vs files, etc.
+                "busy_ms": dict(st.busy), "busy_n": dict(st.busy_n),
                 # the agent that started this round (DELEGATE_PARENT, set for a Claude agent's
                 # commands), so the dashboard can total a lead's worker rounds on its card
                 "parent": os.environ.get("DELEGATE_PARENT", "")[:120],
@@ -347,6 +375,18 @@ def peek(argv):
     if nudges:
         head += " · retries " + ", ".join(f"{k}×{v}" for k, v in nudges.items())
     print(head)
+    if st.busy:
+        bt = sum(st.busy.values())
+        secs = (time.time() - a.started) if (a.running and a.started) else 0
+        if not a.running:
+            try: secs = int(json.load(open(a.report)).get("duration_s") or 0)
+            except (OSError, ValueError): secs = 0
+        model = max(0, int(secs * 1000) - bt)
+        pct = lambda ms: f"{(100*ms/secs/1000):.0f}%" if secs > 0 else "?"
+        order = sorted([(k, v) for k, v in st.busy.items()], key=lambda kv: -kv[1])
+        segs = " · ".join(f"{k} {dur(v/1000)} ({pct(v)})" for k, v in order)
+        print(f"duty-cycle: model {dur(model/1000)} ({pct(model)}) · " + segs +
+              (f" · idle/harness {dur(secs - (bt+model)/1000)}" if secs*1000 > bt+model else ""))
     if st.todos:
         mark = {"completed": "✓", "in_progress": "▸"}
         print("plan:")
