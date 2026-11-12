@@ -36,6 +36,7 @@ expand() { local p=$1; case "$p" in "~"|"~/"*) p="$HOME${p#\~}";; esac; printf '
 : "${DELEGATE_OUTPUT:=32768}"
 : "${DELEGATE_VISION:=1}"
 : "${DELEGATE_REASONING:=1}"
+: "${DELEGATE_CHUNK_CAP:=6000}"
 : "${DELEGATE_RUNNER:=docker}"
 : "${DELEGATE_IMAGE:=delegate-worker:local}"
 : "${DELEGATE_IMAGE_STALE:=error}"      # error | warn | rebuild — what an image built from another tree costs you
@@ -492,6 +493,7 @@ run_worker_docker() {
     -e DELEGATE_MODEL="$MODEL" -e DELEGATE_MODEL_HARD="$DELEGATE_MODEL_HARD" \
     -e DELEGATE_CONTEXT="$DELEGATE_CONTEXT" -e DELEGATE_OUTPUT="$DELEGATE_OUTPUT" \
     -e DELEGATE_VISION="$DELEGATE_VISION" -e DELEGATE_REASONING="$DELEGATE_REASONING" \
+    -e DELEGATE_CHUNK_CAP="$DELEGATE_CHUNK_CAP" \
     -e DELEGATE_EVIDENCE_DIR="$evidence" -e DELEGATE_TASK="$ID" -e DELEGATE_WORKTREE="$WORKTREE" \
     "${args[@]}" "${extra[@]}" -w "$WORKTREE" "$DELEGATE_IMAGE" "$@"
 }
@@ -522,7 +524,7 @@ run_worker_native() {
       XDG_DATA_HOME="$home/.local/share" XDG_STATE_HOME="$home/.local/state" \
       XDG_CACHE_HOME="$home/.cache" npm_config_cache="$HOME/.npm" \
       OPENCODE_DISABLE_MODELS_FETCH=1 OPENCODE_DISABLE_SHARE=1 OPENCODE_DISABLE_AUTOUPDATE=1 \
-      DELEGATE_EVIDENCE_DIR="$evidence" DELEGATE_TASK="$ID" \
+      DELEGATE_EVIDENCE_DIR="$evidence" DELEGATE_TASK="$ID" DELEGATE_CHUNK_CAP="$DELEGATE_CHUNK_CAP" \
       ${dburl:+DATABASE_URL="$dburl"} "${genv[@]}" PATH="${shimpath:+$shimpath:}$PATH" "$@" )
 }
 
