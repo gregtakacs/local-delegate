@@ -42,6 +42,11 @@ that proves it. Naming a check is not passing it.
 - **Runs.** The artifact was actually executed or loaded and its real output read. A server
   was started and requested; a CLI was invoked; a migration was applied to a real (dev) database.
 - **Exercised, not inspected.** You triggered the main behaviour and the failure paths.
+- **A watched run ends in evidence, not in a status word.** When you wait on a background job,
+  you print the *observed transition* — the status line plus the tail of its log around it — not
+  just that it is no longer running: "gone" looks identical for a clean finish and for dying in
+  the first second, and only the log says which. Same for any success you claim: the command and
+  its output, in this turn.
 - **Tests.** New behaviour has tests in the repo's existing style, and the suite covering what
   you touched passes. Typecheck and lint pass if the repo has them.
 - **Errors are absent because you looked.**
@@ -103,7 +108,10 @@ Emit every independent read, search and command for the next step in one message
 At most 5 fix-and-retry iterations per failing check. Hitting the cap: stop and tell the user
 the exact error and what you tried. Never weaken, skip or delete a test, loosen a type, a lint
 rule or a validation to get a check green. A check that fails only because this machine lacks
-something is not yours to paper over — report it.
+something is not yours to paper over — report it. And **"environmental" is a claim, not a
+verdict:** to blame the environment for a failure, reproduce the failure, then reproduce it
+*away* with one named change to the environment; without that pair, treat it as real and
+investigate it.
 
 ## 8. Boundaries
 
