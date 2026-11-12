@@ -1138,6 +1138,51 @@ cmd_verify() {
   return "$rc"
 }
 
+# The delegator's override: a round that failed (often done-but-verify-failed because the
+# environment was wrong, e.g. a stale image) that you verified yourself and are closing as
+# accepted. The round's report.json is never rewritten — the failure stays in the record;
+# accept.json lies next to it and the listings show `accepted` while that round's status is
+# still the current truth. -m is required and lands with you: an override with no reason in
+# it is not verification, it is giving up. --run re-runs the recorded verify command first
+# and refuses if it fails now.
+cmd_accept() {
+  local id=${1:-}; [ -n "$id" ] || die "usage: delegate accept ID -m \"why\" [--run]"; shift
+  local note="" run=0
+  while [ $# -gt 0 ]; do case $1 in
+    -m) [ -n "${2:-}" ] || die "accept: -m needs the reason"; note=$2; shift 2 ;;
+    --run) run=1; shift ;;
+    *) die "accept: unknown argument $1" ;;
+  esac; done
+  [ -n "$note" ] || die "accept: -m \"why\" is required — say what you verified and how"
+  load_task "$id"
+  [ -f "$TASK_DIR/accept.json" ] && die "already accepted: $(head -c 200 "$TASK_DIR/accept.json")"
+  local n st rc_rerun=null
+  n=$(cd "$TASK_DIR/rounds" 2>/dev/null && ls -1 2>/dev/null | grep -E '^[0-9]+$' | sort -n | tail -1)
+  [ -n "$n" ] || die "accept: $id has no rounds to accept"
+  st=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("status","no-status"))' "$TASK_DIR/rounds/$n/report.json" 2>/dev/null) \
+    || die "accept: round $n of $id has no report (still running?) — nothing to accept"
+  case "$st" in
+    done) die "round $n is $st — nothing to override; accepted is for failed outcomes" ;;
+    running) die "accept: round $n is running; stop it first" ;;
+  esac
+  if [ "$run" = 1 ]; then
+    cmd_verify "$id" || die "accept refused: the verify command fails NOW (exit $?) — accept the failure anyway without --run, with a reason"
+    rc_rerun=0
+  fi
+  DELEGATE_TASK_DIR=$TASK_DIR DELEGATE_N=$n DELEGATE_ST=$st DELEGATE_NOTE=$note DELEGATE_RERUN=$rc_rerun \
+  python3 - <<'PY'
+import json, os, datetime
+d = os.environ["DELEGATE_TASK_DIR"]
+json.dump({"at": datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds"),
+           "round": int(os.environ["DELEGATE_N"]), "status_before": os.environ["DELEGATE_ST"],
+           "note": os.environ["DELEGATE_NOTE"], "verify_rerun_rc": (
+               int(os.environ["DELEGATE_RERUN"]) if os.environ["DELEGATE_RERUN"] != "null" else None),
+           "by": os.environ.get("USER") or "delegator"},
+          open(os.path.join(d, "accept.json"), "w"), indent=1)
+PY
+  note "accepted $id round $n (was: $st) — listings show accepted while that round stands"
+}
+
 cmd_exec() {
   local id=${1:-}; [ -n "$id" ] || die "usage: delegate exec ID -- CMD..."; shift
   [ "${1:-}" = -- ] && shift
@@ -1395,6 +1440,7 @@ delegate — hand implementation work to a self-hosted coding model, then review
   delegate diff ID [--round N] [--full] [-- PATHS]
                                    diffstat since base (or one round); --full / PATHS for content
   delegate verify ID [CMD]         re-run the verify command in the worker environment
+  delegate accept ID -m "why" [--run]  close a failed round as delegator-verified (reason required; --run re-verifies first; the report keeps the failure)
   delegate exec ID -- CMD...       run any command in the worker environment (node, db, ...)
   delegate list                    tasks, rounds, last status
   delegate rm ID [--delete-branch] remove worktree, sidecar and state (branch kept by default)
@@ -1434,6 +1480,7 @@ main() {
     report) cmd_report "$@" ;;
     diff) cmd_diff "$@" ;;
     verify) cmd_verify "$@" ;;
+    accept) cmd_accept "$@" ;;
     exec) cmd_exec "$@" ;;
     list|ls) cmd_list "$@" ;;
     rm) cmd_rm "$@" ;;
