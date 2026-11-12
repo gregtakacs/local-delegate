@@ -1338,7 +1338,8 @@ delegate — hand implementation work to a self-hosted coding model, then review
                                    live view of every round, refreshed every 2 s in your own terminal
                                    (no dashboard needed): state, elapsed, steps, tokens, current item,
                                    last action; --once prints one frame and exits (scripts, SSH)
-  delegate chain PLAN.json [--status | --clean]
+  delegate chain PLAN.json [--status | --clean | --wait]
+  delegate wait PLAN.json [--timeout S]   block this process until the chain stops (run it in the background)
                                    run a planned slice unattended: each step on the previous step's
                                    branch, accepted only when done + verified, failures retried in-session
                                    ("here": true in the plan: in place, one commit per step on your branch)
@@ -1380,6 +1381,8 @@ main() {
     peek) cmd_peek "$@" ;;
     top) cmd_top "$@" ;;
     chain) exec python3 "$DELEGATE_HOME/lib/chain.py" "$@" ;;
+    wait) [ $# -ge 1 ] || { echo "usage: delegate wait PLAN.json [--timeout S] [--interval S]" >&2; exit 2; }
+          exec python3 "$DELEGATE_HOME/lib/chain.py" "$1" --wait "${@:2}" ;;
     report) cmd_report "$@" ;;
     diff) cmd_diff "$@" ;;
     verify) cmd_verify "$@" ;;
