@@ -1180,6 +1180,14 @@ json.dump({"at": datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds
            "by": os.environ.get("USER") or "delegator"},
           open(os.path.join(d, "accept.json"), "w"), indent=1)
 PY
+  # tell the live board too (best-effort, same url/key the round's reporter used): recolour the
+  # card to `accepted` with the note. If DELEGATE_PROGRESS=0 there is no board to tell.
+  if [ "$DELEGATE_PROGRESS" = 1 ]; then
+    local purl=${DELEGATE_PROGRESS_URL:-${DELEGATE_BASE_URLS%% *}}; purl=${purl%/}; purl=${purl%/v1}
+    python3 "$DELEGATE_HOME/lib/progress.py" accepted --url "$purl" \
+      --key-file "${DELEGATE_PROGRESS_KEY_FILE:-$DELEGATE_API_KEY_FILE}" \
+      --task "$id" --round "$n" --status-before "$st" --note "$note" 2>/dev/null || true
+  fi
   note "accepted $id round $n (was: $st) — listings show accepted while that round stands"
 }
 
