@@ -109,8 +109,9 @@ and runs the chain itself.
   for opencode that is `delegate-wake SESSION_ID` (on PATH after install; `--url` or
   `$DELEGATE_WAKE_URL` for a non-default server; it posts a fixed-template prompt to
   `/session/<id>/prompt_async`), and you verify and relaunch the chain from that turn; otherwise
-  let it ping the person (ntfy,
-  desktop). Idempotent and cheap only: a resumed chain fires `--on-done` again at its next
+  let it ping the person (ntfy, desktop). Your own opencode session id is not in the session's
+  environment: read it from `GET <server>/session?directory=<repo dir>` (the newest session is
+  you) and export it before launching, along with `DELEGATE_WAKE_URL`. Idempotent and cheap only: a resumed chain fires `--on-done` again at its next
   terminal exit, a killed one never fires, and a failing hook is a warning line, never a changed
   outcome — so the hook says *when to look* and `--status` stays the source of truth.
 - Base each chain on the design branch, so the `Plan:` commit travels with the slice.
