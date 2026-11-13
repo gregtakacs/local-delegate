@@ -4,6 +4,11 @@
   delegate chain PLAN.json            run (or resume) the chain
   delegate chain PLAN.json --status   where the chain is, without running anything
   delegate chain PLAN.json --clean    remove the chain's tasks (worktrees, sidecars; branches kept)
+  delegate chain PLAN.json --on-done CMD
+                                      when THIS run ends (any terminal state), run CMD through
+                                      bash; see below
+  delegate chain PLAN.json --on-step CMD
+                                      the same, once per step as it is accepted; see below
   delegate chain PLAN.json --wait [--timeout S] [--interval S]
   delegate wait  PLAN.json [...]      the same: block THIS process until the chain stops
 
@@ -14,6 +19,23 @@ step is done; 3 when one is blocked, partial, failed or interrupted (the status 
 process-name search (which matches the watcher's own command line). It blocks only its own
 process: an orchestrating session starts it as a tracked background task and is told when it
 exits; it never runs it in the foreground of a conversation.
+
+`--on-done CMD` / `--on-step CMD` (env fallbacks `DELEGATE_ON_DONE` / `DELEGATE_ON_STEP`) are
+the wake-ups for harnesses that have no background-completion notification. Both run CMD
+through `bash -lc`, best-effort: their failure warns but never changes the chain's outcome.
+`--on-done` fires once when THIS run of the chain reaches a terminal state — every step done,
+a step blocked, or the retry budget spent — with the chain's exit code in the environment.
+`--on-step` fires each time THIS run accepts a step (after its commit, in place mode), before
+the next one starts; a step it skips as already done stays silent, so resuming doesn't
+re-announce. Neither fires on `--status`, `--clean` or `--wait`. Both see DELEGATE_CHAIN (name),
+DELEGATE_CHAIN_PLAN, DELEGATE_CHAIN_STATUS ("step=status, ..."); `--on-done` adds
+DELEGATE_CHAIN_RC, `--on-step` adds DELEGATE_CHAIN_STEP, _STEP_N, _STEP_TOTAL, _STEP_STATUS,
+and both run with the repo as cwd. Keep them idempotent and cheap: a resumed chain fires
+`--on-done` again at its next terminal exit, and one that dies by timeout/SIGKILL never fires
+at all — the poll stays the source of truth, the hook only tells you when to look. For an
+orchestrating agent the natural CMD wakes the orchestrator itself: a desktop/ntfy ping, or
+posting a "step accepted" / "chain done, verify" prompt to your own session (an opencode
+server accepts `POST /session/<id>/prompt_async` and answers 204).
 
 PLAN.json (written by the orchestrator, normally next to the specs):
   {
@@ -311,6 +333,8 @@ def run(plan):
                 note(f"{label}: done in {n} round(s)")
                 if here:
                     commit_step(plan, s, st)
+                if plan.get("_on_step"):
+                    fire_on_step(plan, i, s, len(plan["steps"]), plan["_on_step"])
                 break
             if stt == "blocked":
                 print_status(plan)
@@ -418,6 +442,42 @@ def _opt(args, name, default):
     return default
 
 
+def _str_opt(args, name):
+    if name in args:
+        i = args.index(name)
+        if i + 1 < len(args):
+            return args[i + 1]
+    return ""
+
+
+def fire_hook(plan, cmd, what, extra):
+    """A --on-* wake-up: best-effort by contract — loud on failure, never fatal, it cannot
+    change the chain's outcome, and a broken hook never takes a healthy chain down with it.
+    `what` names the hook in the warnings."""
+    try:
+        env = dict(os.environ, **extra)
+        env.update(DELEGATE_CHAIN=plan["name"], DELEGATE_CHAIN_PLAN=plan["_path"],
+                   DELEGATE_CHAIN_STATUS=", ".join(f"{name}={stt}" for _, name, stt, _ in status(plan)))
+        r = subprocess.run(["bash", "-lc", cmd], env=env, cwd=plan["repo"], timeout=120)
+        if r.returncode:
+            note(f"{what} command exited {r.returncode} (the chain's result stands; poll to confirm)")
+    except subprocess.TimeoutExpired:
+        note(f"{what} command timed out after 120s (the chain's result stands; poll to confirm)")
+    except Exception as e:                                                    # noqa: BLE001 — by contract
+        note(f"{what} command failed: {e} (the chain's result stands; poll to confirm)")
+
+
+def fire_on_done(plan, rc, cmd):
+    fire_hook(plan, cmd, "on-done", {"DELEGATE_CHAIN_RC": str(rc)})
+
+
+def fire_on_step(plan, i, s, total, cmd):
+    fire_hook(plan, cmd, "on-step", {"DELEGATE_CHAIN_STEP": s["name"],
+                                     "DELEGATE_CHAIN_STEP_N": str(i),
+                                     "DELEGATE_CHAIN_STEP_TOTAL": str(total),
+                                     "DELEGATE_CHAIN_STEP_STATUS": "done"})
+
+
 def main():
     args = sys.argv[1:]
     if not args or args[0] in ("-h", "--help"):
@@ -431,7 +491,17 @@ def main():
     elif "--wait" in args:
         sys.exit(wait(plan, _opt(args, "--timeout", None), _opt(args, "--interval", 20)))
     else:
-        run(plan)
+        plan["_on_step"] = _str_opt(args, "--on-step") or os.environ.get("DELEGATE_ON_STEP", "")
+        hook = _str_opt(args, "--on-done") or os.environ.get("DELEGATE_ON_DONE", "")
+        rc = 0
+        try:
+            run(plan)
+        except SystemExit as e:
+            rc = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
+            raise
+        finally:
+            if hook:
+                fire_on_done(plan, rc, hook)
 
 
 if __name__ == "__main__":

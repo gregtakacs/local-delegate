@@ -1450,11 +1450,13 @@ delegate — hand implementation work to a self-hosted coding model, then review
                                    live view of every round, refreshed every 2 s in your own terminal
                                    (no dashboard needed): state, elapsed, steps, tokens, current item,
                                    last action; --once prints one frame and exits (scripts, SSH)
-  delegate chain PLAN.json [--status | --clean | --wait]
+  delegate chain PLAN.json [--status | --clean | --wait] [--on-done CMD] [--on-step CMD]
   delegate wait PLAN.json [--timeout S]   block this process until the chain stops (run it in the background)
-                                   run a planned slice unattended: each step on the previous step's
-                                   branch, accepted only when done + verified, failures retried in-session
-                                   ("here": true in the plan: in place, one commit per step on your branch)
+                                  run a planned slice unattended: each step on the previous step's
+                                  branch, accepted only when done + verified, failures retried in-session
+                                  ("here": true in the plan: in place, one commit per step on your branch)
+                                  --on-done CMD (or DELEGATE_ON_DONE): run CMD when the chain run ends
+                                  (any terminal state); DELEGATE_CHAIN_RC/_STATUS carry the outcome
   delegate report ID [ROUND]       print a round's report (default: latest)
   delegate diff ID [--round N] [--full] [-- PATHS]
                                    diffstat since base (or one round); --full / PATHS for content

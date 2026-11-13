@@ -40,6 +40,7 @@ The orchestrator's whole interface is commands, files and exit codes:
 | one task | `delegate run SPEC.md --repo R --name N --verify "CMD" [--base B] [--grant G]...` | the report on stdout at the end; exit 0 |
 | follow-up | `delegate continue ID FEEDBACK.md` or `-m "text"` | the next report |
 | a slice | `delegate chain PLAN.json` | exit 0 (all steps done) or 3 (a step failed or is blocked) |
+| wake-ups | `delegate chain … --on-step CMD --on-done CMD` (or `DELEGATE_ON_STEP` / `DELEGATE_ON_DONE`) | CMD runs in `bash -lc` when a step is accepted / the run ends; `DELEGATE_CHAIN_*` env carries the outcome |
 | where it is | `delegate list`, `delegate chain PLAN.json --status`, `delegate peek ID` | plain text |
 | results | `delegate report ID`, `delegate diff ID [-- PATHS]`, `delegate verify ID`, `delegate exec ID -- CMD` | plain text, exit codes |
 | clean up | `delegate rm ID --delete-branch`, `delegate chain PLAN.json --clean` | |
@@ -51,6 +52,17 @@ Rounds take minutes to over an hour:
 - **Without them:** run it detached (`nohup delegate chain PLAN.json > chain.log 2>&1 &`), then
   check `delegate chain PLAN.json --status` or `delegate list` every few minutes. Check rarely:
   a round's progress costs your context, and you can't act on it mid-round anyway.
+- **To be told instead of polling:** `--on-step CMD` fires when the chain accepts a step,
+  `--on-done CMD` when the run ends in any terminal state (env fallbacks `DELEGATE_ON_STEP` /
+  `DELEGATE_ON_DONE`). It's a plain shell command — a desktop or ntfy ping, or a wake-up prompt
+  posted back to your orchestrator session. `DELEGATE_CHAIN_STATUS` (`name=state, …`),
+  `DELEGATE_CHAIN_RC` (on-done) and `DELEGATE_CHAIN_STEP`, `_STEP_N`, `_STEP_TOTAL` (on-step)
+  carry the outcome; the hook is best-effort and its failure never changes the chain's. Fire it
+  from the *launching* command and stay idempotent: a resumed chain fires `--on-done` again at
+  its next terminal exit, and a killed one never fires — so the hook says *when to look*, and
+  `--status` stays the truth. For a wake-up that acts, an opencode server accepts
+  `POST /session/<id>/prompt_async` (204, no wait; the run then appears in the session's
+  `/global/event` stream) — behind the codehub hub, that call goes through the hub's proxy.
 - **Either way:** the report is what you act on. Its `STATUS (harness):` line is `done`,
   `partial`, `blocked`, `no-status`, `worker-error`, `timeout`, `truncated` or
   `done-but-verify-failed`, and the `access:` and `GUARD:` lines say what the task could reach.

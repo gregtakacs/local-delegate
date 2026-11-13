@@ -141,4 +141,30 @@ python3 $here/lib/chain.py $T/plan.json --wait --interval 0.1 --timeout 2 >/dev/
 check "a reused pid (not chain.py) does not hold wait" '[ $rc = 3 ]'
 kill $other 2>/dev/null; wait $other 2>/dev/null
 
+# 11. --on-step / --on-done: the wake-up hooks fire on the run's own terminal events
+rm -rf $DELEGATE_STATE; mkdir -p $DELEGATE_STATE
+printf 'done-but-verify-failed\ndone\n' > $SCRIPT/a; printf 'done\n' > $SCRIPT/b; plan 2
+STEPHOOK='printf "%s %s/%s %s\n" "$DELEGATE_CHAIN_STEP" "$DELEGATE_CHAIN_STEP_N" "$DELEGATE_CHAIN_STEP_TOTAL" "$DELEGATE_CHAIN_STATUS" >> '"$T"'/steps.log'
+DONEHOOK='printf "rc=%s %s\n" "$DELEGATE_CHAIN_RC" "$DELEGATE_CHAIN_STATUS" >> '"$T"'/done.log'
+python3 $here/lib/chain.py $T/plan.json --on-step "$STEPHOOK" --on-done "$DONEHOOK" >/dev/null 2>&1; rc=$?
+check "on-step fires once per accepted step, in order, after its retry was accepted" \
+  '[ "$(cut -d" " -f1,2 $T/steps.log | tr "\n" ",")" = "a 1/2,b 2/2," ]'
+check "on-done fires once with rc=0 and the status snapshot" \
+  '[ $rc = 0 ] && [ "$(cat $T/done.log)" = "rc=0 a=done, b=done" ]'
+python3 $here/lib/chain.py $T/plan.json --on-step "$STEPHOOK" --on-done "$DONEHOOK" >/dev/null 2>&1
+check "a resumed done chain re-announces no steps; --on-done still fires" \
+  '[ "$(wc -l < $T/steps.log)" = 2 ] && [ "$(wc -l < $T/done.log)" = 2 ]'
+rm -f $T/steps.log $T/done.log
+rm -rf $DELEGATE_STATE; mkdir -p $DELEGATE_STATE
+printf 'blocked\n' > $SCRIPT/a; printf 'done\n' > $SCRIPT/b; plan 2
+python3 $here/lib/chain.py $T/plan.json --on-step "$STEPHOOK" --on-done "$DONEHOOK" >/dev/null 2>&1; rc=$?
+check "a blocked run: no on-step at all, on-done carries rc=3" \
+  '[ $rc = 3 ] && [ ! -f $T/steps.log ] && grep -q "^rc=3 " $T/done.log'
+# the env-var fallback reaches the same code path
+rm -rf $DELEGATE_STATE; mkdir -p $DELEGATE_STATE
+printf 'done\n' > $SCRIPT/a; printf 'done\n' > $SCRIPT/b; plan 2
+DELEGATE_ON_STEP="$STEPHOOK" DELEGATE_ON_DONE="$DONEHOOK" python3 $here/lib/chain.py $T/plan.json >/dev/null 2>&1
+check "DELEGATE_ON_STEP/DELEGATE_ON_DONE work without the flags" \
+  '[ -s $T/steps.log ] && [ -s $T/done.log ]'
+
 exit $fail

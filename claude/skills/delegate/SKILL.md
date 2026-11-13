@@ -100,6 +100,17 @@ and runs the chain itself.
   done, 3 blocked or failed, 124 on `--timeout`). Never run `delegate wait` in the foreground of a
   conversation, and never hand-roll a watcher with `pgrep -f '<text>'`: it matches its own command
   line and never returns.
+- **In a harness with no background-completion notification** (OpenCode, Cline, plain shells):
+  run the chain detached **and with the wake-up hooks** — `--on-step 'CMD' --on-done 'CMD'`
+  (env fallbacks `DELEGATE_ON_STEP` / `DELEGATE_ON_DONE`) — so the chain reports back instead of
+  the session polling. `--on-step` fires when a step is accepted (`$DELEGATE_CHAIN_STEP`,
+  `$DELEGATE_CHAIN_STEP_N`, `_STEP_TOTAL`, `_DELEGATE_CHAIN_STATUS`), `--on-done` when the run
+  ends (`$DELEGATE_CHAIN_RC`, `_STATUS`). Let the hook wake *you* where the harness allows it —
+  an opencode session accepts a `POST /session/<id>/prompt_async` carrying the done message, and
+  you verify and relaunch the chain from that turn; otherwise let it ping the person (ntfy,
+  desktop). Idempotent and cheap only: a resumed chain fires `--on-done` again at its next
+  terminal exit, a killed one never fires, and a failing hook is a warning line, never a changed
+  outcome — so the hook says *when to look* and `--status` stays the source of truth.
 - Base each chain on the design branch, so the `Plan:` commit travels with the slice.
 - Steps that need a special toolchain run with `DELEGATE_IMAGE=<image>` exported.
 - Don't watch. You act on the end-of-chain report.
