@@ -38,6 +38,7 @@ for t in git curl python3; do command -v "$t" >/dev/null || { echo "install.sh: 
 mkdir -p "$bin_dir" "$skill_dir" "$cfg_dir"
 chmod 700 "$cfg_dir"
 ln -sfn "$here/bin/delegate" "$bin_dir/delegate"
+ln -sfn "$here/bin/delegate-wake" "$bin_dir/delegate-wake"
 say "delegate -> $bin_dir/delegate"
 case ":$PATH:" in *":$bin_dir:"*) ;; *) say "NOTE: $bin_dir is not on your PATH; add it to your shell profile" ;; esac
 

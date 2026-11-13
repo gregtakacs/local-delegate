@@ -106,8 +106,10 @@ and runs the chain itself.
   the session polling. `--on-step` fires when a step is accepted (`$DELEGATE_CHAIN_STEP`,
   `$DELEGATE_CHAIN_STEP_N`, `_STEP_TOTAL`, `_DELEGATE_CHAIN_STATUS`), `--on-done` when the run
   ends (`$DELEGATE_CHAIN_RC`, `_STATUS`). Let the hook wake *you* where the harness allows it —
-  an opencode session accepts a `POST /session/<id>/prompt_async` carrying the done message, and
-  you verify and relaunch the chain from that turn; otherwise let it ping the person (ntfy,
+  for opencode that is `delegate-wake SESSION_ID` (on PATH after install; `--url` or
+  `$DELEGATE_WAKE_URL` for a non-default server; it posts a fixed-template prompt to
+  `/session/<id>/prompt_async`), and you verify and relaunch the chain from that turn; otherwise
+  let it ping the person (ntfy,
   desktop). Idempotent and cheap only: a resumed chain fires `--on-done` again at its next
   terminal exit, a killed one never fires, and a failing hook is a warning line, never a changed
   outcome — so the hook says *when to look* and `--status` stays the source of truth.
