@@ -16,8 +16,8 @@ check "no space-hash inside description value" \
 check "no leading indicator chars" \
   '! printf %s "$desc" | head -c1 | grep -qE "[][{}&*!|>\"\x27%\x60#,?@+-]"'
 
-# opencode/commands/delegate.md: the /delegate command install.sh links into opencode
-cmd=$here/opencode/commands/delegate.md
+# commands/opencode/delegate.md: the /delegate command install.sh links into opencode
+cmd=$here/commands/opencode/delegate.md
 check "command file exists" '[ -f "$cmd" ]'
 check "command frontmatter opens and closes" '[ "$(head -1 "$cmd")" = "---" ] && [ "$(grep -c "^---$" "$cmd")" -ge 2 ]'
 cdesc=$(awk 'NR>1&&/^---/{exit} /^description:/{sub(/^description: /,"");print}' "$cmd")

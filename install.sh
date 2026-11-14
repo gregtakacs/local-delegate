@@ -61,7 +61,7 @@ if command -v opencode >/dev/null; then
   if [ -e "$oc_cmd_dir/delegate.md" ] && [ ! -L "$oc_cmd_dir/delegate.md" ]; then
     say "NOTE: $oc_cmd_dir/delegate.md exists and is not a symlink; left alone"
   else
-    ln -sfn "$here/opencode/commands/delegate.md" "$oc_cmd_dir/delegate.md"
+    ln -sfn "$here/commands/opencode/delegate.md" "$oc_cmd_dir/delegate.md"
     say "opencode command -> $oc_cmd_dir/delegate.md (type /delegate in opencode)"
   fi
 fi
