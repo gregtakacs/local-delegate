@@ -1,8 +1,13 @@
 #!/bin/bash
 # chunk-cap.js honours DELEGATE_CHUNK_CAP (default: Cline's 6000; invalid or < 1000 -> 6000).
 # Runs the plugin's hook in node inside the worker image, since the host may have no node.
+# Also: with no config, bin/delegate hands workers 8000 (delegate's default); a config value wins.
 set -u
 here=$(cd "$(dirname "$0")/.." && pwd)
+cap_of() { env -u DELEGATE_CHUNK_CAP DELEGATE_CONFIG="$1" "$here/bin/delegate" doctor 2>/dev/null | grep -o 'edit cap: [0-9]*'; }
+cfg=$(mktemp); echo 'DELEGATE_CHUNK_CAP=7000' > "$cfg"
+got=$(cap_of /nonexistent); [ "$got" = "edit cap: 8000" ] && echo "ok   no config -> 8000" || { echo "FAIL no config -> 8000 (got: $got)"; exit 1; }
+got=$(cap_of "$cfg"); rm -f "$cfg"; [ "$got" = "edit cap: 7000" ] && echo "ok   config 7000 wins" || { echo "FAIL config 7000 wins (got: $got)"; exit 1; }
 img=${DELEGATE_IMAGE:-delegate-worker:local}
 if ! docker image inspect "$img" >/dev/null 2>&1; then echo "skip: no $img image (delegate build)"; exit 0; fi
 fail=0

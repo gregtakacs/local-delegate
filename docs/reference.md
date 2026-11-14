@@ -40,8 +40,9 @@ produced markedly more complete and better-checked work:
   TodoWrite. Bounded fix loops that may never weaken a test. "Complete inside the scope, restrained at its
   edge". A required closing block (`STATUS / FILES / VERIFIED / NOT VERIFIED / DEVIATIONS /
   DECISIONS / OMISSIONS / SUGGESTIONS / QUESTIONS / EVIDENCE`) that the harness parses.
-- `opencode/plugins/chunk-cap.js`: a letter-port of Cline's editor size gate. `write`/`edit` payloads over 6000
-  characters are rejected with Cline's own message. This forces skeleton-then-grow instead
+- `opencode/plugins/chunk-cap.js`: a letter-port of Cline's editor size gate. `write`/`edit` payloads over
+  `DELEGATE_CHUNK_CAP` characters (default 8000; Cline's own value is 6000) are rejected with
+  Cline's own message. This forces skeleton-then-grow instead
   of one giant write, which is where most of the missing features came from.
 - `opencode/plugins/todo-loop.js`: nudges the model to keep its todo list current (and survives
   context compaction).

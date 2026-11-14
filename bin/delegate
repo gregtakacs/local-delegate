@@ -36,7 +36,7 @@ expand() { local p=$1; case "$p" in "~"|"~/"*) p="$HOME${p#\~}";; esac; printf '
 : "${DELEGATE_OUTPUT:=32768}"
 : "${DELEGATE_VISION:=1}"
 : "${DELEGATE_REASONING:=1}"
-: "${DELEGATE_CHUNK_CAP:=6000}"
+: "${DELEGATE_CHUNK_CAP:=8000}"
 : "${DELEGATE_RUNNER:=docker}"
 : "${DELEGATE_IMAGE:=delegate-worker:local}"
 : "${DELEGATE_IMAGE_STALE:=error}"      # error | warn | rebuild — what an image built from another tree costs you
@@ -1354,7 +1354,7 @@ cmd_doctor() {
   local ok=1 u
   echo "delegate $VERSION ($DELEGATE_HOME)"
   echo "config:   $CONFIG_FILE $( [ -f "$CONFIG_FILE" ] && echo '(found)' || echo '(MISSING)')"
-  echo "runner:   $DELEGATE_RUNNER   model: $DELEGATE_MODEL   hard: $DELEGATE_MODEL_HARD   context: $DELEGATE_CONTEXT"
+  echo "runner:   $DELEGATE_RUNNER   model: $DELEGATE_MODEL   hard: $DELEGATE_MODEL_HARD   context: $DELEGATE_CONTEXT   edit cap: $DELEGATE_CHUNK_CAP"
   echo "state:    $DELEGATE_STATE"
   echo "worktrees:$DELEGATE_WORKTREES"
   need_config
