@@ -12,6 +12,7 @@ rewrites a value you set, and refuses to touch a config that is not valid JSON.
 """
 import json
 import os
+import re
 import sys
 from collections import OrderedDict
 
@@ -19,6 +20,31 @@ from collections import OrderedDict
 def config_path():
     base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
     return os.path.join(base, "opencode", "opencode.json")
+
+
+def glob_re(pattern):
+    """opencode's permission wildcard: '*' (and so '**') is any run of characters, '?' one."""
+    out = []
+    for ch in os.path.expanduser(pattern):
+        out.append(".*" if ch == "*" else "." if ch == "?" else re.escape(ch))
+    return re.compile("^" + "".join(out) + "$", re.S)
+
+
+def covered(rules, pattern, val):
+    """True when the rule opencode applies to a file under `pattern`'s directory is `val`.
+
+    opencode evaluates a pattern map in order and the LAST matching rule wins (which is why
+    configs start with "*" and list the specific rules after it), so the decision for a sample
+    path inside the directory is the value of the last key whose wildcard matches it.
+    """
+    if not pattern.endswith("/**"):
+        return False
+    sample = pattern[:-3] + "/SKILL.md"
+    decision = None
+    for key, value in rules.items():
+        if isinstance(key, str) and glob_re(key).match(sample):
+            decision = value
+    return decision == val
 
 
 def parse(argv):
@@ -79,6 +105,11 @@ def main(argv):
         if pattern in cur:
             if cur[pattern] != val:
                 kept += 1
+            continue
+        if section == "external_directory" and covered(cur, pattern, val):
+            # A broader rule the user wrote (e.g. "~/Projects/**": "allow") already lets the
+            # skill load; adding the literal entry would be clutter, and calling it missing
+            # was a false doctor WARN (2026-11-14).
             continue
         missing.append(f"{section}/{pattern}")
         if not o.get("check"):

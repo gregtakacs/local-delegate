@@ -55,6 +55,15 @@ if command -v opencode >/dev/null; then
   python3 "$here/lib/merge-opencode-permissions.py" \
     --skill-dir "$skill_dir/delegate" --real-dir "$here/claude/skills/delegate" \
     || say "NOTE: opencode config not merged; see the message above"
+  # opencode's "/" menu lists commands, not skills: /delegate is a command that loads the skill.
+  oc_cmd_dir=${OPENCODE_COMMANDS_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode/commands}
+  mkdir -p "$oc_cmd_dir"
+  if [ -e "$oc_cmd_dir/delegate.md" ] && [ ! -L "$oc_cmd_dir/delegate.md" ]; then
+    say "NOTE: $oc_cmd_dir/delegate.md exists and is not a symlink; left alone"
+  else
+    ln -sfn "$here/opencode/commands/delegate.md" "$oc_cmd_dir/delegate.md"
+    say "opencode command -> $oc_cmd_dir/delegate.md (type /delegate in opencode)"
+  fi
 fi
 
 if [ "$key_stdin" = 1 ]; then

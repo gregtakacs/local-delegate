@@ -48,4 +48,23 @@ check "--check fails on missing entries" "! args --check >/dev/null 2>&1"
 check "--check says the fix" "args --check 2>&1 | grep -q install.sh"
 rm "$cfg"
 check "--check fails on absent config" "! args --check >/dev/null 2>&1"
+
+# coverage: a broader rule that already allows the skill dirs counts (opencode: last match wins)
+cov() {  # cov NAME EXPECT(ok|missing) JSON-of-external_directory
+  printf '{"permission":{"skill":{"delegate":"allow"},"external_directory":%s}}\n' "$3" > "$cfg"
+  if [ "$2" = ok ]; then check "coverage: $1" "args --check >/dev/null 2>&1"
+  else check "coverage: $1" "! args --check >/dev/null 2>&1"; fi
+}
+cov "broad parent allow" ok "{\"*\":\"ask\",\"$T/**\":\"allow\",\"$here/**\":\"allow\"}"
+cov "star allow" ok '{"*":"allow"}'
+cov "broad allow, later specific ask" missing "{\"$T/**\":\"allow\",\"$here/**\":\"allow\",\"$T/skills/**\":\"ask\"}"
+cov "broad allow, then star ask last" missing "{\"$T/**\":\"allow\",\"$here/**\":\"allow\",\"*\":\"ask\"}"
+cov "only one dir covered" missing "{\"*\":\"ask\",\"$T/**\":\"allow\"}"
+cov "sibling prefix is not coverage" missing "{\"*\":\"ask\",\"$T/skills/delegatex/**\":\"allow\",\"$here/**\":\"allow\"}"
+cov "deny" missing "{\"$T/**\":\"deny\",\"$here/**\":\"allow\"}"
+# merge: covered dirs get no redundant literal entries; uncovered ones still do
+printf '{"permission":{"external_directory":{"*":"ask","%s/**":"allow"}}}\n' "$T" > "$cfg"
+args >/dev/null
+check "merge skips a covered dir" "python3 -c \"import json;e=json.load(open('\$cfg'))['permission']['external_directory'];assert '\$T/skills/delegate/**' not in e\""
+check "merge adds an uncovered dir" "python3 -c \"import json;e=json.load(open('\$cfg'))['permission']['external_directory'];assert e['$here/claude/skills/delegate/**']=='allow'\""
 exit $fail

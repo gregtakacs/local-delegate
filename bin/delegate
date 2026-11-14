@@ -1380,6 +1380,12 @@ cmd_doctor() {
     else
       echo "skill:    WARN — opencode may not load/prompt-free the delegate skill; re-run install.sh"
     fi
+    oc_cmd=${OPENCODE_COMMANDS_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode/commands}/delegate.md
+    if [ -f "$oc_cmd" ] && grep -q '\$ARGUMENTS' "$oc_cmd"; then
+      echo "command:  /delegate available in opencode ($oc_cmd)"
+    else
+      echo "command:  WARN — no /delegate in opencode's command menu; re-run install.sh"
+    fi
   fi
   u=$(pick_base_url) || { echo "endpoint: NONE of [$DELEGATE_BASE_URLS] answered /models"; exit 1; }
   if [ "$DELEGATE_RUNNER" = docker ] && [ "$DELEGATE_EGRESS" = filtered ]; then

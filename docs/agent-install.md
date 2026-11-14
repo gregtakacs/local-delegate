@@ -79,9 +79,14 @@ tool calls**, streaming and non-streaming. It must end with `doctor: OK`.
 - With `opencode` installed it also prints a `skill:` line. If it WARNs, re-run `install.sh`; if
   it still warns, the person's opencode config has a `permission.skill.delegate` value of their
   own — leave it and tell them loading the skill may prompt once per session.
-- Confirm opencode actually *sees* the skill: `opencode debug skill | grep -c '"name": "delegate"'`
-  must print 1. Zero usually means `SKILL.md`'s frontmatter won't parse (a `: ` inside the
-  unquoted `description:` line breaks YAML silently) — run `tests/test_skill_frontmatter.sh`.
+- It also prints a `command:` line: `/delegate` in opencode's `/` menu is a command file
+  (`~/.config/opencode/commands/delegate.md`, linked by `install.sh`) that loads the skill;
+  opencode lists commands there, not skills. A WARN means re-run `install.sh`; a file of the
+  person's own at that path is left alone.
+- Confirm the skill's frontmatter parses: run `tests/test_skill_frontmatter.sh` (a `: ` inside the
+  unquoted `description:` line makes opencode skip the skill silently). On opencode 1.x you can
+  also run `opencode debug skill | grep -c '"name": "delegate"'` (must print 1); opencode 2.x
+  removed that subcommand.
 - If the tool-call probe fails, the model or server isn't usable as a worker yet. That's usually a
   server flag for tool parsing (for example vLLM's `--enable-auto-tool-choice --tool-call-parser
   …`). Report what doctor printed; don't change their server for them.
