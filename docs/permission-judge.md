@@ -71,8 +71,17 @@ clearly project-local actions consistent with the todo. Output parsed strictly: 
    the judge call, the audit log, dry-run mode, install + doctor + tests.
 3. **Dry-run week**, then greg reviews the log and decides whether to switch it on.
 
-## 7. Open questions for greg
+## 7. Decisions (greg, 2026-11-14)
 
-- Judge model: `<model>-nothink` (fast, local) or a Claude API model (better judgement, costs
-  credit per prompt)? Plan assumes local.
-- Scope: bash only at first, or also `edit`/`external_directory`/`webfetch` prompts?
+- **Judge model:** `<model>-nothink` by default, **configurable**: `DELEGATE_JUDGE_MODEL` in
+  delegate's `config.env` (endpoint and key come from the same config as the worker's), so any
+  OpenAI-compatible model works, a Claude API model included.
+- **Scope: every prompt**, i.e. every request that reaches an `ask` rule, for every tool (bash,
+  edit/write, `external_directory`, `webfetch`, skill loads). Requests a `deny` rule refuses are
+  never shown to the judge and stay refused. §3's hard limits apply per tool: for `edit`/`write`
+  they are the secret and credential paths, files outside the session's working directory and the
+  person's project roots, and the delegate/opencode/claude configuration dirs; for `webfetch`, URLs
+  carrying credentials or query strings that look like secrets; for `external_directory`, anything
+  outside the project roots.
+- The spike (§6.1) must therefore confirm the permission event's payload for **each** of those
+  tools, not only bash.
