@@ -1,24 +1,37 @@
 #!/usr/bin/env python3
 """delegate-wake — the opencode adapter for `delegate chain --on-step/--on-done`.
 
-  delegate-wake [--url URL] SESSION_ID
+  delegate-wake [--url URL] [SESSION_ID]
 
 Reads the hook environment the chain sets (DELEGATE_CHAIN, _STATUS, _RC or _STEP/_STEP_N/
-_STEP_TOTAL, _PLAN) and POSTs a fixed-template wake-up prompt to that opencode server's
-`/session/<id>/prompt_async` (204 accepted; the session runs the prompt as a normal turn and
-the event stream shows it). Pass the server's own address with --url or $DELEGATE_WAKE_URL
-(default http://127.0.0.1:4096); auth, if the server has it, goes in the URL
-(http://user:pass@host:port). Retry 3 times with backoff: a wake-up lost to a restart should
-at least have tried — the poll stays the source of truth either way.
+_STEP_TOTAL, _PLAN) and POSTs a fixed-template wake-up prompt into that opencode session, which
+runs it as a normal turn. SESSION_ID defaults to $OPENCODE_SESSION_ID (opencode 2 sets it in an
+agent's shell, so an orchestrator inside opencode 2 can omit it).
+
+Server: --url or $DELEGATE_WAKE_URL (default http://127.0.0.1:4096).
+  opencode 2: POST <url>/api/session/<id>/prompt  {"text": ...}           (200 = admitted)
+  opencode 1: POST <url>/session/<id>/prompt_async {"parts": [...]}        (204 = accepted)
+The v2 route is tried first; a server that does not know it (404 that is not "session not
+found", or 405) gets the v1 route, so one binary serves both generations.
+
+Auth (HTTP Basic): user:pass in the URL, else the password from $DELEGATE_WAKE_PASSWORD_FILE,
+$DELEGATE_WAKE_PASSWORD or $OPENCODE_SERVER_PASSWORD; the user is $DELEGATE_WAKE_USERNAME or
+"opencode" (opencode 2 accepts only that name). No password = no header.
+
+Transient failures (connection errors, 5xx) retry 3 times with backoff: a wake-up lost to a
+restart should at least have tried — the poll stays the source of truth either way. A rejected
+password or an unknown session fails at once (retrying cannot fix either).
 
 The prompt text is built ONLY from the chain name, the step names and the states: worker-
 written strings never enter it (a done-hook is a message-injection door; keep it fixed).
 """
+import base64
 import json
 import os
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 
@@ -42,6 +55,71 @@ def message():
     return head
 
 
+def split_auth(url):
+    """Strip user:pass out of the URL (urllib cannot send it from there) and return
+    (bare_url, auth_header_or_None)."""
+    parts = urllib.parse.urlsplit(url)
+    user = urllib.parse.unquote(parts.username) if parts.username else None
+    password = urllib.parse.unquote(parts.password) if parts.password else None
+    netloc = parts.netloc.rsplit("@", 1)[-1]
+    bare = urllib.parse.urlunsplit((parts.scheme, netloc, parts.path, parts.query, ""))
+    if password is None:
+        pw_file = os.environ.get("DELEGATE_WAKE_PASSWORD_FILE")
+        if pw_file:
+            try:
+                with open(os.path.expanduser(pw_file)) as f:
+                    password = f.read().strip()
+            except OSError as e:
+                sys.exit(f"delegate-wake: cannot read DELEGATE_WAKE_PASSWORD_FILE ({e.strerror})")
+        else:
+            password = (os.environ.get("DELEGATE_WAKE_PASSWORD")
+                        or os.environ.get("OPENCODE_SERVER_PASSWORD"))
+    if not password:
+        return bare.rstrip("/"), None
+    user = user or os.environ.get("DELEGATE_WAKE_USERNAME") or "opencode"
+    token = base64.b64encode(f"{user}:{password}".encode()).decode("ascii")
+    return bare.rstrip("/"), "Basic " + token
+
+
+class Fatal(Exception):
+    """A failure retrying cannot fix."""
+
+
+def post(url, body, auth):
+    headers = {"Content-Type": "application/json"}
+    if auth:
+        headers["Authorization"] = auth
+    req = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST",
+                                 headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return r.status, r.read(4096).decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        return e.code, e.read(4096).decode("utf-8", "replace")
+
+
+def wake_once(base, session, auth, text):
+    status, body = post(f"{base}/api/session/{session}/prompt", {"text": text}, auth)
+    if status == 200:
+        return "v2"
+    if status in (401, 403):
+        raise Fatal(f"http {status}: the server rejected the credentials")
+    if status == 404 and "SessionNotFound" in body:
+        raise Fatal(f"session {session} not found on {base}")
+    if status in (404, 405):  # no v2 route: an opencode 1 server
+        status, body = post(f"{base}/session/{session}/prompt_async",
+                            {"parts": [{"type": "text", "text": text}]}, auth)
+        if status in (200, 204):
+            return "v1"
+        if status in (401, 403):
+            raise Fatal(f"http {status}: the server rejected the credentials")
+        if status == 404:
+            raise Fatal(f"session {session} not found on {base} (v1 route)")
+    if status >= 500:
+        raise OSError(f"http {status}")
+    raise Fatal(f"http {status}: {body[:200]}")
+
+
 def main():
     args = sys.argv[1:]
     url = os.environ.get("DELEGATE_WAKE_URL", "http://127.0.0.1:4096")
@@ -51,22 +129,26 @@ def main():
             sys.exit("delegate-wake: --url needs a value")
         url = args[i + 1]
         args = args[:i] + args[i + 2:]
+    if not args and os.environ.get("OPENCODE_SESSION_ID"):
+        args = [os.environ["OPENCODE_SESSION_ID"]]
     if len(args) != 1 or args[0].startswith("-"):
-        sys.exit(__doc__.strip().splitlines()[0] + " — usage: delegate-wake [--url URL] SESSION_ID")
-    body = json.dumps({"parts": [{"type": "text", "text": message()}]}).encode()
-    req = urllib.request.Request(url.rstrip("/") + f"/session/{args[0]}/prompt_async",
-                                 data=body, method="POST",
-                                 headers={"Content-Type": "application/json"})
+        sys.exit(__doc__.strip().splitlines()[0] + " — usage: delegate-wake [--url URL] [SESSION_ID]"
+                 " (SESSION_ID defaults to $OPENCODE_SESSION_ID)")
+    session = args[0]
+    base, auth = split_auth(url)
+    text = message()
     err = None
     for i in range(3):
         try:
-            with urllib.request.urlopen(req, timeout=15) as r:
-                if r.status in (200, 204):
-                    print(f"delegate-wake: {args[0]} woken")
-                    return 0
-                err = f"http {r.status}"
+            gen = wake_once(base, session, auth, text)
+            print(f"delegate-wake: {session} woken ({gen} api)")
+            return 0
+        except Fatal as e:
+            print(f"delegate-wake: {e}; not retrying — the chain's state is on disk, poll it",
+                  file=sys.stderr)
+            return 1
         except (urllib.error.URLError, OSError) as e:
-            err = str(e)
+            err = str(getattr(e, "reason", e))
         time.sleep(2 * (i + 1))
     print(f"delegate-wake: giving up after 3 tries ({err}); the chain's state is on disk — poll it",
           file=sys.stderr)
