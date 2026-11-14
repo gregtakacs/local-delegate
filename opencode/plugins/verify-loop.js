@@ -47,7 +47,7 @@ export const VerifyLoop = async () => ({
 
     output.output +=
       "\n\n<verify-reminder>UI file changed: " + file +
-      ". Per ~/.config/opencode/rules/verify-ui.md \u00a7C: GROW THE ARTIFACT FIRST (\u00a7C's 6000-char" +
+      ". Per ~/.config/opencode/rules/verify-ui.md \u00a7C: GROW THE ARTIFACT FIRST (\u00a7C's edit" +
       " cap makes one-shot writes impossible \u2014 grow it feature by feature until the \u00a710" +
       " enumeration is exhausted), then do" +
       " ONE sweep: capture and READ a screenshot of every user-visible state of it (`delegate-shot` is" +

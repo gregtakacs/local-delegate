@@ -1,5 +1,5 @@
 #!/bin/bash
-# chunk-cap.js honours DELEGATE_CHUNK_CAP (default: Cline's 6000; invalid or < 1000 -> 6000).
+# chunk-cap.js honours DELEGATE_CHUNK_CAP (default 8000, Cline's own is 6000; invalid or < 1000 -> 8000).
 # Runs the plugin's hook in node inside the worker image, since the host may have no node.
 # Also: with no config, bin/delegate hands workers 8000 (delegate's default); a config value wins.
 set -u
@@ -22,14 +22,14 @@ probe() { # cap-env-or-"unset" tool field size -> prints "ok" or "rejected:<limi
       catch (e) { console.log('rejected:' + (e.message.match(/limit of (\d+)/) || [])[1]); }"
 }
 check() { local got; got=$(probe "$1" "$2" "$3" "$4"); if [ "$got" = "$5" ]; then echo "ok   cap=$1 $2.$3=$4 -> $got"; else echo "FAIL cap=$1 $2.$3=$4 -> $got (want $5)"; fail=1; fi; }
-check unset write content    6000 ok
-check unset write content    6001 rejected:6000
+check unset write content    8000 ok
+check unset write content    8001 rejected:8000
 check 8000  write content    7999 ok
 check 8000  write content    8000 ok
 check 8000  write content    8001 rejected:8000
 check 8000  edit  newString  8500 rejected:8000
 check 8000  edit  oldString  8500 rejected:8000
 check 8000  bash  command    50000 ok
-check junk  write content    6001 rejected:6000
-check 500   write content    6001 rejected:6000
+check junk  write content    8001 rejected:8000
+check 500   write content    8001 rejected:8000
 exit $fail

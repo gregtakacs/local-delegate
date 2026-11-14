@@ -109,7 +109,7 @@ A malformed tool call does nothing and can end your turn. Shape every call so it
   A call written as text is not executed.
 - **One logical change per call, and small payloads.** Prefer `edit` with a short, unique
   `oldString` over rewriting a whole file. For new files, write a skeleton, then grow it with
-  edits (the 6000-character cap enforces this). Large payloads are where escaping breaks.
+  edits (the configured edit cap, default 8000, enforces this). Large payloads are where escaping breaks.
 - **`oldString` is copied, not recalled.** Take it from a fresh read of those exact lines,
   including whitespace. If an edit fails with "Could not find oldString", re-read the region
   before retrying. Never retry the same string blindly.

@@ -1,7 +1,8 @@
 // chunk-cap.js — verbatim port of Cline's editor size gate + Cline's own schema wording.
 //
-// FIDELITY RULE: this file quotes Cline; it does not paraphrase or improve on it. No invented
-// numbers live here. Every constant and user-facing string comes from stock Cline source:
+// FIDELITY RULE: this file quotes Cline; it does not paraphrase or improve on it. Every user-facing
+// string comes from stock Cline source; the one number that departs from it, delegate's default
+// cap, is named and explained below:
 //   constant:  schemas.ts:10  export const INPUT_ARG_CHAR_LIMIT = 6000 (same name, same value)
 //   validator: helpers.ts:20-33 getEditorSizeError, called EXACTLY ONCE, definitions.ts:717
 //   wording:   schemas.ts:205/210 (editor field guidance) and :130 (bash guidance)
@@ -16,7 +17,7 @@
 //     timeout path is near-unreachable, and its real behavioral role is the "to avoid timeouts"
 //     schema wording, which IS ported below via tool.definition.
 //
-// DODGE DISCLOSED: apply_patch can write files here, so a model could exceed 6000 chars in one
+// DODGE DISCLOSED: apply_patch can write files here, so a model could exceed the cap in one
 // patch. Cline's model had the identical hole and never used it. Reproducing Cline includes
 // reproducing the hole; a run that exploits it is measured behavior, not a bug to patch.
 //
@@ -32,15 +33,16 @@
 // minus clauses describing Cline-tool mechanics opencode lacks (insert_line), since those would be
 // false here.
 
-// Cline schemas.ts:10, same name, same value — the default. DELEGATE_CHUNK_CAP is the one
-// deliberate departure from Cline: an operator can raise (or lower) the cap for their own model.
-// Measured on one install (2026-11-12): 9 of 14 rejections were under 8000 chars and each cost a
-// full turn, while the payloads the cap exists to stop (one-shot whole files) ran 10k–18k.
-// Anything that isn't an integer >= 1000 falls back to Cline's value.
-const CLINE_INPUT_ARG_CHAR_LIMIT = 6000;
+// Cline schemas.ts:10 is INPUT_ARG_CHAR_LIMIT = 6000. delegate departs from it deliberately, twice:
+// the default is 8000, and DELEGATE_CHUNK_CAP lets an operator raise or lower the cap for their own
+// model. Measured on one install (2026-11-12): 9 of 14 rejections at 6000 were under 8000 chars and
+// each cost a full turn, while the payloads the cap exists to stop (one-shot whole files) ran
+// 10k–18k. Anything that isn't an integer >= 1000 falls back to the default.
+const CLINE_INPUT_ARG_CHAR_LIMIT = 6000; // reference only: Cline's own value
+const DELEGATE_DEFAULT_CHAR_LIMIT = 8000;
 const configured = Number.parseInt(process.env.DELEGATE_CHUNK_CAP ?? "", 10);
 const INPUT_ARG_CHAR_LIMIT =
-  Number.isInteger(configured) && configured >= 1000 ? configured : CLINE_INPUT_ARG_CHAR_LIMIT;
+  Number.isInteger(configured) && configured >= 1000 ? configured : DELEGATE_DEFAULT_CHAR_LIMIT;
 
 // Cline helpers.ts:25/29, verbatim. Only ${field} is a translation: opencode names payloads
 // oldString/newString/content where Cline has old_text/new_text; the model must map its own args.

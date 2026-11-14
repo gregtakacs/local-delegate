@@ -57,8 +57,8 @@ at minimum). Then enumerate what you could NOT verify. Never imply you saw somet
 ## C. Grow the artifact; never write it in one shot.
 
 **Chunking is enforced by the harness, not advised by this file.** `write`/`edit` payloads over
-6,000 characters are rejected (`plugins/chunk-cap.js`, a letter-port of stock Cline's editor gate
-— same constant, same rejection message, Cline's own schema guidance appended to the write/edit/
+the configured edit cap (default 8000) are rejected (`plugins/chunk-cap.js`, a letter-port of stock
+Cline's editor gate — same rejection message, Cline's own schema guidance appended to the write/edit/
 bash tool descriptions), so skeleton-then-grow is the only writable shape here, exactly as
 it is on stock Cline. What a one-shot write physically cannot do is add a feature you did not
 think of before you started typing — which is why the artifact has to be grown.

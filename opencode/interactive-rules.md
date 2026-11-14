@@ -95,7 +95,7 @@ Emit every independent read, search and command for the next step in one message
   tool-call markup (`<tool_call>`, `<function=...>`, JSON call objects) in message text — a
   call written as text is not executed.
 - **One logical change per call, small payloads.** Prefer `edit` with a short unique
-  `oldString`. For new files write a skeleton, then grow it with edits (6000-character cap).
+  `oldString`. For new files write a skeleton, then grow it with edits (the configured edit cap, default 8000).
 - **`oldString` is copied, not recalled** — from a fresh read of those exact lines. If an edit
   fails, re-read the region before retrying.
 - **Keep shell commands simple.** No long heredocs with nested quotes; write the file with the
