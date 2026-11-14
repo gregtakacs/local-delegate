@@ -60,10 +60,12 @@ Rounds take minutes to over an hour:
   carry the outcome; the hook is best-effort and its failure never changes the chain's. Fire it
   from the *launching* command and stay idempotent: a resumed chain fires `--on-done` again at
   its next terminal exit, and a killed one never fires — so the hook says *when to look*, and
-  `--status` stays the truth. For a wake-up that acts: `delegate-wake SESSION_ID` (shipped on
+  `--status` stays the truth. For a wake-up that acts: `delegate-wake [SESSION_ID]` (shipped on
   PATH, `--url`/`$DELEGATE_WAKE_URL` to point elsewhere) posts a fixed-template "chain ended,
-  verify" prompt to that session's `prompt_async` endpoint — an opencode server answers 204 and
-  the session runs the prompt as a normal turn, appearing in its `/global/event` stream. Behind
+  verify" prompt into that session — opencode 2's `POST /api/session/<id>/prompt` (200), else
+  opencode 1's `prompt_async` (204) — and the session runs it as a normal turn. On opencode 2 the
+  id defaults to `$OPENCODE_SESSION_ID` and the Basic password to `$OPENCODE_SERVER_PASSWORD`,
+  both of which an agent's shell inherits; a rejected password or unknown session fails at once. Behind
   the codehub hub, that call goes through the hub's proxy.
 - **Either way:** the report is what you act on. Its `STATUS (harness):` line is `done`,
   `partial`, `blocked`, `no-status`, `worker-error`, `timeout`, `truncated` or

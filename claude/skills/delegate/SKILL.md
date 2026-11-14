@@ -106,12 +106,14 @@ and runs the chain itself.
   the session polling. `--on-step` fires when a step is accepted (`$DELEGATE_CHAIN_STEP`,
   `$DELEGATE_CHAIN_STEP_N`, `_STEP_TOTAL`, `_DELEGATE_CHAIN_STATUS`), `--on-done` when the run
   ends (`$DELEGATE_CHAIN_RC`, `_STATUS`). Let the hook wake *you* where the harness allows it —
-  for opencode that is `delegate-wake SESSION_ID` (on PATH after install; `--url` or
-  `$DELEGATE_WAKE_URL` for a non-default server; it posts a fixed-template prompt to
-  `/session/<id>/prompt_async`), and you verify and relaunch the chain from that turn; otherwise
-  let it ping the person (ntfy, desktop). Your own opencode session id is not in the session's
-  environment: read it from `GET <server>/session?directory=<repo dir>` (the newest session is
-  you) and export it before launching, along with `DELEGATE_WAKE_URL`. Idempotent and cheap only: a resumed chain fires `--on-done` again at its next
+  for opencode that is `delegate-wake` (on PATH after install; `--url` or `$DELEGATE_WAKE_URL`
+  for a non-default server; it posts a fixed-template prompt into the session — opencode 2's
+  `/api/session/<id>/prompt`, falling back to opencode 1's `/session/<id>/prompt_async`), and you
+  verify and relaunch the chain from that turn; otherwise let it ping the person (ntfy, desktop).
+  On opencode 2 your own session id is `$OPENCODE_SESSION_ID` and the server password is in
+  your environment, so a bare `delegate-wake` needs no arguments; on opencode 1 the id is not in
+  the environment — read it from `GET <server>/session?directory=<repo dir>` (the newest session
+  is you) and pass it as `delegate-wake SESSION_ID`, with `DELEGATE_WAKE_URL` exported. Idempotent and cheap only: a resumed chain fires `--on-done` again at its next
   terminal exit, a killed one never fires, and a failing hook is a warning line, never a changed
   outcome — so the hook says *when to look* and `--status` stays the source of truth.
 - Base each chain on the design branch, so the `Plan:` commit travels with the slice.
