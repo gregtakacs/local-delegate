@@ -66,8 +66,8 @@ The installer:
 - writes `~/.config/delegate/config.env`, and never overwrites an existing one;
 - **harness profile for the orchestrator's own harness:** when `~/.claude` exists it installs the
   Claude Code profile by default (`--claude-profile`, opt out with `--no-claude-profile`) — the
-  shared rules file, the hook wiring and the plugin links, all recorded under a `_delegate` marker
-  so a re-run updates only delegate's entries and `--uninstall` removes exactly those. The rendered
+  shared rules file, the hook wiring and the plugin links, all recorded (Claude Code: in `~/.claude/delegate-profile.json`;
+  OpenCode: a `_delegate` key in `opencode.json`) so a re-run updates only delegate's entries and `--uninstall` removes exactly those. The rendered
   permission arrays are **off by default on the host**; add `--claude-permissions` only if the
   person wants delegate's shared policy written into `~/.claude/settings.json` (their call — it
   changes how interactive Claude answers every prompt). `delegate doctor` WARNs when the permission

@@ -2,9 +2,11 @@
 """merge-claude-settings.py — install the delegate harness profile into ~/.claude (O1b step 5).
 
 The Claude Code half of the installer's merge contract (design §8.2): keep everything the user
-has, add only what delegate needs, mark what is ours under the top-level `_delegate` key, and
-refuse (exit 1, file untouched) a settings.json that is not valid JSON. Mirrors
-merge-opencode-permissions.py's discipline; settings.json tolerates the unknown `_delegate` key.
+has, add only what delegate needs, record what is ours in the sibling file
+`delegate-profile.json` (design owner question 3's fallback), and refuse (exit 1, file untouched)
+a settings.json that is not valid JSON. The record can NOT live in settings.json: live on Claude
+Code 2.1.325 (2026-11-15) an unknown top-level `_delegate` key made Claude Code ignore the file's
+hooks. A `_delegate` key left by an earlier build of this helper is migrated out on install.
 
   --settings PATH    the settings file (default: $HOME/.claude/settings.json; tests pass this)
   --home PATH        home whose .claude dir is the target (overridable for tests)
@@ -60,6 +62,7 @@ class Target:
             self.claude_dir = os.path.join(home, ".claude")
             self.settings = os.path.join(self.claude_dir, "settings.json")
         self.rules_file = os.path.join(self.claude_dir, "rules", "delegate-harness.md")
+        self.record = os.path.join(self.claude_dir, "delegate-profile.json")
 
 
 def hook_specs(install, with_agent_progress):
@@ -265,9 +268,25 @@ def write_rules(target, content, recorded_sha=None):
     return "copy", digest
 
 
-def record_of(doc):
+def record_of(target, doc):
+    """Our record: the sibling file, else a legacy in-file `_delegate` key; None when neither."""
+    try:
+        with open(target.record) as f:
+            r = json.load(f, object_pairs_hook=OrderedDict)
+        if isinstance(r, dict):
+            return r
+    except (OSError, ValueError):
+        pass
     r = doc.get("_delegate")
     return r if isinstance(r, dict) else None
+
+
+def save_record(target, record):
+    tmp = target.record + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(record, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, target.record)
 
 
 def _present_in(perms, s):
@@ -288,10 +307,10 @@ def cmd_install(o):
         return die("%s is not a JSON object; file left untouched" % target.settings)
     specs = hook_specs(o["install"], o["agent_progress"])
     try:
-        record = record_of(doc) or OrderedDict([("version", POLICY_VERSION)])
+        record = record_of(target, doc) or OrderedDict([("version", POLICY_VERSION)])
         missing, adopted = merge_hooks(doc, specs)
         record["hooks"] = sorted(set(record.get("hooks", [])) | set(adopted) | set(specs.keys()))
-        doc["_delegate"] = record
+        doc.pop("_delegate", None)   # never in settings.json (it disables the file's hooks)
         if o["permissions"]:
             rendered = render_permissions(o["policy"], os.path.dirname(target.claude_dir))
             added, adopted_p = merge_permissions(doc, rendered)
@@ -307,6 +326,7 @@ def cmd_install(o):
     except (RuntimeError, subprocess.SubprocessError) as e:
         return die(str(e))
     save(target, doc)
+    save_record(target, record)
     print("claude settings: merged hooks into %s (%d entries)%s"
           % (target.settings, sum(len(v) for v in specs.values()),
              ", adopted yours: " + ", ".join(adopted) if adopted else ""))
@@ -333,8 +353,12 @@ def cmd_check(o):
     if not isinstance(doc, dict):
         print("check hooks: fail %s is not a JSON object; fix: re-run install.sh" % target.settings)
         return 1
-    record = record_of(doc)
+    record = record_of(target, doc)
     rc = 0
+    if "_delegate" in doc:
+        print("check hooks: fail settings.json carries a `_delegate` key, which makes Claude Code "
+              "ignore its hooks; fix: re-run install.sh")
+        rc = 1
     specs = hook_specs(o["install"], "agent-progress" in ((record or {}).get("hooks") or []))
     if "hooks" in areas:
         if record is None:
@@ -422,9 +446,9 @@ def cmd_uninstall(o):
         return die("%s is not valid JSON (%s); nothing removed" % (target.settings, e))
     if not isinstance(doc, dict):
         return die("%s is not a JSON object; nothing removed" % target.settings)
-    record = record_of(doc)
+    record = record_of(target, doc)
     if record is None:
-        print("claude settings: no _delegate record; nothing of ours to remove")
+        print("claude settings: no delegate record; nothing of ours to remove")
     else:
         hooks = doc.get("hooks")
         if isinstance(hooks, dict):
@@ -473,6 +497,10 @@ def cmd_uninstall(o):
             del doc["hooks"]
         doc.pop("_delegate", None)
         save(target, doc)
+        try:
+            os.unlink(target.record)
+        except OSError:
+            pass
         print("claude settings: removed delegate entries from %s" % target.settings)
     sha = (record or {}).get("rules_sha256")
     if os.path.lexists(target.rules_file):

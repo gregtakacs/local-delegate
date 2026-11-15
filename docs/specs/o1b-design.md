@@ -212,6 +212,8 @@ a probe that steps 4/5 depend on is not PASS.
 | S6 | PASS | 2026-11-15 | 2.1.325 | route: project `CLAUDE.md` `@import` of the FILE works; `@import` of a directory and a read-the-dir user rule did not load it. Step 5 installs file imports (`.clinerules` and each `.clinerules/*.md` by name) |
 | S7 | NOT RUN (moot for install) | 2026-11-15 | 2.1.325 | needs a second logged-in config dir. The installer copies the rules file with a recorded sha (§8, owner decision 3), so the symlink question does not arise; that `~/.claude/rules/*.md` loads in an arbitrary project is checked live in step 6 |
 
+**Review live check (2026-11-15, Claude Code 2.1.325, `claude -p` with a settings file the step-5 helper rendered):** the guard answers `PermissionRequest` for the plain exception (`curl … /healthz` ran under `ask: Bash(curl *)`) and stays silent for the same command with `; echo` or `| cat` appended and for a non-exception curl (all denied headless). The same run found that a top-level `_delegate` key in settings.json makes Claude Code skip the file's hooks: the record moved to `~/.claude/delegate-profile.json` (§8.2). Still owed after the host install: a plain interactive session loads `~/.claude/rules/delegate-harness.md` in an arbitrary project.
+
 No row is left a placeholder: the sandbox-runnable legs (S5, and S1–S4/S6 on a logged-in Claude
 2.1.x) record PASS above; S7 stays NOT RUN because install never symlinks it (copy + sha, owner
 decision 3). **The orchestrator must re-run `claude/spikes/run.sh` on a logged-in Claude Code
@@ -346,11 +348,15 @@ New `lib/merge-claude-settings.py`, mirroring the opencode merge's contract:
   `Edit|Write` matcher, one `*`), `SessionStart`, `PreCompact`, `PermissionRequest`, each command
   `python3 <install>/claude/hooks/harness.py` — the existing `--claude-hook` block's exec discipline
   (`agent-progress.py` entries untouched, no duplicate ids). When `--claude-permissions` is passed,
-  merge the rendered `permissions` block (§7.2). Ownership marker: top-level
-  `"_delegate": {"version": N, "hooks": [entry ids], "permissions": [rule strings],
-  "rules_sha256": "…", "rules_target": "…"}`; re-runs update exactly those. A settings file without
-  `_delegate` whose entries match our command strings is **adopted** (the upgrade path from today's
-  `--claude-hook` shape).
+  merge the rendered `permissions` block (§7.2). Ownership record: the sibling file
+  `~/.claude/delegate-profile.json`, `{"version": N, "hooks": [entry ids], "permissions": [rule
+  strings], "rules_sha256": "…", "rules_target": "…", "install": "<tree>"}`; re-runs update exactly
+  those. **Not** a `_delegate` key in settings.json (Q3's fallback, taken at review 2026-11-15:
+  live on Claude Code 2.1.325 an unknown top-level key made Claude Code ignore the file's hooks;
+  OpenCode 2.3 drops an unknown key silently, so `opencode.json` keeps its `_delegate` marker). An
+  install migrates a legacy in-file key out; doctor FAILs while one is present. A settings file
+  with no record whose entries match our command strings is **adopted** (the upgrade path from
+  today's `--claude-hook` shape).
 - `~/.claude/rules/delegate-harness.md`: core+adapter as one installed file (symlink into `current/`
   when spike S7 proves Claude follows symlinked rule files; copy + `rules_sha256` otherwise).
   Never `~/.claude/CLAUDE.md` (double-load ruling, handoff §3).
@@ -469,6 +475,8 @@ tests self-skip as today (`DOCKER=1` gates the proxy test).
    there) passes the flag. Doctor WARNs "claude permissions not installed" so drift is visible, not
    silent.
 3. **`_delegate` marker key vs sibling file** (§8.1): pick marker key; fallback pre-decided for step 5.
+   **Reversed at review (2026-11-15) for Claude Code only:** sibling file `delegate-profile.json`
+   (the key disabled settings.json's hooks live). OpenCode keeps the key.
 4. **Worker keeps `delegate-rules.md` as headless adapter rather than folding it into the core now**
    (§3.3): pick fold-later — one release of behaviour change at a time.
 

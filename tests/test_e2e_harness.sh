@@ -43,7 +43,8 @@ check "opencode: core + adapter both in instructions" \
 check "opencode: policy render added a deny row" "grep -q 'sudo' '$(OCFG "$H")'"
 check "opencode: \$schema kept (merge never clobbers foreign keys)" "grep -q 'opencode.ai/config.json' '$(OCFG "$H")'"
 # claude side: hooks + marker + permissions block (flag on) + rules file for the harness
-check "settings: _delegate record present" "grep -q '_delegate' '$(SET "$H")'"
+check "settings: delegate record present (sibling file)" "[ -s '$H/.claude/delegate-profile.json' ]"
+check "settings: no _delegate key in settings.json" "! grep -q '_delegate' '$(SET "$H")'"
 check "settings: harness hooks installed" "grep -q 'claude/hooks/harness.py' '$(SET "$H")'"
 check "settings: permissions rendered on --claude-permissions" \
   "jq '$(SET "$H")' 'len(d[\"permissions\"][\"deny\"]) > 0' | grep -q True"
@@ -89,7 +90,7 @@ cp "$(OCFG "$H")" "$T/oc.ref"; cp "$(SET "$H")" "$T/st.ref"; cp "$H/.claude/rule
 out=$(inst "$H" --uninstall 2>&1); rc=$?
 check "uninstall exits 0" "[ $rc -eq 0 ]"
 check "uninstall: opencode _delegate record gone" "! grep -q '_delegate' '$(OCFG "$H")'"
-check "uninstall: claude _delegate record gone" "! grep -q '_delegate' '$(SET "$H")'"
+check "uninstall: claude delegate record gone" "[ ! -e '$H/.claude/delegate-profile.json' ]"
 check "uninstall: our deny row gone from opencode" "! grep -q 'sudo' '$(OCFG "$H")'"
 check "uninstall: foreign opencode entry kept" "grep -q 'my-own' '$(OCFG "$H")'"
 check "uninstall: foreign claude deny kept" "grep -q 'my-own-rule' '$(SET "$H")'"

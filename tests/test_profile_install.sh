@@ -32,9 +32,10 @@ check "opencode: \$schema kept" "grep -q 'opencode.ai/config.json' '$(OCFG "$H")
 check "settings: unknown keys kept" "jq '$(SET "$H")' 'd[\"model\"]' | grep -q opus"
 check "settings: foreign hook kept" "grep -q 'foreign.py' '$(SET "$H")'"
 check "settings: harness hook in" "grep -q 'claude/hooks/harness.py' '$(SET "$H")'"
-check "settings: marker" "grep -q '_delegate' '$(SET "$H")'"
+check "settings: record in the sibling file" "grep -q '\"hooks\"' '$H/.claude/delegate-profile.json'"
+check "settings: no _delegate key in settings.json (Claude Code would ignore its hooks)" "! grep -q '_delegate' '$(SET "$H")'"
 check "rules file written" "[ -s '$H/.claude/rules/delegate-harness.md' ]"
-check "rules sha recorded" "grep -q rules_sha256 '$(SET "$H")'"
+check "rules sha recorded" "grep -q rules_sha256 '$H/.claude/delegate-profile.json'"
 check "four plugin links" "[ -L '$(PLUG "$H" chunk-cap)' ] && [ -L '$(PLUG "$H" notes-loop)' ] && [ -L '$(PLUG "$H" todo-loop)' ] && [ -L '$(PLUG "$H" verify-loop)' ]"
 check "plugin links resolve into the tree" "readlink -f '$(PLUG "$H" chunk-cap)' | grep -qF '$here/'"
 check "permissions merged on request" "jq '$(SET "$H")' 'len(d[\"permissions\"][\"deny\"])' | grep -qvE '^0$'"
@@ -113,7 +114,7 @@ json.dump({"hooks": {"SessionStart": [{"matcher": "*", "hooks": [
 PY
 inst "$HA" >/dev/null 2>&1 || true
 check "adopt: the manual entry is recorded, not duplicated" \
-  "jq '$(SET "$HA")' 'len(d[\"_delegate\"][\"hooks\"]) >= 4' | grep -q True"
+  "jq '$HA/.claude/delegate-profile.json' 'len(d[\"hooks\"]) >= 4' | grep -q True"
 check "adopt: doctor agrees the hooks are in place" "doc '$HA' >/dev/null 2>&1"
 
 # ---- 6. invalid JSON: refused, file untouched ----
@@ -146,7 +147,7 @@ check "uninstall: rules file gone" "[ ! -e '$HZ/.claude/rules/delegate-harness.m
 check "uninstall: opencode marker gone" "! grep -q _delegate '$(OCFG "$HZ")'"
 check "uninstall: our deny row gone" "! grep -q 'sudo' '$(OCFG "$HZ")'"
 check "uninstall: foreign opencode entry kept" "grep -q 'my-own' '$(OCFG "$HZ")'"
-check "uninstall: claude marker gone" "! grep -q _delegate '$(SET "$HZ")'"
+check "uninstall: claude record gone" "[ ! -e '$HZ/.claude/delegate-profile.json' ]"
 check "uninstall: foreign deny kept in settings" "grep -q 'my-own-rule' '$(SET "$HZ")'"
 check "uninstall: hand-edited entry left with a NOTE" "grep -q 'timeout\": 99' '$(SET "$HZ")' && printf %s \"\$out\" | grep -q 'NOTE'"
 check "uninstall: skill links gone" "[ ! -L '$HZ/.claude/skills/delegate' ] && [ ! -L '$HZ/.local/bin/delegate' ]"
@@ -171,7 +172,7 @@ check "spaces in HOME: doctor exits 0" "doc '$HS/x' >/dev/null 2>&1"
 HH="$T/hhook"; mkhome "$HH"; mkdir -p "$HH/.claude"
 inst "$HH" --claude-hook >/dev/null 2>&1 || true
 check "--claude-hook: agent-progress registered" "grep -q 'agent-progress.py' '$(SET "$HH")'"
-check "--claude-hook: profile installed too (marker present)" "grep -q '_delegate' '$(SET "$HH")'"
+check "--claude-hook: profile installed too (record present)" "[ -s '$HH/.claude/delegate-profile.json' ]"
 check "--claude-hook: harness hooks present alongside" "grep -q 'harness.py' '$(SET "$HH")'"
 out=$(doc "$HH"); rc=$?
 check "--claude-hook: doctor exits 0" "[ $rc -eq 0 ]"
@@ -218,7 +219,17 @@ check "update: a hand-edited rules file is refused" "! MC --install '$U/tree' --
 check "update: ...and kept" "grep -q 'my own line' '$U/home/.claude/rules/delegate-harness.md'"
 MC --uninstall --install "$T/elsewhere" --real-dir "$U/tree" >/dev/null 2>&1
 check "uninstall from another tree: our hooks gone" "! grep -q 'harness.py' '$U/home/.claude/settings.json'"
-check "uninstall from another tree: marker gone" "! grep -q '_delegate' '$U/home/.claude/settings.json'"
+check "uninstall from another tree: record gone" "[ ! -e '$U/home/.claude/delegate-profile.json' ]"
+
+# A settings.json carrying an in-file _delegate key (an earlier build of the helper) is migrated:
+# the key leaves settings.json, the record lands in the sibling file, doctor's hooks check FAILs first.
+M="$T/mig"; mkdir -p "$M/.claude"
+printf '{"model":"x","_delegate":{"version":1,"hooks":["todo-loop"]}}\n' > "$M/.claude/settings.json"
+check "migration: check FAILs on an in-file key" "python3 '$here/lib/merge-claude-settings.py' --home '$M' --check hooks | grep -q 'hooks: fail.*_delegate'"
+python3 "$here/lib/merge-claude-settings.py" --home "$M" --install "$here" --real-dir "$here" >/dev/null 2>&1
+check "migration: key gone from settings.json" "! grep -q _delegate '$M/.claude/settings.json'"
+check "migration: other keys kept" "grep -q '\"model\"' '$M/.claude/settings.json'"
+check "migration: record in the sibling file" "grep -q todo-loop '$M/.claude/delegate-profile.json'"
 
 if [ "$fail" = 0 ]; then echo "PASS test_profile_install"; else echo "FAIL test_profile_install"; fi
 exit $fail
