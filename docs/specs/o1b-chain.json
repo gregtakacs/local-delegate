@@ -1,0 +1,44 @@
+{
+  "name": "o1b",
+  "repo": "../..",
+  "base": "main",
+  "retries": 2,
+  "steps": [
+    {
+      "name": "o1b-1-hook-spike",
+      "spec": "docs/specs/o1b-1-hook-spike.md",
+      "hard": true,
+      "verify": "set -o pipefail && bash -n bin/delegate bin/delegate-wake install.sh worker/entrypoint.sh claude/spikes/run.sh claude/spikes/probe-*.sh && python3 -m py_compile lib/*.py && bash tests/test_spikes.sh && for t in tests/test_*.sh; do bash \"$t\" || exit 1; done && ! git diff --name-only main -- ':(exclude)config.example.env' | grep -qvE '^(claude/spikes/|tests/|docs/specs/)'"
+    },
+    {
+      "name": "o1b-2-rules-core",
+      "spec": "docs/specs/o1b-2-rules-core.md",
+      "hard": false,
+      "verify": "set -o pipefail && bash -n bin/delegate bin/delegate-wake install.sh worker/entrypoint.sh claude/spikes/run.sh && python3 -m py_compile lib/*.py && for t in tests/test_*.sh; do bash \"$t\" || exit 1; done && ! git diff --name-only delegate/o1b-1-hook-spike -- ':(exclude)config.example.env' | grep -qvE '^(opencode/|worker/|claude/skills/|claude/agents/|docs/|README[.]md$|AGENTS[.]md$|tests/)'"
+    },
+    {
+      "name": "o1b-3-policy",
+      "spec": "docs/specs/o1b-3-policy.md",
+      "hard": true,
+      "verify": "set -o pipefail && bash -n bin/delegate bin/delegate-wake install.sh && python3 -m py_compile lib/*.py && for t in tests/test_*.sh; do bash \"$t\" || exit 1; done && ! git diff --name-only delegate/o1b-2-rules-core -- ':(exclude)config.example.env' | grep -qvE '^(policy/|lib/|tests/|docs/specs/)'"
+    },
+    {
+      "name": "o1b-4-hooks",
+      "spec": "docs/specs/o1b-4-hooks.md",
+      "hard": true,
+      "verify": "set -o pipefail && bash -n bin/delegate bin/delegate-wake install.sh && python3 -m py_compile lib/*.py claude/hooks/*.py && for t in tests/test_*.sh; do bash \"$t\" || exit 1; done && ! git diff --name-only delegate/o1b-3-policy -- ':(exclude)config.example.env' | grep -qvE '^(claude/hooks/|opencode/plugins/|tests/|docs/specs/)'"
+    },
+    {
+      "name": "o1b-5-install-doctor",
+      "spec": "docs/specs/o1b-5-install-doctor.md",
+      "hard": true,
+      "verify": "set -o pipefail && bash -n bin/delegate bin/delegate-wake install.sh worker/entrypoint.sh claude/spikes/run.sh && python3 -m py_compile lib/*.py claude/hooks/*.py && for t in tests/test_*.sh; do bash \"$t\" || exit 1; done && ! git diff --name-only delegate/o1b-4-hooks -- ':(exclude)config.example.env' | grep -qvE '^(install[.]sh$|bin/delegate$|lib/|tests/|docs/|README[.]md$|worker/)'"
+    },
+    {
+      "name": "o1b-6-acceptance",
+      "spec": "docs/specs/o1b-6-acceptance.md",
+      "hard": true,
+      "verify": "set -o pipefail && bash -n bin/delegate bin/delegate-wake install.sh worker/entrypoint.sh claude/spikes/run.sh tests/test_e2e_harness.sh && python3 -m py_compile lib/*.py claude/hooks/*.py && for t in tests/test_*.sh; do bash \"$t\" || exit 1; done && ! grep -rq TODO docs/specs/o1b-design.md && ! git diff --name-only delegate/o1b-5-install-doctor -- ':(exclude)config.example.env' | grep -qvE '^(tests/|docs/|README[.]md$|AGENTS[.]md$)'"
+    }
+  ]
+}
