@@ -28,6 +28,27 @@ fi
 
 expand() { local p=$1; case "$p" in "~"|"~/"*) p="$HOME${p#\~}";; esac; printf '%s' "$p"; }
 
+# ${XDG_DATA_HOME:-~/.local/share}/delegate: where install.sh --release keeps versioned trees
+# and the `current` symlink they all run through. An empty or relative XDG_DATA_HOME is unset.
+delegate_data_root() {
+  local d=${XDG_DATA_HOME:-}
+  case "$d" in /*) ;; *) d=$HOME/.local/share ;; esac
+  printf '%s' "$d/delegate"
+}
+
+# Which tree am I: an install.sh --release version dir reached through `current`, or a plain
+# checkout? The one line `doctor` prints and `--version` repeats, so both always agree.
+install_line() {
+  local droot; droot=$(delegate_data_root)
+  if [ -L "$droot/current" ] && [ "$(readlink -f "$droot/current")" = "$DELEGATE_HOME" ]; then
+    local itag; itag=$(sed -n '1p' "$DELEGATE_HOME/.delegate-version" 2>/dev/null || true)
+    [ -n "$itag" ] || itag=${DELEGATE_HOME##*/}
+    echo "install: release $itag (current -> $DELEGATE_HOME)"
+  else
+    echo "install: dev checkout ($DELEGATE_HOME)"
+  fi
+}
+
 : "${DELEGATE_BASE_URLS:=${DELEGATE_BASE_URL:-}}"
 : "${DELEGATE_API_KEY_FILE:=${XDG_CONFIG_HOME:-$HOME/.config}/delegate/api-key}"
 : "${DELEGATE_MODEL:=}"
@@ -1350,9 +1371,120 @@ cmd_build() {
   done
 }
 
+# delegate update — move a release install to another tag. Retargets `current`, atomically, and
+# only that: the links install.sh made already point through current, so flipping it is the whole
+# update. Nothing is deleted (the version you came from is the rollback), and the fetch is done by
+# the code in the tree that is RUNNING — never by a binary from the version being installed.
+update_usage() {
+  cat <<'EOF'
+usage: delegate update [--to TAG] [--repo URL] [--from DIR]
+
+  Retarget this release install's `current` at TAG: clone TAG (depth 1) from the recorded repo,
+  refuse unless the clone really carries the tag and its VERSION matches it, then flip. The
+  links are untouched, so they follow the flip. Defaults: --to is the tag recorded in
+  current/.delegate-source (a bare `delegate update` re-fetches or repairs what you have), and
+  the source is that record's repo= — --repo URL overrides it, --from DIR overrides both.
+  An existing version dir is reused only when its own .delegate-version stamp names it.
+
+  Roll back with the same command the other way: delegate update --to <the previous tag>. The
+  previous version directory is kept, and update never deletes any version directory — pruning
+  old releases is a later slice, so until then remove one by hand once current has moved off it.
+
+  Tags are opaque: no version comparison, no downgrade protection. Signature checking
+  (--verify with a minisign signature) is a later slice too, not an unimplemented flag here.
+EOF
+}
+
+cmd_update() {
+  local to="" repo_url="" from_dir="" a
+  while [ $# -gt 0 ]; do
+    a=$1
+    case "$a" in
+      --to|--repo|--from)
+        [ $# -ge 2 ] || die "update: $a needs a value"
+        case "$a" in --to) to=$2 ;; --repo) repo_url=$2 ;; --from) from_dir=$2 ;; esac
+        shift 2 ;;
+      -h|--help|help) update_usage; return 0 ;;
+      *) die "usage: delegate update [--to TAG] [--repo URL] [--from DIR]   (delegate update --help)" ;;
+    esac
+  done
+
+  local droot cur old url src rec_repo="" rec_tag="" lib rc=0
+  droot=$(delegate_data_root); cur=$droot/current
+  # A `current` that is a link to nowhere means a version dir went missing by hand: say so, rather
+  # than sending the reader off to look for a dev checkout that is not what is wrong here.
+  if [ -L "$cur" ] && [ ! -e "$cur" ]; then
+    die "update: $cur is dangling (it points at $(readlink "$cur"), which is gone); name a tag that is on disk with --to TAG, or re-run install.sh --release"
+  fi
+  # Update runs on the tree `current` points at, and nothing else: running it through the installed
+  # link gets you here because the link resolves through current, so DELEGATE_HOME *is* the version
+  # dir. A dev checkout is a git working copy — `git pull` is its update, and this must not touch it.
+  if [ ! -L "$cur" ] || [ "$(readlink -f "$cur")" != "$DELEGATE_HOME" ]; then
+    die "dev checkout: update installs nothing; run install.sh from the checkout you develop ($DELEGATE_HOME)"
+  fi
+  old=$(sed -n '1p' "$DELEGATE_HOME/.delegate-version" 2>/dev/null || true)
+  [ -n "$old" ] || die "update: $DELEGATE_HOME carries no .delegate-version stamp; it is not a release install"
+
+  # Source precedence: the flags over the record; --from over --repo (the tag's commit installs,
+  # never a dirty working copy). --to defaults to the recorded tag: bare update = repair in place.
+  src=$DELEGATE_HOME/.delegate-source
+  if [ -f "$src" ]; then
+    rec_repo=$(sed -n 's/^repo=//p' "$src" | head -n1)
+    rec_tag=$(sed -n 's/^tag=//p' "$src" | head -n1)
+  fi
+  to=${to:-$rec_tag}
+  [ -n "$to" ] || die "update: $src records no tag; pass --to TAG"
+  url=$repo_url
+  if [ -n "$from_dir" ]; then
+    from_dir=$(cd "$from_dir" 2>/dev/null && pwd) || die "update: --from is not a directory: $from_dir"
+    url=file://$from_dir
+  fi
+  [ -n "$url" ] || url=$rec_repo
+  [ -n "$url" ] || die "update: $src records no repo; pass --repo URL or --from DIR"
+
+  # The running version's own copy of the installer's fetch/verify/flip block (the reason it is a
+  # sourced lib rather than lines in install.sh): the code that validates a new tree must not come
+  # from that new tree. Version-independent bash, so the copy you are running is the right one.
+  lib=$DELEGATE_HOME/lib/release-fetch.sh
+  [ -f "$lib" ] || die "update: $lib is missing; this tree cannot install another version of itself"
+  RF_PROG=delegate; RF_FLAG=--to
+  # shellcheck disable=SC1090
+  . "$lib"
+  release_fetch "$to" "$url" "$droot" || exit $?
+
+  echo "updated: $old -> $to (previous kept at $DELEGATE_HOME)"
+
+  # The opencode permission merge, exactly as install.sh's step 5 does it, and deliberately with
+  # the NEW tree's merge script against the NEW tree's rules: after the flip that is the skill an
+  # orchestrator loads, so its own rules are the ones that must land in the config.
+  if command -v opencode >/dev/null 2>&1; then
+    local newtree; newtree=$(readlink -f "$cur")
+    local merge=$newtree/lib/merge-opencode-permissions.py
+    if [ -f "$merge" ]; then
+      python3 "$merge" --skill-dir "${CLAUDE_SKILLS_DIR:-$HOME/.claude/skills}/delegate" \
+        --real-dir "$newtree/claude/skills/delegate" \
+        || warn "opencode config not merged; see the message above"
+    else
+      warn "opencode config not merged: $merge is missing from the installed tree"
+    fi
+  fi
+
+  # Then doctor, from the tree current now points at — the same post-install check install.sh
+  # runs, and the one thing here that does execute the newly installed tree (the flip is done, so
+  # that tree is the install now). A failing doctor does NOT roll the flip back.
+  "$cur/bin/delegate" doctor --quick || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    warn "doctor reported problems; current stays on $to — roll back with: delegate update --to $old"
+    return "$rc"
+  fi
+  return 0
+}
+
 cmd_doctor() {
   local ok=1 u
   echo "delegate $VERSION ($DELEGATE_HOME)"
+  # Which tree am I: an install.sh --release version dir reached through `current`, or a plain checkout?
+  install_line
   echo "config:   $CONFIG_FILE $( [ -f "$CONFIG_FILE" ] && echo '(found)' || echo '(MISSING)')"
   echo "runner:   $DELEGATE_RUNNER   model: $DELEGATE_MODEL   hard: $DELEGATE_MODEL_HARD   context: $DELEGATE_CONTEXT   edit cap: $DELEGATE_CHUNK_CAP"
   echo "state:    $DELEGATE_STATE"
@@ -1472,6 +1604,10 @@ delegate — hand implementation work to a self-hosted coding model, then review
   delegate list                    tasks, rounds, last status
   delegate rm ID [--delete-branch] remove worktree, sidecar and state (branch kept by default)
   delegate build                   build the worker image (docker runner)
+  delegate update [--to TAG] [--repo URL] [--from DIR]
+                                   move a release install to TAG by flipping `current` (install.sh
+                                   --release installs; a dev checkout is updated with git):
+                                   `delegate update --help`
   delegate doctor [--quick]        check config, image, endpoint, and tool calling
 EOF
 }
@@ -1513,8 +1649,12 @@ main() {
     rm) cmd_rm "$@" ;;
     grant) cmd_grant "$@" ;;
     build) cmd_build "$@" ;;
+    update) cmd_update "$@" ;;
     doctor) cmd_doctor "$@" ;;
-    version|--version) echo "$VERSION" ;;
+    # The install line on stderr, the version alone on stdout: that line names the tree, so two
+    # trees cannot print the same one, and tests/test_release_install.sh compares --version's
+    # stdout across two trees to prove the link changed no behaviour. Scripts get one clean token.
+    version|--version) echo "$VERSION"; install_line >&2 ;;
     help|-h|--help) usage ;;
     *) usage; exit 2 ;;
   esac

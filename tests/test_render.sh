@@ -4,6 +4,10 @@
 # pattern alone is a silent no-op. Offline checks always run; DELEGATE_E2E=1 also runs a real
 # opencode round against your configured endpoint and asserts the denied writes did not land.
 set -u
+# The check below asserts the renderer DEFAULTS to the cwd, so the variable must be truly
+# unset — a delegate worker (or any shell) that exports DELEGATE_WORKTREE would otherwise
+# silently test something else. Scrub it like test_top.sh scrubs DELEGATE_STATE/DELEGATE_CONFIG.
+unset DELEGATE_WORKTREE
 here=$(cd "$(dirname "$0")/.." && pwd)
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 fail=0; check(){ if eval "$2"; then echo "ok   $1"; else echo "FAIL $1"; fail=1; fi; }

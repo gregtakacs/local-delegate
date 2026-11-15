@@ -62,6 +62,38 @@ git clone <this repo> ~/src/delegate && cd ~/src/delegate
 It then builds the worker image and runs `delegate doctor --quick`. Review the config afterwards:
 [config.example.env](../config.example.env) documents every setting.
 
+Release installs pin a tag instead of installing whatever a working copy happens to contain:
+
+```bash
+./install.sh --release v0.1.1 [--repo URL | --from DIR] [any install flags above]
+./install.sh --uninstall   # remove just the links this installer made
+./install.sh --purge       # --uninstall, plus the delegate data dir when this checkout is outside it
+```
+
+- `--release TAG` — `git clone --depth 1 --branch TAG`, verify the clone's `VERSION` file says TAG
+  (minus a leading `v`), install it under `~/.local/share/delegate/TAG`, and point `current` at it.
+  An existing version dir is reused only when its own `.delegate-version` stamp names it.
+- `--repo URL` — clone source (default `https://github.com/<owner>/local-delegate`; the `<owner>` is a
+  literal placeholder until there is a public repo, so pass this explicitly).
+- `--from DIR` — clone from this existing local git clone; wins over `--repo`. Only the tag's commit
+  installs — a dirty working copy in DIR is not an error and not installed.
+
+Installed releases live under `~/.local/share/delegate` (`$XDG_DATA_HOME/delegate`): one directory
+per tag plus a `current` symlink. Every link a `--release` install makes points *through* `current`,
+never at a tag dir, so updating is a single atomic flip and two versions on disk can never be mixed
+by one running tree. On a machine that installed this way the dev checkout is never what runs;
+`delegate doctor`'s `install:` line says which tree you are in and what `current` points at.
+
+An install made this way moves with `delegate update [--to TAG] [--repo URL] [--from DIR]`: it
+re-runs the clone, verify and flip the installer itself runs — with the checking code from the tree
+you are running, never from the tree being installed — takes `--to` from `current/.delegate-source`
+when you give no tag (so a bare `delegate update` re-fetches or repairs what you have), takes the
+source from that record's `repo=` unless `--repo`/`--from` says otherwise, and ends by re-running
+the opencode permission merge and `delegate doctor`. Roll back with the same command the other way:
+`delegate update --to <the previous tag>`. `update` never deletes a version directory — that is why
+the rollback works — and pruning old releases is a later slice, so until then remove one by hand
+once `current` has moved off it. Tags are opaque: no version comparison, no downgrade protection.
+
 `delegate doctor` checks the config, the image, which endpoint answers, and **sends a real
 tool call, both streaming and non-streaming**. It fails if the call comes back as text in `content`
 (unparsed or "phantom" tool calls) or if its arguments aren't valid JSON. Fix those before
