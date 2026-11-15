@@ -1,9 +1,9 @@
 # AGENTS.md: for any coding agent working with or in this repo
 
-**To USE delegate** (hand implementation to a self-hosted model while you orchestrate):
+**To USE delegate** (hand implementation to the delegate worker while you orchestrate):
 
 - Follow [claude/skills/delegate/SKILL.md](claude/skills/delegate/SKILL.md). It's the method:
-  the local model designs the slice, you review the plan, chains run on the worker, you verify
+  the worker designs the slice, you review the plan, chains run on the worker, you verify
   once per slice, and the work lands on a local branch.
 - [docs/harnesses.md](docs/harnesses.md) says how to read that file from a harness other than
   Claude Code: polling instead of notifications, and no subagents.

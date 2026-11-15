@@ -23,6 +23,15 @@ check "absolute deny for the rules dir"      'grep -qx "$cfg/\*\*=deny" <<<"$edi
 check "relative deny for the rules dir"      'grep -qx "../../home/.config/opencode/\*\*=deny" <<<"$edit"'
 check "relative deny for a --read path"      'grep -qx "../../ref/\*\*=deny" <<<"$edit"'
 check "no allow-all edit rule"               '! grep -q "^\*=" <<<"$edit"'
+instr=$(python3 -c 'import json,sys; print("\n".join(json.load(open(sys.argv[1]))["instructions"]))' $T/c.json)
+i0=$(sed -n '1p' <<<"$instr"); nin=$(grep -c . <<<"$instr")
+# The worker loads ONE instructions file; worker/entrypoint.sh composes the core + adapter into
+# it (tests/test_rules_load.sh asserts that ordering and the missing-core refusal). The renderer's
+# job is only to point at that one file, never at the repo's separate core/adapter paths.
+check "instructions: the one composed worker rules file, and nothing else" \
+  '[ "$nin" = 1 ] && [ "$i0" = "$cfg/delegate-rules.md" ]'
+check "instructions: the renderer does not list a path that would silently miss the core" \
+  '! grep -q harness-core <<<"$instr"'
 (cd "$wt" && DELEGATE_BASE_URL=http://x/v1 DELEGATE_API_KEY_FILE=$T/key DELEGATE_MODEL=m \
   DELEGATE_READ_PATHS="$ref" python3 "$here/lib/render-opencode-config.py" "$cfg") > $T/c2.json
 check "worktree defaults to the cwd"         'cmp -s $T/c.json $T/c2.json'

@@ -204,13 +204,19 @@ a probe that steps 4/5 depend on is not PASS.
 
 | probe | result | date | Claude Code version | note |
 |---|---|---|---|---|
-| S1 | TODO | — | — | — |
-| S2 | TODO | — | — | — |
-| S3 | TODO | — | — | — |
-| S4 | TODO | — | — | — |
-| S5 | TODO | — | — | — |
-| S6 | TODO | — | — | — |
-| S7 | TODO | — | — | — |
+| S1 | PASS | 2026-11-15 | 2.1.325 | `PostToolUse` `additionalContext` reaches the model, sync and async; hook stdin JSON as documented |
+| S2 | PASS | 2026-11-15 | 2.1.325 | `SessionStart` marker lands on `startup` and `resume`, payload `cwd` correct, `PreCompact` fires on manual `/compact`; long-session marker survival not exercised (check on a real session in step 6) |
+| S3 | PASS for what steps 3–4 need | 2026-11-15 | 2.1.325 | `PermissionRequest` hook `allow`/`deny` answers an `ask` headless; `PreToolUse` deny beats a settings allow. `updatedInput` rewrite did NOT take: never rely on a hook rewriting a command. Auto-mode (classifier) leg not probed headless: Q1 pick stands (render ask), step 6 records live behaviour |
+| S4 | PASS (stricter than the rig expected) | 2026-11-15 | 2.1.325 | allow, deny>allow, space-anchored prefixes, `$()` and `Edit(**/notes/*.md)` as expected. Re-run by the orchestrator with an execution log: a compound `echo X && git push` with `echo X*` allowed and `git push*` denied is **denied as a whole** (nothing ran) — compound commands are not split into separately-allowed parts; `Read(**/.env)` deny **does** block (in `permission_denials`, nothing read) — the probe's FAIL was its own oracle. Translator: a deny anywhere in a compound denies it |
+| S5 | PASS | 2026-11-15 | n/a (opencode 1.18.30) | ran in the worker sandbox: relative `instructions` glob resolves per open project, custom-agent-with-prompt and explore subagent both receive global instructions, plugins load from the temp config dir, and project `.clinerules` is **not** auto-loaded without an `instructions` entry — step 5 installs the entry |
+| S6 | PASS | 2026-11-15 | 2.1.325 | route: project `CLAUDE.md` `@import` of the FILE works; `@import` of a directory and a read-the-dir user rule did not load it. Step 5 installs file imports (`.clinerules` and each `.clinerules/*.md` by name) |
+| S7 | NOT RUN (moot for install) | 2026-11-15 | 2.1.325 | needs a second logged-in config dir. The installer copies the rules file with a recorded sha (§8, owner decision 3), so the symlink question does not arise; that `~/.claude/rules/*.md` loads in an arbitrary project is checked live in step 6 |
+
+No row is left a placeholder: the sandbox-runnable legs (S5, and S1–S4/S6 on a logged-in Claude
+2.1.x) record PASS above; S7 stays NOT RUN because install never symlinks it (copy + sha, owner
+decision 3). **The orchestrator must re-run `claude/spikes/run.sh` on a logged-in Claude Code
+2.1.x before merging this slice, and paste any drift into the table** — the chain worker has no
+`claude` binary (§15), so the probes above were recorded by the orchestrator, not by this chain.
 
 If S3 shows auto-mode Claude never asks (classifier swallows the prompt), the Claude side keeps the
 same policy file but the *ask* tier degrades to the owner's classifier — recorded under Q1's pick.
@@ -420,7 +426,7 @@ passes `--claude-permissions`, the permissions block. Codehub-side changes are l
 | `o1b-3-policy` | true | `policy/*`, `lib/translate-permissions.py`, `lib/permission-eval.py`, `tests/test_permission_policy.sh` (shared case list, both engines) | same-verdict test |
 | `o1b-4-hooks` | true | `claude/hooks/harness.py` + 4 behaviour modules (todo, verify, notes, permission-guard), notes-loop interactive fallback, `tests/test_claude_hooks.sh` (feed hook JSON, assert outputs; cap-abstence test) | hook contract tests |
 | `o1b-5-install-doctor` | true | installer wiring (§8, both helpers), plugin links, rules install (S7 outcome applied), doctor drift block (§9), `tests/test_profile_install.sh`, `.clinerules` route installed per S5a/S6 | temp-HOME merge tests + doctor lines |
-| `o1b-6-acceptance` | true | `tests/test_e2e_harness.sh`: full install into a temp HOME for both harnesses (fake `opencode`/`claude` stubs on PATH where the binary would prompt), re-run idempotence, `--uninstall` leaves `_delegate` empty, spike-status assertion (§6.1 no `TODO` rows left), docs touch-up | end-to-end + full suite (last step) |
+| `o1b-6-acceptance` | true | `tests/test_e2e_harness.sh`: full install into a temp HOME for both harnesses (fake `opencode`/`claude` stubs on PATH where the binary would prompt), re-run idempotence, `--uninstall` leaves `_delegate` empty, spike-status assertion (§6.1 no placeholder rows left), docs touch-up | end-to-end + full suite (last step) |
 
 Order matters: 3 before 4 (guard renders from policy), 4 before 5 (installer wires real scripts),
 1 before everything hook-related (ruling). Every step's verify runs the **full delegate test set**

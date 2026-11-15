@@ -5,7 +5,8 @@
 #   ./install.sh                                   # interactive-free; edit the config after
 #   ./install.sh --base-url https://llm.example.com/v1 --model qwen3-coder \
 #                [--model-hard qwen3-coder-think] [--key-file PATH | --key-stdin] \
-#                [--runner docker|native] [--context 131072] [--no-build] [--claude-hook]
+#                [--runner docker|native] [--context 131072] [--no-build]
+#                [--claude-profile|--no-claude-profile] [--claude-permissions] [--claude-hook]
 #   ./install.sh --release TAG [--repo URL | --from DIR] [any install flags above]
 #                # pinned install under ${XDG_DATA_HOME:-$HOME/.local/share}/delegate; the
 #                # links point through its `current` symlink, so an update is one flip.
@@ -20,12 +21,17 @@ cfg=$cfg_dir/config.env
 bin_dir=${DELEGATE_BIN_DIR:-$HOME/.local/bin}
 skill_dir=${CLAUDE_SKILLS_DIR:-$HOME/.claude/skills}
 oc_cmd_dir=${OPENCODE_COMMANDS_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode/commands}
+oc_plugin_dir=${OPENCODE_PLUGINS_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins}
+oc_cfg=${OPENCODE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json}
 agents_dir=${CLAUDE_AGENTS_DIR:-$HOME/.claude/agents}
 # An empty or relative XDG_DATA_HOME is invalid per the XDG base dir spec: treat it as unset.
 xdg_data=${XDG_DATA_HOME:-}; case "$xdg_data" in /*) ;; *) xdg_data="$HOME/.local/share" ;; esac
 root=$xdg_data/delegate
 
 base_url="" model="" model_hard="" key_file="" key_stdin=0 runner="" context="" build=1 claude_hook=0
+# Claude profile: "" = default (on when ~/.claude exists), 1/0 = explicit flag. Permissions
+# default off (design Q2): the static arrays are the owner's call, not the installer's.
+claude_profile="" claude_permissions=0
 release="" repo="https://github.com/<owner>/local-delegate" from="" uninstall=0 purge=0
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -37,13 +43,17 @@ while [ $# -gt 0 ]; do
     --runner) runner=$2; shift 2 ;;
     --context) context=$2; shift 2 ;;
     --no-build) build=0; shift ;;
-    --claude-hook) claude_hook=1; shift ;;
+    --claude-hook) claude_hook=1; claude_profile=1; shift ;;
+    --claude-profile) claude_profile=1; shift ;;
+    --no-claude-profile) claude_profile=0; shift ;;
+    --claude-permissions) claude_permissions=1; shift ;;
+    --no-claude-permissions) claude_permissions=0; shift ;;
     --release) release=$2; shift 2 ;;
     --repo) repo=$2; shift 2 ;;
     --from) from=$2; shift 2 ;;
     --uninstall) uninstall=1; shift ;;
     --purge) purge=1; shift ;;
-    -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
     *) echo "install.sh: unknown option $1" >&2; exit 2 ;;
   esac
 done
@@ -72,6 +82,17 @@ if [ "$uninstall" = 1 ] || [ "$purge" = 1 ]; then
   unln "$bin_dir/delegate"; unln "$bin_dir/delegate-wake"
   unln "$skill_dir/delegate"; unln "$oc_cmd_dir/delegate.md"
   unln "$agents_dir/delegate-lead.md"
+  for name in chunk-cap notes-loop todo-loop verify-loop; do
+    unln "$oc_plugin_dir/$name.js"
+  done
+  # Config files next: each helper removes ONLY what it recorded under _delegate (and, for a
+  # pre-marker config, only entries matching exactly what we would have written). Both exit 0
+  # when their target file doesn't exist.
+  python3 "$here/lib/merge-opencode-permissions.py" --config "$oc_cfg" \
+    --skill-dir "$skill_dir/delegate" --real-dir "$here/claude/skills/delegate" --uninstall \
+    || say "NOTE: opencode config not cleaned; see the message above"
+  python3 "$here/lib/merge-claude-settings.py" --uninstall \
+    || say "NOTE: claude settings not cleaned; see the message above"
   if [ "$purge" = 1 ]; then
     case "$here" in
       "$root"/*) say "NOTE: this checkout lives inside $root; leaving it in place" ;;
@@ -117,8 +138,18 @@ fi
 if command -v opencode >/dev/null; then
   # --real-dir takes the resolved tree (the merge writes it into the config as file content);
   # every link below still goes through $DELEGATE_HOME, which in release mode is `current`.
+  # The rules/policy additions are each guarded on the file existing, so an install tree from
+  # before O1b (or a release fixture that ships without them) merges exactly as before.
+  oc_extra=()
+  for f in opencode/rules/harness-core.md opencode/rules/adapter-opencode.md; do
+    [ -f "$DELEGATE_HOME/$f" ] && oc_extra+=(--instructions "$DELEGATE_HOME/$f")
+  done
+  if [ -f "$DELEGATE_HOME/policy/harness-permissions.json" ]; then
+    oc_extra+=(--permission-policy "$DELEGATE_HOME/policy/harness-permissions.json" --render)
+  fi
   python3 "$DELEGATE_HOME/lib/merge-opencode-permissions.py" \
     --skill-dir "$skill_dir/delegate" --real-dir "$DELEGATE_REAL/claude/skills/delegate" \
+    ${oc_extra[@]+"${oc_extra[@]}"} \
     || say "NOTE: opencode config not merged; see the message above"
   # opencode's "/" menu lists commands, not skills: /delegate is a command that loads the skill.
   mkdir -p "$oc_cmd_dir"
@@ -127,6 +158,20 @@ if command -v opencode >/dev/null; then
   else
     ln -sfn "$DELEGATE_HOME/commands/opencode/delegate.md" "$oc_cmd_dir/delegate.md"
     say "opencode command -> $oc_cmd_dir/delegate.md (type /delegate in opencode)"
+  fi
+  # The harness plugins (design §5.1), each a link through the install tree so an update is
+  # picked up without re-running the installer. Same left-alone care as every other link.
+  if ls "$DELEGATE_HOME"/opencode/plugins/*.js >/dev/null 2>&1; then
+    mkdir -p "$oc_plugin_dir"
+    for p in "$DELEGATE_HOME"/opencode/plugins/*.js; do
+      name=$(basename "$p"); dest="$oc_plugin_dir/$name"
+      if [ -e "$dest" ] && [ ! -L "$dest" ]; then
+        say "NOTE: $dest exists and is not a symlink; left alone"
+      else
+        ln -sfn "$DELEGATE_HOME/opencode/plugins/$name" "$dest"
+        say "opencode plugin -> $dest"
+      fi
+    done
   fi
 fi
 
@@ -180,22 +225,29 @@ else
   say "Claude Code agent -> $agents_dir/delegate-lead.md (plans a slice, runs it as a chain, checks once)"
 fi
 
-if [ "$claude_hook" = 1 ]; then
-  # Report background Claude agents to the stackd dashboard (claude/hooks/agent-progress.py).
-  python3 - "$DELEGATE_HOME/claude/hooks/agent-progress.py" <<'EOF'
-import json, os, sys
-p = os.path.expanduser("~/.claude/settings.json")
-d = json.load(open(p)) if os.path.exists(p) else {}
-cmd = "python3 " + sys.argv[1]
-hooks = d.setdefault("hooks", {})
-for ev in ("PostToolUse", "PostToolUseFailure", "SubagentStop"):
-    lst = hooks.setdefault(ev, [])
-    if not any(x.get("command") == cmd for e in lst for x in e.get("hooks", [])):
-        lst.append({"matcher": "*", "hooks": [{"type": "command", "command": cmd, "async": True, "timeout": 10}]})
-os.makedirs(os.path.dirname(p), exist_ok=True)
-tmp = p + ".tmp"; json.dump(d, open(tmp, "w"), indent=2); os.replace(tmp, p)
-print("==> Claude agent hook added to ~/.claude/settings.json (PostToolUse, PostToolUseFailure, SubagentStop; async)")
-EOF
+# Claude Code profile: hooks, rules file, and (only on request) the rendered permission arrays.
+# The whole block is the old --claude-hook path grown up: one helper call, everything it writes
+# recorded under `_delegate` so --uninstall and doctor know exactly what is ours.
+if [ "$claude_profile" = "" ] && [ ! -d "$HOME/.claude" ]; then claude_profile=0; fi
+if [ "$claude_profile" != 0 ]; then
+  if [ -e "$HOME/.claude" ] && [ ! -d "$HOME/.claude" ]; then
+    say "NOTE: ~/.claude exists and is not a directory; profile not installed"
+  else
+    cc_extra=()
+    [ -f "$DELEGATE_HOME/policy/harness-permissions.json" ] &&
+      cc_extra+=(--policy "$DELEGATE_HOME/policy/harness-permissions.json")
+    if [ "$claude_permissions" = 1 ]; then
+      if [ ${#cc_extra[@]} -eq 0 ]; then
+        say "NOTE: --claude-permissions needs policy/harness-permissions.json; permissions not merged"
+      else
+        cc_extra+=(--permissions)
+      fi
+    fi
+    [ "$claude_hook" = 1 ] && cc_extra+=(--agent-progress)
+    python3 "$DELEGATE_HOME/lib/merge-claude-settings.py" \
+      --install "$DELEGATE_HOME" --real-dir "$DELEGATE_REAL" ${cc_extra[@]+"${cc_extra[@]}"} \
+      || say "NOTE: claude profile not installed; see the message above"
+  fi
 fi
 
 say "checking the setup"

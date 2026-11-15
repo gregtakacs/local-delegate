@@ -1480,6 +1480,151 @@ cmd_update() {
   return 0
 }
 
+# Design §9: the harness drift block. Six lines, each a `fix:` naming the exact command, FAIL
+# only on breakage (exit 1), WARN for "not installed / mid-setup". Files only — the doctor never
+# starts either harness. `doctor --quick` prints the same block with FAILs downgraded to WARN:
+# --quick skips the live probe, not the config review.
+harness_drift() {
+  local quick=${1:-} hfail=0
+  local pol="$DELEGATE_HOME/policy/harness-permissions.json"
+  local cases="$DELEGATE_HOME/policy/permission-cases.json"
+  local oc_cfg=${OPENCODE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json}
+  local oc_plug=${OPENCODE_PLUGINS_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins}
+  local claude_dir="$HOME/.claude" settings="$HOME/.claude/settings.json"
+  local tmp; tmp=$(mktemp)
+
+  # "<check-area-file>" → "<status>\t<detail>" for one area (empty when the line is absent)
+  area() { sed -n "s/^check $1: \([a-z]*\)[[:space:]]\(.*\)$/\1\t\2/p" "$2" | head -1; }
+  # one helper --check run: capture its lines in $tmp, map the exit code to a status
+  run_check() { local rc=1; "$@" >"$tmp" 2>/dev/null; rc=$?
+    case "$rc" in 0) echo ok ;; 2) echo warn ;; *) echo fail ;; esac; }
+  rank() { case "$1" in fail) echo 2 ;; warn) echo 1 ;; *) echo 0 ;; esac; }
+  pick() { [ "$(rank "${1:-ok}")" -ge "$(rank "${2:-ok}")" ] && echo "${1:-ok}" || echo "$2"; }
+  emit() { # emit NAME STATUS DETAIL  (house format: label, padded status, then the detail)
+    local st=$2 tag
+    if [ "$st" = fail ] && [ -n "$quick" ]; then st=warn; fi
+    [ "$st" = fail ] && hfail=1
+    case "$st" in
+      fail) tag="FAIL  " ;; warn) tag="WARN  " ;; *) tag="ok    " ;;
+    esac
+    printf '%-16s %s %s\n' "$1:" "$tag" "$3"
+  }
+  # rules: the opencode instructions entries and the Claude rules file, both through the helpers
+  local oc_st="" cl_st="" rdet=""
+  if command -v opencode >/dev/null 2>&1 && [ -f "$oc_cfg" ]; then
+    oc_st=$(run_check python3 "$DELEGATE_HOME/lib/merge-opencode-permissions.py" --check instructions \
+      --skill-dir "${CLAUDE_SKILLS_DIR:-$claude_dir/skills}/delegate" \
+      --real-dir "$DELEGATE_HOME/claude/skills/delegate" \
+      --instructions "$DELEGATE_HOME/opencode/rules/harness-core.md" \
+      --instructions "$DELEGATE_HOME/opencode/rules/adapter-opencode.md")
+    rdet=$(area instructions "$tmp" | cut -f2-)
+  fi
+  if [ -f "$settings" ]; then
+    cl_st=$(run_check python3 "$DELEGATE_HOME/lib/merge-claude-settings.py" --check rules)
+    rdet="$rdet$( [ -z "$rdet" ] || printf '; claude: ' )$(area rules "$tmp" | cut -f2-)"
+  fi
+  if [ -z "$oc_st$cl_st" ]; then
+    emit rules warn "no opencode config and no ~/.claude/settings.json; fix: re-run install.sh"
+  else case "$(pick "${oc_st:-ok}" "${cl_st:-ok}")" in
+    fail) emit rules fail "${rdet:-checks failed}; fix: re-run install.sh" ;;
+    warn) emit rules warn "${rdet:-not merged yet}" ;;
+    *) emit rules ok "${rdet:-both sides in place}" ;;
+  esac; fi
+
+  # plugins: four links, each resolving into this install tree
+  local p missing= offtree=
+  for p in chunk-cap notes-loop todo-loop verify-loop; do
+    [ -f "$DELEGATE_HOME/opencode/plugins/$p.js" ] || continue
+    if [ -L "$oc_plug/$p.js" ]; then
+      case "$(readlink -f "$oc_plug/$p.js" 2>/dev/null)" in
+        "$DELEGATE_HOME"/*|"$(readlink -f "$DELEGATE_HOME")"/*) ;;
+        *) offtree="$offtree $p" ;;
+      esac
+    else
+      missing="$missing $p"
+    fi
+  done
+  if [ -n "$missing$offtree" ]; then
+    emit plugins fail "missing:${missing:-} off-tree:${offtree:-}; fix: re-run install.sh"
+  elif [ -d "$oc_plug" ]; then
+    emit plugins ok "four plugin links under $oc_plug"
+  else
+    emit plugins warn "no opencode plugins dir; fix: re-run install.sh"
+  fi
+
+  # hooks: the recorded ids present in settings.json with commands resolving under the tree
+  if [ ! -f "$settings" ]; then
+    emit hooks warn "no ~/.claude/settings.json; fix: ./install.sh --claude-profile"
+  else
+    python3 "$DELEGATE_HOME/lib/merge-claude-settings.py" --check hooks >"$tmp" 2>/dev/null
+    local hs; hs=$(area hooks "$tmp" | cut -f1); hs=${hs:-fail}
+    case "$hs" in
+      fail) emit hooks fail "$(area hooks "$tmp" | cut -f2); fix: re-run install.sh" ;;
+      warn) emit hooks warn "$(area hooks "$tmp" | cut -f2)" ;;
+      *) emit hooks ok "delegate hook ids present in settings.json" ;;
+    esac
+  fi
+
+  # cap: config.env vs the plugin default vs the rule text (no stale bare number in rules)
+  local cfgcap=8000 jscap rulestale=
+  [ -f "$CONFIG_FILE" ] && cfgcap=$(sed -n 's/^DELEGATE_CHUNK_CAP="\?\([0-9]*\)"\?$/\1/p' "$CONFIG_FILE" | head -1)
+  cfgcap=${cfgcap:-8000}
+  jscap=$(sed -n 's/^const DELEGATE_DEFAULT_CHAR_LIMIT = \([0-9]*\);.*/\1/p' \
+          "$DELEGATE_HOME/opencode/plugins/chunk-cap.js" 2>/dev/null | head -1)
+  rulestale=$(grep -lE '(^|[^0-9])6000([^0-9]|$)' "$DELEGATE_HOME"/opencode/rules/*.md 2>/dev/null | head -1)
+  if [ -z "$jscap" ]; then
+    emit cap warn "no chunk-cap.js in this tree; fix: re-run install.sh"
+  elif [ -n "$rulestale" ]; then
+    emit cap fail "rules hardcode 6000 ($(basename "$rulestale")); fix: re-run install.sh"
+  elif [ "$cfgcap" != "$jscap" ]; then
+    emit cap warn "config.env cap $cfgcap != plugin default $jscap — interactive opencode reads neither; fix: set DELEGATE_CHUNK_CAP in the opencode environment or match config.env"
+  else
+    emit cap ok "cap $cfgcap in config.env, plugin and rules agree"
+  fi
+
+  # permissions: both merge checks, then the cross-engine case list (the headline drift)
+  local pst="" pdet="" ncases=0 nok=0
+  if command -v opencode >/dev/null 2>&1 && [ -f "$oc_cfg" ]; then
+    pst=$(run_check python3 "$DELEGATE_HOME/lib/merge-opencode-permissions.py" --check permissions \
+      --skill-dir "${CLAUDE_SKILLS_DIR:-$claude_dir/skills}/delegate" \
+      --real-dir "$DELEGATE_HOME/claude/skills/delegate" \
+      --permission-policy "$pol")
+    pdet=$(area permissions "$tmp" | cut -f2-)
+  fi
+  if [ -f "$settings" ]; then
+    local cs; cs=$(run_check python3 "$DELEGATE_HOME/lib/merge-claude-settings.py" --check permissions)
+    pdet="$pdet$( [ -z "$pdet" ] || printf '; claude: ' )$(area permissions "$tmp" | cut -f2-)"
+    pst=$(pick "${pst:-ok}" "$cs")
+  fi
+  if [ -f "$pol" ] && [ -f "$cases" ]; then
+    local es; es=$(run_check python3 "$DELEGATE_HOME/lib/permission-eval.py" --engine both \
+                    --policy "$pol" --cases "$cases")
+    ncases=$(grep -c . "$tmp"); nok=$(grep -c '^ok ' "$tmp" || true)
+    pst=$(pick "${pst:-ok}" "$es")
+    [ "$es" = fail ] && pdet="engines disagree on $((ncases - nok)) of $ncases cases${pdet:+; $pdet}"
+  fi
+  case "${pst:-warn}" in
+    fail) emit permissions fail "${pdet:-policy drift or engine disagreement}; fix: re-run install.sh" ;;
+    warn) emit permissions warn "${pdet:-policy not merged by delegate}; fix: re-run install.sh" ;;
+    *) emit permissions ok "${nok}/${ncases} cases agree on both engines; configs match the policy" ;;
+  esac
+
+  # claude exempt: no chunk-cap-shaped hook may sit in settings (the Claude cap exemption, §10)
+  if [ ! -f "$settings" ]; then
+    emit "claude exempt" warn "nothing installed in ~/.claude; fix: ./install.sh --claude-profile"
+  else
+    python3 "$DELEGATE_HOME/lib/merge-claude-settings.py" --check exempt >"$tmp" 2>/dev/null
+    local xs; xs=$(area exempt "$tmp" | cut -f1); xs=${xs:-fail}
+    case "$xs" in
+      fail) emit "claude exempt" fail "$(area exempt "$tmp" | cut -f2); fix: remove the cap hook from ~/.claude/settings.json" ;;
+      warn) emit "claude exempt" warn "$(area exempt "$tmp" | cut -f2)" ;;
+      *) emit "claude exempt" ok "no chunk-cap hook on the Claude side (exempt by design)" ;;
+    esac
+  fi
+  rm -f "$tmp"
+  return "$hfail"
+}
+
 cmd_doctor() {
   local ok=1 u
   echo "delegate $VERSION ($DELEGATE_HOME)"
@@ -1505,7 +1650,7 @@ cmd_doctor() {
     echo "opencode: $(command -v opencode) $(opencode --version)"
   fi
   if command -v opencode >/dev/null 2>&1; then
-    if python3 "$DELEGATE_HOME/lib/merge-opencode-permissions.py" --check \
+    if python3 "$DELEGATE_HOME/lib/merge-opencode-permissions.py" --check machine \
          --skill-dir "${CLAUDE_SKILLS_DIR:-$HOME/.claude/skills}/delegate" \
          --real-dir "$DELEGATE_HOME/claude/skills/delegate" 2>/dev/null; then
       echo "skill:    opencode config lets the delegate skill load"
@@ -1519,6 +1664,7 @@ cmd_doctor() {
       echo "command:  WARN — no /delegate in opencode's command menu; re-run install.sh"
     fi
   fi
+  harness_drift "${1:-}" || ok=0
   u=$(pick_base_url) || { echo "endpoint: NONE of [$DELEGATE_BASE_URLS] answered /models"; exit 1; }
   if [ "$DELEGATE_RUNNER" = docker ] && [ "$DELEGATE_EGRESS" = filtered ]; then
     ID=doctor-$$ EGRESS=filtered

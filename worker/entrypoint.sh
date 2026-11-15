@@ -9,7 +9,19 @@ cfg="$HOME/.config/opencode"
 rm -rf "$cfg"
 mkdir -p "$cfg" "$HOME/.local/share" "$HOME/.cache"
 cp -r /opt/delegate/opencode/rules /opt/delegate/opencode/plugins "$cfg/"
-cp /opt/delegate/opencode/delegate-rules.md "$cfg/delegate-rules.md"
+# The worker loads ONE instructions file (the rendered config points at delegate-rules.md).
+# Compose it as the harness-neutral core FIRST, then the headless worker adapter that overrides
+# parts of it, so one instruction path yields one coherent ruleset (core, then the deltas). A
+# missing core is fatal, not silently tolerated: with only the deltas the worker would run with no
+# Definition-of-Done gate, no PID-kill rule and no test policy — the whole point of the split.
+core="$cfg/rules/harness-core.md"
+adapter=/opt/delegate/opencode/delegate-rules.md
+if [ ! -s "$core" ]; then
+  echo "delegate entrypoint: rules/harness-core.md is missing or empty — refusing to start the" \
+       "worker on the headless deltas alone" >&2
+  exit 1
+fi
+cat "$core" "$adapter" > "$cfg/delegate-rules.md"
 python3 /opt/delegate/lib/render-opencode-config.py "$cfg" > "$cfg/opencode.json"
 
 # Private GitHub access, only when the task was started with --github. The token is read

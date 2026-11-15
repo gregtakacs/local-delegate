@@ -14,8 +14,13 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
+// A headless worker round names its notes file via DELEGATE_EVIDENCE_DIR (delegate-rules.md §9a).
+// An interactive session has none, so §5.1 gives it the same external memory at the path the
+// core+adapter name: /tmp/opencode-notes/<basename(cwd)>/NOTES.md, cwd being the server's project
+// dir. The nudge rules are identical for both — the fallback only changes WHERE the file is.
 const dir = process.env.DELEGATE_EVIDENCE_DIR || "";
-const notes = dir ? join(dir, "NOTES.md") : "";
+const fallback = "/tmp/opencode-notes/" + (process.cwd().replace(/\/+$/, "").split("/").pop() || "session") + "/NOTES.md";
+const notes = dir ? join(dir, "NOTES.md") : fallback;
 const CALLS_BEFORE_NUDGE = 25;
 
 // sessionID -> { calls, nudged }

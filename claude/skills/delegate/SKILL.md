@@ -1,12 +1,12 @@
 ---
 name: delegate
-description: The DEFAULT way to implement anything bigger than a small edit when the self-hosted `delegate` worker is available. The local model designs the slice (design doc, step specs, chain plan) and types the code; Claude orchestrates, reviews the plan, verifies the result and lands it. Use it whenever the user asks to delegate/offload/"send to the local model"/"use the worker", AND unprompted in ordinary conversation whenever you judge that the implementation savings outweigh the orchestration overhead (several files or steps, a slice of a written design, scaffolds, endpoints, tests, migrations, pattern-following refactors, ports). Not for tiny edits (under ~30 lines), debugging an unknown cause, urgent one-line fixes, or pure design discussion. Never unprompted for visual or audio design (looks, themes, art, icons, layouts, colour, typography, sound), those stay with Claude unless the user deliberately asks for them to be delegated.
+description: The DEFAULT way to implement anything bigger than a small edit when the self-hosted `delegate` worker is available. The worker designs the slice (design doc, step specs, chain plan) and types the code; Claude orchestrates, reviews the plan, verifies the result and lands it. Use it whenever the user asks to delegate/offload/"send to the local model"/"use the worker", AND unprompted in ordinary conversation whenever you judge that the implementation savings outweigh the orchestration overhead (several files or steps, a slice of a written design, scaffolds, endpoints, tests, migrations, pattern-following refactors, ports). Not for tiny edits (under ~30 lines), debugging an unknown cause, urgent one-line fixes, or pure design discussion. Never unprompted for visual or audio design (looks, themes, art, icons, layouts, colour, typography, sound), those stay with Claude unless the user deliberately asks for them to be delegated.
 ---
 
 # Delegating implementation to the local worker
 
 You are the **orchestrator**: you own the design, the spec for each step, the review, and
-the merge. The worker (an opencode agent on a self-hosted model, run by `delegate`) owns
+the merge. The worker (an opencode agent on the endpoint delegate points at, run by `delegate`) owns
 the typing, inside its own worktree, on its own branch `delegate/<slug>`. It works under
 strict rules (read first, plan, implement completely, verify by running, end with a
 STATUS block) — your job is to give it a spec good enough that those rules produce the
@@ -30,7 +30,7 @@ delegate list                # tasks already in flight
 If doctor fails, stop and tell the user what failed — do not fall back to doing the
 whole job yourself silently.
 
-## The default workflow: the local model designs and builds, Claude orchestrates and verifies
+## The default workflow: the worker designs and builds, Claude orchestrates and verifies
 
 This is the house default for any work worth delegating, whether the user asked for it or
 not. Skip a phase only for a reason you can name.
@@ -42,19 +42,19 @@ not. Skip a phase only for a reason you can name.
   done by hand.
 - **Never delegate design or audiovisual work unprompted.** Looks, themes, art, icons, layouts,
   colour, typography, motion and sound stay with you: designing them and producing them. This is
-  where the local model is weakest (2026-11-11: its eight-look icon and plane art passed every
+  where the worker is weakest (2026-11-11: its eight-look icon and plane art passed every
   test, but two sets failed at true size, and its look furniture drifted generic). Delegate it
   only when the user deliberately asks for that piece to be delegated. A slice that mixes both
   kinds is split: the worker builds the plumbing (code, tests, wiring) against art and look specs
   you wrote, and you do the visual part yourself.
 - In conversation, when you choose this unprompted, say so in one line ("I'll hand this to the
-  local worker: design, then a chain; I'll verify"), so the user can say no.
+  worker: design, then a chain; I'll verify"), so the user can say no.
 
 **Phase 1: the local worker designs the slice.**
 - Run one design task (`--hard`) from a short brief built on [design-template.md](design-template.md).
   The brief has pointers (the design doc sections, the code, earlier specs to imitate), the
   fixed rules and constraints, and the out-of-scope list. It does NOT contain your own plan.
-- **Give it the settled decisions it can't see.** The measured gap between the local model and
+- **Give it the settled decisions it can't see.** The measured gap between the worker and
   a fresh Claude session writing the same spec was knowledge, not reasoning: its only misses
   were owner rulings recorded only in Claude's memory notes (LLM-Stats,
   `2026-11-spec-writers`). Before the design task:
@@ -166,7 +166,7 @@ permission checks: a Claude lead specs them and you review them line by line), d
 where the cause is unknown, anything under ~30 lines (the spec would cost more than the
 edit), and visual or audio design and production (looks, art, icons, layouts, colour, type,
 sound) unless the user asks for it to be delegated. A slice's ordinary engineering design work
-goes to the local worker (Phase 1 above).
+goes to the worker (Phase 1 above).
 
 Split a big slice into steps of roughly **one coherent change, < ~1500 lines of diff,
 < ~90 min of worker time**. Independent steps can run in parallel (separate tasks, max ~3

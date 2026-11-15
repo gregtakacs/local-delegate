@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "_note": "delegate-owned permission policy (O1b design §7.1). Ordered per-tool rule lists; opencode order is the semantics (last match wins). 'over' names the broader rule this entry beats; 'via:hook' marks an allow that cannot be a Claude static-array entry (§7.2 exception rule) and is answered by the permission hook instead. Stance migrated from codehub docs/settings/opencode-permissions.jsonc, de-sited: no host names, no ports, no daemon/localhost/install-path allows (those stay in the machine overlay, §7.4). Hard limits (docs/permission-judge.md §3) are deny-or-ask, never allow.",
+  "bash": [
+    { "pattern": "*",                       "effect": "ask",   "note": "bash-default" },
+    { "pattern": "git status *",             "effect": "allow", "over": ["*"], "note": "git-status" },
+    { "pattern": "npx *",                    "effect": "ask",   "note": "npx" },
+    { "pattern": "curl *",                   "effect": "ask",   "over": ["*"], "note": "curl" },
+    { "pattern": "curl *healthz*",           "effect": "allow", "over": ["curl *"], "via": "hook", "note": "health-curl" },
+    { "pattern": "git push *",               "effect": "ask",   "note": "git-push" },
+    { "pattern": "git push --force*",        "effect": "deny",  "over": ["git push *"], "note": "force-push" },
+    { "pattern": "git push -f*",             "effect": "deny",  "over": ["git push *"], "note": "force-push-f" },
+    { "pattern": "rm -rf /*",                "effect": "deny",  "over": ["*"], "note": "rm-rf" },
+    { "pattern": "sudo *",                   "effect": "deny",  "over": ["*"], "note": "sudo" },
+    { "pattern": "su *",                     "effect": "deny",  "over": ["*"], "note": "su" },
+    { "pattern": "doas *",                   "effect": "deny",  "over": ["*"], "note": "doas" },
+    { "pattern": "pkill *",                  "effect": "deny",  "over": ["*"], "note": "pkill" },
+    { "pattern": "killall *",                "effect": "deny",  "over": ["*"], "note": "killall" }
+  ],
+  "read": [
+    { "pattern": "*",                       "effect": "allow", "note": "read-default" },
+    { "pattern": ".env",                     "effect": "ask",   "over": ["*"], "note": "read-env" },
+    { "pattern": "**/.env",                  "effect": "ask",   "over": ["*"], "note": "read-env-nested" },
+    { "pattern": "**/docker/secrets/**",     "effect": "deny",  "over": ["*"], "note": "read-secrets" },
+    { "pattern": "*.pem",                    "effect": "deny",  "over": ["*"], "note": "read-pem" },
+    { "pattern": "*.key",                    "effect": "deny",  "over": ["*"], "note": "read-key" }
+  ],
+  "edit": [
+    { "pattern": "*",                       "effect": "allow", "note": "edit-default" },
+    { "pattern": ".env",                     "effect": "deny",  "over": ["*"], "note": "edit-env" },
+    { "pattern": "**/.env",                  "effect": "deny",  "over": ["*"], "note": "edit-env-nested" },
+    { "pattern": "**/docker/secrets/**",     "effect": "deny",  "over": ["*"], "note": "edit-secrets" },
+    { "pattern": "*.pem",                    "effect": "deny",  "over": ["*"], "note": "edit-pem" },
+    { "pattern": "*.key",                    "effect": "deny",  "over": ["*"], "note": "edit-key" }
+  ],
+  "external_directory": [
+    { "pattern": "*",                       "effect": "ask",   "note": "external-default" },
+    { "pattern": "**/docker/secrets/**",     "effect": "deny",  "over": ["*"], "note": "external-secrets" }
+  ],
+  "webfetch": [
+    { "pattern": "*",                       "effect": "ask",   "note": "webfetch-default" }
+  ]
+}

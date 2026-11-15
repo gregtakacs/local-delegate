@@ -85,10 +85,18 @@ prompt, or a custom command) and read past the Claude Code specifics:
 | Agent / Skill / Monitor tools | ignore; every action in the method is a `delegate` or `git` command |
 | the progress hook `claude/hooks/agent-progress.py` (dashboard cards for Claude agents) | optional; the worker's own rounds report to the dashboard whatever the orchestrator is |
 
+The rules you load are split so the method needs no harness name in it: the harness-neutral core is
+[`opencode/rules/harness-core.md`](../opencode/rules/harness-core.md), and each harness adds its own
+adapter beside it (`adapter-opencode.md`, `adapter-claude-code.md`). When `install.sh` sets up your
+harness it does by hand what you'd do by copy: on Claude Code it combines core + the Claude adapter
+into one `~/.claude/rules/delegate-harness.md`; on opencode it lists them as separate `instructions`.
+To wire a harness delegate doesn't install for, load the core plus the adapter whose tool names match
+yours (or the core alone), the same way.
+
 The parts that matter for any orchestrator:
 
 1. **Decide** when it's worth delegating.
-2. **Have the local model design the slice** from a short brief
+2. **Have the worker design the slice** from a short brief
    ([design-template.md](../claude/skills/delegate/design-template.md)), with the settled
    decisions it can't see moved into the repo or mounted with `--read`.
 3. **Review the plan:** step sizes, real base branches, toolchains, owner questions.

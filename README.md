@@ -7,7 +7,7 @@ you already use (Claude Code, Codex, OpenCode, Cline, or you) stays in charge of
 review and the merge. Each task runs in a sandboxed container, in its own git worktree, on its own
 branch. It comes back as a compact report and a branch you can review, send feedback on, or merge.
 
-Every line the local model writes costs your frontier model nothing. The orchestrator never reads
+Every line the worker writes costs your frontier model nothing. The orchestrator never reads
 the worker's transcript: it writes a spec, reads a ~100-line report, and reviews the files that
 matter.
 
@@ -27,8 +27,8 @@ your agent (orchestrator)                      worker container, one per round
 On one real project (a Next.js site plus ESP32 firmware and its desktop app), across about two
 dozen delegated steps:
 
-- The local model also **wrote the slice designs and step specs**. A side-by-side test had a fresh
-  Claude session, the local model and a warm orchestrator write the same spec. The local model came
+- The worker also **wrote the slice designs and step specs**. A side-by-side test had a fresh
+  Claude session, the worker and a warm orchestrator write the same spec. The worker came
   a close second, and its only misses were project decisions it had no way to see. See
   [LLM-Stats: three agents write the same spec](https://github.com/gregtakacs/LLM-Stats/tree/main/2026-11-spec-writers).
 - **Most steps were accepted on their first round.** The orchestrator's job shrank to reviewing
@@ -37,7 +37,7 @@ dozen delegated steps:
   an unpacker, a CI step that could never run) were all caught in the orchestrator's one deep review
   per slice, never in per-step babysitting.
 
-It isn't magic. A local model still ships the occasional subtle bug, and that's why the method
+It isn't magic. A worker still ships the occasional subtle bug, and that's why the method
 makes the orchestrator verify, not trust.
 
 ## What you need
@@ -78,6 +78,13 @@ delegate doctor
 - writes `~/.config/delegate/config.env`;
 - builds the worker and egress-proxy images.
 
+It also installs the harness profile into the orchestrator's own harness (the shared rules,
+adapters and plugins): on Claude Code, `--claude-profile` (default-on when `~/.claude` exists)
+lands the rules file and the hook wiring, and `--claude-permissions` (default **off** on the host)
+also writes the rendered permission arrays; `--no-claude-profile` / `--no-claude-permissions` opt
+out. Everything it writes is marked, so a re-run updates only delegate's entries and `--uninstall`
+removes exactly those.
+
 For a server with no key, pass any dummy key.
 
 ## Your first task
@@ -108,12 +115,12 @@ No dashboard, no network.
 
 With Claude Code you don't type any of this. Say what you want built: the installed skill makes
 delegating the **default for anything bigger than a small edit**. Claude tells you in one line when
-it hands work to the local model, and you can say no.
+it hands work to the worker, and you can say no.
 
 ## For bigger work: slices and chains
 
 A slice of a design runs as a **chain**:
-1. The local model writes the plan: a design, one spec per step, and a chain file.
+1. The worker writes the plan: a design, one spec per step, and a chain file.
 2. Your orchestrator reviews the plan.
 3. `delegate chain plan.json` runs the steps unattended. Each step is accepted only when the worker
    says it's done and its verify command passes, and failures are retried in the same session.

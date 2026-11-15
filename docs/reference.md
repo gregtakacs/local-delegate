@@ -30,7 +30,7 @@ wrote, a report of ~100 lines, a diffstat, and the specific files it decides to 
 
 ## Why the worker is strict
 
-A local model in a stock agent harness tends to one-shot the task, skip running it, and
+A worker in a stock agent harness tends to one-shot the task, skip running it, and
 declare victory. The worker here runs with rules and plugins that were ported from a
 long tuning effort to make opencode behave like stock **Cline** on the same model, which
 produced markedly more complete and better-checked work:
@@ -331,7 +331,7 @@ Installing the skill ([claude/skills/delegate/SKILL.md](../claude/skills/delegat
 makes this the **default way Claude implements anything bigger than a small edit**, whether
 you ask for it or not. When it picks it unprompted, it says so in one line, so you can say no.
 
-1. **The local model designs the slice.** One design task, from
+1. **The worker designs the slice.** One design task, from
    [design-template.md](../claude/skills/delegate/design-template.md), writes the slice design, the
    step specs and a chain plan. Security-sensitive slices are designed by a Claude lead
    (the `delegate-lead` agent) instead.

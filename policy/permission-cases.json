@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "_note": "Shared case list (design §7.3). Each case: tool, input (a bash command or a path/url), expect (the verdict BOTH engines must return), rule (the policy rule id = its note, for the >=1-case-per-rule guard), why (optional). A future policy edit that breaks engine parity, or that removes the only case for a rule id, fails tests/test_permission_policy.sh. Inputs are generic: no site host names or real ports (the health curl uses loopback :9/healthz as a shape, not a value).",
+  "cases": [
+    { "tool": "bash", "input": "git status --short", "expect": "allow", "rule": "git-status" },
+    { "tool": "bash", "input": "echo hi", "expect": "ask", "rule": "bash-default", "why": "broad side of every over:[\"*\"] pair: an unmatched command falls to the ask default" },
+    { "tool": "bash", "input": "git push", "expect": "ask", "rule": "git-push", "why": "broad side of the force-push over pair" },
+    { "tool": "bash", "input": "git push --force", "expect": "deny", "rule": "force-push", "why": "narrow side: deny beats the git push ask" },
+    { "tool": "bash", "input": "git push -f", "expect": "deny", "rule": "force-push-f" },
+    { "tool": "bash", "input": "git push --force-with-lease", "expect": "deny", "rule": "force-push" },
+    { "tool": "bash", "input": "rm -rf /", "expect": "deny", "rule": "rm-rf" },
+    { "tool": "bash", "input": "sudo ls", "expect": "deny", "rule": "sudo" },
+    { "tool": "bash", "input": "su root", "expect": "deny", "rule": "su" },
+    { "tool": "bash", "input": "doas ls", "expect": "deny", "rule": "doas" },
+    { "tool": "bash", "input": "pkill x", "expect": "deny", "rule": "pkill" },
+    { "tool": "bash", "input": "killall x", "expect": "deny", "rule": "killall" },
+    { "tool": "bash", "input": "npx cowsay hi", "expect": "ask", "rule": "npx" },
+    { "tool": "bash", "input": "curl http://example.com/x", "expect": "ask", "rule": "curl", "why": "broad side of the health-curl over pair" },
+    { "tool": "bash", "input": "curl http://127.0.0.1:9/healthz", "expect": "allow", "rule": "health-curl", "why": "narrow side: opencode last-match allow; Claude via hook exception" },
+    { "tool": "bash", "input": "echo hi && git push", "expect": "ask", "rule": "git-push", "why": "chained form (hooks doc): opencode \"*\" ask catches it; Claude splits, strictest is ask" },
+    { "tool": "bash", "input": "true; echo hi", "expect": "ask", "rule": "bash-default", "why": "semicolon-chained form" },
+    { "tool": "bash", "input": "echo a || echo b", "expect": "ask", "rule": "bash-default", "why": "or-chained form" },
+    { "tool": "bash", "input": "echo $(git status --short)", "expect": "ask", "rule": "bash-default", "why": "$() form: inner allow, outer ask -> Claude strictest is ask" },
+    { "tool": "bash", "input": "echo `git push`", "expect": "ask", "rule": "git-push", "why": "backtick form" },
+    { "tool": "bash", "input": "git push --force && echo done", "expect": "deny", "rule": "force-push", "why": "deny-first compound: opencode anchored deny, Claude strictest deny" },
+    { "tool": "bash", "input": "sudo ls && echo done", "expect": "deny", "rule": "sudo", "why": "deny-first compound (sudo)" },
+
+    { "tool": "read", "input": "README.md", "expect": "allow", "rule": "read-default" },
+    { "tool": "read", "input": ".env", "expect": "ask", "rule": "read-env", "why": ".env asymmetry: read=ask" },
+    { "tool": "read", "input": "sub/.env", "expect": "ask", "rule": "read-env-nested" },
+    { "tool": "read", "input": "/home/t/docker/secrets/token", "expect": "deny", "rule": "read-secrets" },
+    { "tool": "read", "input": "server.pem", "expect": "deny", "rule": "read-pem" },
+    { "tool": "read", "input": "deploy.key", "expect": "deny", "rule": "read-key" },
+
+    { "tool": "edit", "input": "src/main.py", "expect": "allow", "rule": "edit-default" },
+    { "tool": "edit", "input": ".env", "expect": "deny", "rule": "edit-env", "why": ".env asymmetry: edit=deny (same path string as read-env=ask)" },
+    { "tool": "edit", "input": "sub/.env", "expect": "deny", "rule": "edit-env-nested" },
+    { "tool": "edit", "input": "/home/t/docker/secrets/token", "expect": "deny", "rule": "edit-secrets" },
+    { "tool": "edit", "input": "server.pem", "expect": "deny", "rule": "edit-pem" },
+    { "tool": "edit", "input": "deploy.key", "expect": "deny", "rule": "edit-key" },
+
+    { "tool": "external_directory", "input": "../elsewhere/x.txt", "expect": "ask", "rule": "external-default", "why": "closest-mapping: no Claude same-tool, engine default ask" },
+    { "tool": "external_directory", "input": "/home/t/docker/secrets/token", "expect": "deny", "rule": "external-secrets" },
+
+    { "tool": "webfetch", "input": "http://example.com", "expect": "ask", "rule": "webfetch-default" }
+  ]
+}

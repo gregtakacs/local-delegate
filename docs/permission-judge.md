@@ -1,4 +1,4 @@
-# Permission judge: a local-model "auto mode" for opencode (plan, not built)
+# Permission judge: a worker-model "auto mode" for opencode (plan, not built)
 
 Status: **plan** (greg, 2026-11-14). Nothing here is implemented. First step is §6's spike.
 
@@ -7,7 +7,7 @@ Status: **plan** (greg, 2026-11-14). Nothing here is implemented. First step is 
 opencode's permissions are a static, ordered pattern list per tool (`allow` / `ask` / `deny`, the
 last matching rule wins). That is deterministic, which is good, and blunt: every `ask` prompts the
 person, however obviously harmless the command is in context. Claude Code's auto mode instead asks
-a classifier model per action. This plan gets the useful part of that with the **local** model,
+a classifier model per action. This plan gets the useful part of that with the **worker** model,
 without giving up the determinism of the rules: the judge may only turn an `ask` into a one-time
 `allow`. It never overrides a `deny`, never widens a rule, and never answers for anything on the
 fixed list in §3.
