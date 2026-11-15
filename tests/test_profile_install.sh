@@ -203,5 +203,22 @@ check "release: hook commands point through current" \
 check "release: doctor still reports ok" \
   "env ${CLEAN[*]} HOME='$HR' PATH='$T/stub:$PATH' XDG_CONFIG_HOME='$HR/.config' XDG_DATA_HOME='$HR/.local/share' '$root/current/bin/delegate' doctor >'$T/rel.log' 2>&1 && grep -qE '^permissions:  +ok' '$T/rel.log'"
 
+# ---- an update whose rules text changed; uninstall run from a different tree ----
+# The helper alone, against a copied tree, so the rule sources can change between runs.
+U="$T/upg"; mkdir -p "$U/home/.claude" "$U/tree"
+cp -r "$here/lib" "$here/claude" "$here/opencode" "$here/policy" "$U/tree/"
+MC(){ python3 "$U/tree/lib/merge-claude-settings.py" --home "$U/home" "$@"; }
+MC --install "$U/tree" --real-dir "$U/tree" >/dev/null 2>&1
+echo "An extra core line from a newer release." >> "$U/tree/opencode/rules/harness-core.md"
+check "update: a changed core re-installs (exit 0)" "MC --install '$U/tree' --real-dir '$U/tree' >/dev/null 2>&1"
+check "update: the rules file carries the new text" "grep -q 'newer release' '$U/home/.claude/rules/delegate-harness.md'"
+check "update: rules check ok after the update" "MC --install '$U/tree' --real-dir '$U/tree' --check rules | grep -q 'rules: ok'"
+echo "my own line" >> "$U/home/.claude/rules/delegate-harness.md"
+check "update: a hand-edited rules file is refused" "! MC --install '$U/tree' --real-dir '$U/tree' >/dev/null 2>&1"
+check "update: ...and kept" "grep -q 'my own line' '$U/home/.claude/rules/delegate-harness.md'"
+MC --uninstall --install "$T/elsewhere" --real-dir "$U/tree" >/dev/null 2>&1
+check "uninstall from another tree: our hooks gone" "! grep -q 'harness.py' '$U/home/.claude/settings.json'"
+check "uninstall from another tree: marker gone" "! grep -q '_delegate' '$U/home/.claude/settings.json'"
+
 if [ "$fail" = 0 ]; then echo "PASS test_profile_install"; else echo "FAIL test_profile_install"; fi
 exit $fail

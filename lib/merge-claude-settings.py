@@ -240,15 +240,21 @@ def remove_permissions(doc, recorded):
     return [s for s in recorded if s not in found]
 
 
-def write_rules(target, content):
-    """Install the combined rules file. copy (the S7-picked default, owner decision 3)."""
+def write_rules(target, content, recorded_sha=None):
+    """Install the combined rules file. copy (the S7-picked default, owner decision 3).
+
+    An existing file is replaced when it is what we wrote last time (its sha256 equals the
+    recorded one) or already equals the new content; anything else was edited by the owner and
+    is refused. Comparing against the NEW content alone would refuse every update whose rule
+    text changed."""
     digest = hashlib.sha256(content.encode()).hexdigest()
     if os.path.islink(target.rules_file):
         t = os.path.realpath(target.rules_file)
         print("NOTE: %s is a symlink to %s; left alone, replace it to take the installed rules"
               % (target.rules_file, t))
         return "copy", digest
-    if os.path.lexists(target.rules_file) and sha256_file(target.rules_file) != digest:
+    if os.path.lexists(target.rules_file) and \
+            sha256_file(target.rules_file) not in (digest, recorded_sha):
         raise RuntimeError("rules file exists and differs from what we would write (edited by "
                            "you?): " + target.rules_file + "; fix: remove it, re-run install.sh")
     os.makedirs(os.path.dirname(target.rules_file), exist_ok=True)
@@ -292,7 +298,10 @@ def cmd_install(o):
             # Only strings WE placed go into the record: an identical one that was already the
             # user's stays foreign (never claimed, never removed), just always satisfied.
             record["permissions"] = sorted(set(record.get("permissions", [])) | set(added))
-        kind, sha = write_rules(target, rules_content(o["real_dir"]))
+        kind, sha = write_rules(target, rules_content(o["real_dir"]), record.get("rules_sha256"))
+        # The tree the hook commands point through, so an uninstall run from another tree
+        # (a checkout, a different release spelling) still recognises our entries.
+        record["install"] = o["install"]
         record["rules_sha256"] = sha
         record["rules_target"] = target.rules_file if kind == "copy" else o["real_dir"]
     except (RuntimeError, subprocess.SubprocessError) as e:
@@ -419,9 +428,12 @@ def cmd_uninstall(o):
     else:
         hooks = doc.get("hooks")
         if isinstance(hooks, dict):
-            specs = hook_specs(o["install"], "agent-progress" in (record.get("hooks") or []))
+            ap = "agent-progress" in (record.get("hooks") or [])
+            roots = [o["install"]]
+            if isinstance(record.get("install"), str) and record["install"] not in roots:
+                roots.append(record["install"])
             exact = {}   # command -> set of group shapes we would have written
-            for entries in specs.values():
+            for entries in [e for r in roots for e in hook_specs(r, ap).values()]:
                 for ev, matcher, hobj in entries:
                     g = OrderedDict([("hooks", [OrderedDict(hobj)])])
                     if matcher is not None:

@@ -146,6 +146,12 @@ def decide(event):
     # 1. §3 hard limit: never auto-allow, regardless of policy (defense-in-depth + tested).
     if _hard_limited(kind, text):
         return None
+    # 1b. The guard only ever allows a SIMPLE command: split_bash does not model pipes,
+    #     background `&`, redirects, newlines, process substitution or subshells, and an
+    #     exception glob's `*` would swallow whatever rides after them. Anything shell-shaped is
+    #     left to the human/classifier (silence never widens access).
+    if kind == "bash" and re.search(r"[|&;<>()$`\n\r]", text):
+        return None
     guard = _guard_view()
     if guard is None:
         return None  # policy absent/unreadable: inert, no stderr
