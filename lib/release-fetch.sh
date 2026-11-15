@@ -45,7 +45,7 @@ release_fetch() {
     "$printer" "fetching $tag from $url"
     tmp=$dest.tmp
     rm -rf "$tmp"
-    git clone --quiet --depth 1 --branch "$tag" "$url" "$tmp" \
+    git clone --quiet --depth 1 --branch "$tag" -- "$url" "$tmp" \
       || { rm -rf "$tmp"; echo "$prog: refusing: clone of tag '$tag' from $url failed" >&2; return 1; }
     git -C "$tmp" rev-parse -q --verify "refs/tags/$tag" >/dev/null \
       || { rm -rf "$tmp"; echo "$prog: refusing: tag '$tag' missing in the clone" >&2; return 1; }

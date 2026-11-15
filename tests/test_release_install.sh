@@ -155,6 +155,14 @@ check "empty XDG_DATA_HOME treated as unset" "[ \$rc -eq 0 ] && [ -f '$XDG_REL/.
 inst "$T/h6" "reldir" --release v0.1.0 --from "$SRC" --no-build
 check "relative XDG_DATA_HOME treated as unset" "[ \$rc -eq 0 ] && [ -f '$T/h6/.local/share/delegate/v0.1.0/VERSION' ] && [ ! -e '$T/reldir' ]"
 
+# a --repo value that looks like a git option is a repository path, never an option
+H9=$T/h9; mkdir -p "$H9"
+inst "$H9" "$H9/data" --release v0.1.0 --repo "--upload-pack=touch $T/pwned" --no-build
+check "an option-shaped --repo is refused" "[ $rc -ne 0 ]"
+check "an option-shaped --repo never runs as a git option" "[ ! -e '$T/pwned' ]"
+check "VERSION file agrees with bin/delegate" \
+  "[ \"\$(cat '$here/VERSION')\" = \"\$(sed -n 's/^VERSION=//p' '$here/bin/delegate' | head -n1)\" ]"
+
 check "no .tmp litter anywhere under the temp dir" \
   "! find '$T' -name '*.tmp' -not -path '*/.git/*' | grep -q ."
 [ $fail -eq 0 ] && echo "PASS tests/test_release_install.sh"
