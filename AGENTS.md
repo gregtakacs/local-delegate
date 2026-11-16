@@ -20,5 +20,5 @@
   `worker/egress-entrypoint.sh`) is security code. Change it only with tests
   (`tests/test_grants.sh`, `DOCKER=1` for the proxy), and never with the delegate worker
   itself: the worker must not write the code that limits the worker.
-- Tests: `tests/test_grants.sh`, `tests/test_chain.sh`, `tests/test_top.sh`, `tests/test_round_commit.sh`, `bash -n bin/delegate`,
-  `python3 -m py_compile lib/*.py`.
+- Tests (the full gate; run all of it before a release): `bash -n bin/delegate`,
+  `python3 -m py_compile lib/*.py`, and every suite: `for t in tests/test_*.sh; do bash "$t" || exit 1; done`.
