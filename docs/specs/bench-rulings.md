@@ -75,3 +75,19 @@ slice may contradict them. A design that needs one changed says so under `## Own
   results are.
 - **R17. Lost history is an accepted edge case.** A bundle whose base commit no longer exists is
   rebuilt or retired, not rescued.
+
+## Amendments (owner, 2026-11-16, after the first B design)
+
+- **R14 (amended). Agents use the setup the owner already has; B manages no credentials.** An
+  own-harness run executes in the same delegate sandbox and network filter as a worker round,
+  fully auto-approved only there. The harness's existing setup (its config and its login or
+  API key, exactly as the owner configured it) is copied into that run read-only and discarded
+  afterwards. B creates, stores, rotates or maps no credentials: no new grant format, no
+  endpoint key files.
+- **R18. Delegate mode uses what the configured endpoint offers.** A run chooses a model (and
+  effort) among the models the already-configured endpoint and key serve; adding endpoints or
+  keys is outside B.
+- **R19. The orchestrator writes the sandbox code.** `run_worker_*`, `lib/grants.py` and
+  `worker/egress*` are written by the orchestrator (whichever agent runs the slice and its
+  review), by hand with tests, never by the sandboxed worker (the AGENTS.md rule stands). A
+  chain step that needs such a change leaves it to the orchestrator and is planned around it.
