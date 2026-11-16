@@ -221,6 +221,24 @@ MC --uninstall --install "$T/elsewhere" --real-dir "$U/tree" >/dev/null 2>&1
 check "uninstall from another tree: our hooks gone" "! grep -q 'harness.py' '$U/home/.claude/settings.json'"
 check "uninstall from another tree: record gone" "[ ! -e '$U/home/.claude/delegate-profile.json' ]"
 
+# Moving an install from a checkout to a release tree (linked through `current`) replaces our
+# hook entries instead of adding a second set, and a release install, like a checkout one, writes
+# one PostToolUse catch-all (the Edit|Write entry is covered by it, never duplicated).
+V="$T/move"; mkdir -p "$V/home/.claude" "$V/checkout" "$V/data/v9"
+cp -r "$here/lib" "$here/claude" "$here/opencode" "$here/policy" "$V/checkout/"
+cp -r "$here/lib" "$here/claude" "$here/opencode" "$here/policy" "$V/data/v9/"
+ln -s v9 "$V/data/current"
+VS="$V/home/.claude/settings.json"
+python3 "$V/checkout/lib/merge-claude-settings.py" --home "$V/home" --install "$V/checkout" --real-dir "$V/checkout" >/dev/null 2>&1
+python3 "$V/data/v9/lib/merge-claude-settings.py" --home "$V/home" --install "$V/data/current" --real-dir "$V/data/v9" >/dev/null 2>&1
+check "move: the checkout's hook entries are gone" "! grep -q '$V/checkout/' '$VS'"
+check "move: hooks point through current" "grep -q '$V/data/current/claude/hooks/harness.py' '$VS'"
+check "move: one PostToolUse harness entry (catch-all, no Edit|Write duplicate)" \
+  "[ \"\$(jq '$VS' 'sum(1 for g in d[\"hooks\"][\"PostToolUse\"] if \"harness.py\" in g[\"hooks\"][0][\"command\"])')\" = 1 ]"
+check "move: one entry per SessionStart matcher" "[ \"\$(jq '$VS' 'len(d[\"hooks\"][\"SessionStart\"])')\" = 2 ]"
+check "move: re-run is byte-stable" "cp '$VS' '$T/move.before' && python3 '$V/data/v9/lib/merge-claude-settings.py' --home '$V/home' --install '$V/data/current' --real-dir '$V/data/v9' >/dev/null 2>&1 && cmp -s '$VS' '$T/move.before'"
+check "move: hooks check ok" "python3 '$V/data/v9/lib/merge-claude-settings.py' --home '$V/home' --install '$V/data/current' --real-dir '$V/data/v9' --check hooks | grep -q 'hooks: ok'"
+
 # A settings.json carrying an in-file _delegate key (an earlier build of the helper) is migrated:
 # the key leaves settings.json, the record lands in the sibling file, doctor's hooks check FAILs first.
 M="$T/mig"; mkdir -p "$M/.claude"

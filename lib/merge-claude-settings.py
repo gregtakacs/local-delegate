@@ -201,8 +201,41 @@ def merge_hooks(doc, specs, check=False):
             if matcher is not None:
                 entry = OrderedDict([("matcher", matcher), ("hooks", [OrderedDict(hobj)])])
             groups.append(entry)
-            present.add((ev, m, cmd))
+            present.add((ev, m, _norm_cmd(cmd)))
     return missing, sorted(set(adopted))
+
+
+def remove_hooks(doc, roots, with_agent_progress):
+    """Drop the hook groups that are exactly what we would have written from any of `roots`;
+    a group carrying our command but edited by hand is left alone (with a NOTE)."""
+    hooks = doc.get("hooks")
+    if not isinstance(hooks, dict):
+        return
+    exact = {}   # command -> set of group shapes we would have written
+    for entries in [e for r in roots for e in hook_specs(r, with_agent_progress).values()]:
+        for ev, matcher, hobj in entries:
+            g = OrderedDict([("hooks", [OrderedDict(hobj)])])
+            if matcher is not None:
+                g = OrderedDict([("matcher", matcher), ("hooks", [OrderedDict(hobj)])])
+            exact.setdefault(hobj["command"], set()).add(json.dumps(g, sort_keys=True))
+    wanted = set(exact)
+    for ev in list(hooks.keys()):
+        groups = hooks[ev]
+        if not isinstance(groups, list):
+            continue
+        kept, edited = [], []
+        for g in groups:
+            cmd = entry_command(g) if isinstance(g, dict) else None
+            if cmd in wanted and json.dumps(g, sort_keys=True) in exact[cmd]:
+                continue                # exactly our shape: ours to remove
+            if cmd in wanted:
+                edited.append(g)        # carries our command but hand-edited: leave it
+            kept.append(g)
+        hooks[ev] = kept
+        if edited:
+            print("NOTE: %s carries a delegate command we did not write; left alone" % ev)
+        if not hooks[ev]:
+            del hooks[ev]
 
 
 def merge_permissions(doc, rendered, check=False):
@@ -308,6 +341,10 @@ def cmd_install(o):
     specs = hook_specs(o["install"], o["agent_progress"])
     try:
         record = record_of(target, doc) or OrderedDict([("version", POLICY_VERSION)])
+        # Moved to another tree (a checkout -> a release's `current`, or back): our entries for
+        # the recorded tree go first, so the hooks never run twice from two trees.
+        if isinstance(record.get("install"), str) and record["install"] != o["install"]:
+            remove_hooks(doc, [record["install"]], "agent-progress" in (record.get("hooks") or []))
         missing, adopted = merge_hooks(doc, specs)
         record["hooks"] = sorted(set(record.get("hooks", [])) | set(adopted) | set(specs.keys()))
         doc.pop("_delegate", None)   # never in settings.json (it disables the file's hooks)
@@ -450,38 +487,10 @@ def cmd_uninstall(o):
     if record is None:
         print("claude settings: no delegate record; nothing of ours to remove")
     else:
-        hooks = doc.get("hooks")
-        if isinstance(hooks, dict):
-            ap = "agent-progress" in (record.get("hooks") or [])
-            roots = [o["install"]]
-            if isinstance(record.get("install"), str) and record["install"] not in roots:
-                roots.append(record["install"])
-            exact = {}   # command -> set of group shapes we would have written
-            for entries in [e for r in roots for e in hook_specs(r, ap).values()]:
-                for ev, matcher, hobj in entries:
-                    g = OrderedDict([("hooks", [OrderedDict(hobj)])])
-                    if matcher is not None:
-                        g = OrderedDict([("matcher", matcher), ("hooks", [OrderedDict(hobj)])])
-                    exact.setdefault(hobj["command"], set()).add(json.dumps(g, sort_keys=True))
-            wanted = set(exact)
-            for ev in list(hooks.keys()):
-                groups = hooks[ev]
-                if not isinstance(groups, list):
-                    continue
-                kept, ours, edited = [], 0, []
-                for g in groups:
-                    cmd = entry_command(g) if isinstance(g, dict) else None
-                    if cmd in wanted and json.dumps(g, sort_keys=True) in exact[cmd]:
-                        ours += 1               # exactly our shape: ours to remove
-                    else:
-                        if cmd in wanted:
-                            edited.append(g)    # carries our command but hand-edited: leave it
-                        kept.append(g)
-                hooks[ev] = kept
-                if edited:
-                    print("NOTE: %s carries a delegate command we did not write; left alone" % ev)
-                if not hooks[ev]:
-                    del hooks[ev]
+        roots = [o["install"]]
+        if isinstance(record.get("install"), str) and record["install"] not in roots:
+            roots.append(record["install"])
+        remove_hooks(doc, roots, "agent-progress" in (record.get("hooks") or []))
         leftover = remove_permissions(doc, record.get("permissions") or [])
         if leftover:
             print("NOTE: permission entries not found (edited by you?): %s; left alone"
