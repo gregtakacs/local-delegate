@@ -8,7 +8,7 @@
 set -euo pipefail
 
 DELEGATE_HOME=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)
-VERSION=0.5.0
+VERSION=0.5.1
 
 die()  { echo "delegate: $*" >&2; exit 1; }
 warn() { echo "delegate: $*" >&2; }
@@ -2066,9 +2066,17 @@ ledger_record_round() { # N RD RC START END — the round and timeline rows for 
   [ "${RUNNER:-$DELEGATE_RUNNER}" = docker ] && img=$(image_stamp "$DELEGATE_IMAGE" 2>/dev/null || true)
   local shaverspec=""
   [ -f "$TASK_DIR/spec.md" ] && shaverspec=$(sha256sum "$TASK_DIR/spec.md" | cut -c1-64)
+  # Effort is the --hard flag recorded at run/continue time (EFFORT in meta.env). A task created
+  # before that key existed has none: infer it the way the import does, and say so on the row.
+  local eff_args=(--effort-source cli)
+  if ! grep -q '^EFFORT=' "$TASK_DIR/meta.env" 2>/dev/null; then
+    local eff=normal hm=${DELEGATE_MODEL_HARD:-} nm=${DELEGATE_MODEL:-}
+    [ -n "${MODEL:-}" ] && [ "$MODEL" = "$hm" ] && [ "$hm" != "$nm" ] && eff=hard
+    eff_args=(--effort "$eff" --effort-source inferred)
+  fi
   ledger_append --kind round --task-dir "$TASK_DIR" \
     --round-from-report "$rd/report.json" --events "$rd/events.jsonl" \
-    --diffstat "$rd/diffstat" --endpoint "$BASE_URL" --effort-source cli \
+    --diffstat "$rd/diffstat" --endpoint "$BASE_URL" "${eff_args[@]}" \
     --spec-hash "$shaverspec" --rules-hash "$hash" --image-stamp "$img" \
     --timeout-s "${secs:-$DELEGATE_TIMEOUT}" --edit-cap "$DELEGATE_CHUNK_CAP" \
     --parallel-rounds "$(ledger_parallel_rounds)" --delegate-version "$VERSION" \

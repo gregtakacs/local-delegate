@@ -344,4 +344,19 @@ printf 'rule one\n' > "$RL/rules/one.md"
 h3=$(. "$T/driver.sh"; ledger_rules_hash)
 check "restoring the tree restores the hash" '[ "$h1" = "$h3" ]'
 
+# ------------------------------------------- a task from before EFFORT existed -----
+# A task created by a delegate older than the ledger has no EFFORT in meta.env. Its later rounds
+# infer effort the way the import does (hard iff its model is the configured hard model) and say
+# so, rather than claiming a CLI-given `normal`.
+TD2=$T/task-legacy; cp -r "$TD" "$TD2"; sed -i '/^EFFORT=/d' "$TD2/meta.env"
+L2=$T/legacy.jsonl
+legacy() { ( unset EFFORT; export TASK_DIR=$TD2 DELEGATE_LEDGER=$L2 MODEL=$1 \
+             DELEGATE_MODEL=med-m DELEGATE_MODEL_HARD=hard-m
+             . "$T/driver.sh"; finalize_round 1 "$TD2/rounds/1" "" 0 "$START" "$END" ) >/dev/null 2>&1; }
+legacy hard-m; legacy med-m
+check "a pre-EFFORT task's round infers hard from its model, labelled inferred" \
+  'sed -n 1p "$L2" | grep -q "\"effort\":\"hard\",\"effort_source\":\"inferred\""'
+check "and infers normal for the other model, labelled inferred" \
+  'grep "\"kind\":\"round\"" "$L2" | sed -n 2p | grep -q "\"effort\":\"normal\",\"effort_source\":\"inferred\""'
+
 exit $fail
