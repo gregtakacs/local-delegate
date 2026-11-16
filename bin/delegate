@@ -8,7 +8,7 @@
 set -euo pipefail
 
 DELEGATE_HOME=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)
-VERSION=0.3.0
+VERSION=0.3.1
 
 die()  { echo "delegate: $*" >&2; exit 1; }
 warn() { echo "delegate: $*" >&2; }
@@ -1536,7 +1536,12 @@ harness_drift() {
   # actually loaded: OpenCode's own log must show each one loading, not failing, after the link was
   # made (a link check alone passed for months while 2.3.0 refused every plugin, 2026-11-16).
   local p missing= offtree= wrongapi= oc_major want_src=plugins real
-  oc_major=$(opencode --version 2>/dev/null | sed -nE 's/[^0-9]*([0-9]+)\..*/\1/p' | head -1)
+  # relative XDG dirs are dropped for the call: OpenCode logs under XDG_DATA_HOME even for --version
+  local xdg_unset= xv
+  for xv in XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME XDG_CONFIG_HOME; do
+    case "${!xv-/}" in /*) ;; *) xdg_unset="$xdg_unset -u $xv" ;; esac
+  done
+  oc_major=$(env $xdg_unset opencode --version 2>/dev/null | sed -nE 's/[^0-9]*([0-9]+)\..*/\1/p' | head -1)
   oc_major=${DELEGATE_OPENCODE_MAJOR:-${oc_major:-0}}
   if [ "$oc_major" -ge 2 ] 2>/dev/null && [ -d "$DELEGATE_HOME/opencode/plugins-v2" ]; then
     want_src=plugins-v2

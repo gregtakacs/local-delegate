@@ -24,10 +24,19 @@ oc_cmd_dir=${OPENCODE_COMMANDS_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode/c
 oc_plugin_dir=${OPENCODE_PLUGINS_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins}
 # The installed OpenCode's major version (0 when absent or unreadable); DELEGATE_OPENCODE_MAJOR
 # overrides it (tests, and installs prepared before OpenCode itself is on PATH).
+# `env` arguments that unset every XDG base dir that is set but not absolute.
+oc_xdg_unset() {
+  local var
+  for var in XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME XDG_CONFIG_HOME; do
+    case "${!var-/}" in /*) ;; *) printf -- '-u %s ' "$var" ;; esac
+  done
+}
 opencode_major() {
   if [ -n "${DELEGATE_OPENCODE_MAJOR:-}" ]; then echo "$DELEGATE_OPENCODE_MAJOR"; return; fi
   local v
-  v=$(opencode --version 2>/dev/null | sed -nE 's/[^0-9]*([0-9]+)\..*/\1/p' | head -1)
+  # OpenCode writes a log under XDG_DATA_HOME even for --version: a relative value (invalid per
+  # the spec, treated as unset here) would drop it into the current directory.
+  v=$(env $(oc_xdg_unset) opencode --version 2>/dev/null | sed -nE 's/[^0-9]*([0-9]+)\..*/\1/p' | head -1)
   echo "${v:-0}"
 }
 oc_cfg=${OPENCODE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json}

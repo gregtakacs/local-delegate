@@ -154,6 +154,7 @@ XDG_REL=$T/h5; inst "$XDG_REL" "" --release v0.1.0 --from "$SRC" --no-build
 check "empty XDG_DATA_HOME treated as unset" "[ \$rc -eq 0 ] && [ -f '$XDG_REL/.local/share/delegate/v0.1.0/VERSION' ]"
 inst "$T/h6" "reldir" --release v0.1.0 --from "$SRC" --no-build
 check "relative XDG_DATA_HOME treated as unset" "[ \$rc -eq 0 ] && [ -f '$T/h6/.local/share/delegate/v0.1.0/VERSION' ] && [ ! -e '$T/reldir' ]"
+check "relative XDG_DATA_HOME: nothing written into the current directory (opencode --version logs there)" "[ ! -e reldir ] && [ ! -e '$here/reldir' ]"
 
 # a --repo value that looks like a git option is a repository path, never an option
 H9=$T/h9; mkdir -p "$H9"
