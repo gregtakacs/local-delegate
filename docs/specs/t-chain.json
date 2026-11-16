@@ -1,0 +1,32 @@
+{
+  "name": "t",
+  "repo": "../..",
+  "base": "bench",
+  "retries": 2,
+  "steps": [
+    {
+      "name": "t-1-ledger-core",
+      "spec": "docs/specs/t-1-ledger-core.md",
+      "hard": true,
+      "verify": "set -o pipefail && bash -n bin/delegate && python3 -m py_compile lib/*.py && [ -f tests/test_ledger.sh ] && for f in tests/test_*.sh; do l=/tmp/gate-$(basename \"$f\" .sh).log; env -u DELEGATE_EVIDENCE_DIR bash \"$f\" >\"$l\" 2>&1 || { echo \"GATE FAIL $f\"; grep -h FAIL \"$l\" | head -20; exit 1; }; done && ! git diff --name-only bench | grep -qvE '^docs/specs/(t-brief|t-design|t-chain\\.json|t-1-ledger-core\\.md)$|^bin/delegate$|^lib/ledger\\.py$|^config\\.example\\.env$|^docs/reference\\.md$|^tests/test_ledger\\.sh$' && echo GATE-OK"
+    },
+    {
+      "name": "t-2-round-row",
+      "spec": "docs/specs/t-2-round-row.md",
+      "hard": true,
+      "verify": "set -o pipefail && bash -n bin/delegate && python3 -m py_compile lib/*.py && [ -f tests/test_ledger_round.sh ] && for f in tests/test_*.sh; do l=/tmp/gate-$(basename \"$f\" .sh).log; env -u DELEGATE_EVIDENCE_DIR bash \"$f\" >\"$l\" 2>&1 || { echo \"GATE FAIL $f\"; grep -h FAIL \"$l\" | head -20; exit 1; }; done && ! git diff --name-only delegate/t-1-ledger-core | grep -qvE '^docs/specs/(t-brief|t-design|t-chain\\.json|t-1-ledger-core\\.md|t-2-round-row\\.md)$|^bin/delegate$|^lib/ledger\\.py$|^config\\.example\\.env$|^docs/reference\\.md$|^tests/test_ledger(_round)?\\.sh$' && echo GATE-OK"
+    },
+    {
+      "name": "t-3-review-import",
+      "spec": "docs/specs/t-3-review-import.md",
+      "hard": false,
+      "verify": "set -o pipefail && bash -n bin/delegate && python3 -m py_compile lib/*.py && [ -f tests/test_ledger.sh ] && for f in tests/test_*.sh; do l=/tmp/gate-$(basename \"$f\" .sh).log; env -u DELEGATE_EVIDENCE_DIR bash \"$f\" >\"$l\" 2>&1 || { echo \"GATE FAIL $f\"; grep -h FAIL \"$l\" | head -20; exit 1; }; done && ! git diff --name-only delegate/t-2-round-row | grep -qvE '^docs/specs/(t-brief|t-design|t-chain\\.json|t-1-ledger-core\\.md|t-2-round-row\\.md|t-3-review-import\\.md)$|^bin/delegate$|^lib/ledger\\.py$|^config\\.example\\.env$|^docs/reference\\.md$|^tests/test_ledger(_round)?\\.sh$' && echo GATE-OK"
+    },
+    {
+      "name": "t-4-stats",
+      "spec": "docs/specs/t-4-stats.md",
+      "hard": true,
+      "verify": "set -o pipefail && bash -n bin/delegate && python3 -m py_compile lib/*.py && [ -f tests/test_stats.sh ] && for f in tests/test_*.sh; do l=/tmp/gate-$(basename \"$f\" .sh).log; env -u DELEGATE_EVIDENCE_DIR bash \"$f\" >\"$l\" 2>&1 || { echo \"GATE FAIL $f\"; grep -h FAIL \"$l\" | head -20; exit 1; }; done && ! git diff --name-only delegate/t-3-review-import | grep -qvE '^docs/specs/(t-brief|t-design|t-chain\\.json|t-1-ledger-core\\.md|t-2-round-row\\.md|t-3-review-import\\.md|t-4-stats\\.md)$|^bin/delegate$|^lib/ledger\\.py$|^docs/reference\\.md$|^tests/test_stats\\.sh$' && echo GATE-OK"
+    }
+  ]
+}
