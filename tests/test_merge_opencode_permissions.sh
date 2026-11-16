@@ -71,4 +71,16 @@ check "merge adds an uncovered dir" "python3 -c \"import json;e=json.load(open('
 DH="$T/defhome"; mkdir -p "$DH"
 env -u XDG_CONFIG_HOME HOME="$DH" python3 "$M" --skill-dir "$T/skills/delegate" --real-dir "$here/claude/skills/delegate" >/dev/null 2>&1
 check "default config path is ~/.config/opencode/opencode.json" "[ -f '$DH/.config/opencode/opencode.json' ] && [ ! -e '$DH/opencode' ]"
+# a user's catch-all that differs from a non-deny policy row stays the user's: kept on install,
+# never recorded as ours, so a later install (from any tree) never rewrites it
+PC="$T/polcfg.json"
+printf '{"permission":{"bash":{"*":"allow"},"webfetch":{"*":"allow"}}}\n' > "$PC"
+pol() { python3 "$M" --config "$PC" --skill-dir "$T/skills/delegate" --real-dir "$here/claude/skills/delegate" --permission-policy "$here/policy/harness-permissions.json" --render "$@"; }
+pol >/dev/null 2>&1
+check "policy: user's bash catch-all kept on install" "python3 -c \"import json;d=json.load(open('$PC'));assert d['permission']['bash']['*']=='allow'\""
+check "policy: user's catch-alls not recorded as ours" "python3 -c \"import json;r=json.load(open('$PC'))['_delegate']['permissions'];assert ['bash','*'] not in r and ['webfetch','*'] not in r, r\""
+pol >/dev/null 2>&1
+check "policy: ...and still kept on a re-run" "python3 -c \"import json;d=json.load(open('$PC'));assert d['permission']['bash']['*']=='allow' and d['permission']['webfetch']['*']=='allow'\""
+check "policy: a policy deny row still landed" "python3 -c \"import json;d=json.load(open('$PC'));assert d['permission']['bash']['sudo *']=='deny'\""
+
 exit $fail

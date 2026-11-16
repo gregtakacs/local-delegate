@@ -251,6 +251,7 @@ def merge_policy_permissions(doc, o, record, check=False):
                         "else is not drift — remove or fix your entry"
                         % (section, pattern, cur[pattern]))
                     continue
+                continue                         # the user's own value: kept, never claimed
             elif check:
                 problems.append("missing %s/%s" % (section, pattern))
                 continue
