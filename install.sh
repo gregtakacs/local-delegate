@@ -164,6 +164,11 @@ if command -v opencode >/dev/null; then
   if [ -f "$DELEGATE_HOME/policy/harness-permissions.json" ]; then
     oc_extra+=(--permission-policy "$DELEGATE_HOME/policy/harness-permissions.json" --render)
   fi
+  # OpenCode 2 ships todowrite behind a feature flag that is off in releases; the rules require
+  # a todo list, so a 2.x install turns it on (2026-11-16: 2.3.0 offered the model no todo tool).
+  if [ "$(opencode_major)" -ge 2 ] 2>/dev/null; then
+    oc_extra+=(--flag todo)
+  fi
   python3 "$DELEGATE_HOME/lib/merge-opencode-permissions.py" \
     --skill-dir "$skill_dir/delegate" --real-dir "$DELEGATE_REAL/claude/skills/delegate" \
     ${oc_extra[@]+"${oc_extra[@]}"} \

@@ -67,13 +67,15 @@ def covered(rules, pattern, val):
 
 
 def parse(argv):
-    args, opts = list(argv), {"instructions": []}
+    args, opts = list(argv), {"instructions": [], "flags": []}
     while args:
         a = args.pop(0)
         if a in ("--config", "--skill-dir", "--real-dir", "--permission-policy"):
             opts[a[2:].replace("-", "_")] = os.path.expanduser(args.pop(0))
         elif a == "--instructions":
             opts["instructions"].append(os.path.expanduser(args.pop(0)))
+        elif a == "--flag":
+            opts["flags"].append(args.pop(0))
         elif a == "--render":
             opts["render"] = True
         elif a == "--check":
@@ -269,6 +271,35 @@ def merge_policy_permissions(doc, o, record, check=False):
     return None
 
 
+def merge_flags(doc, o, record, check=False):
+    """OpenCode 2 feature flags delegate needs (`experimental.<name>: true`; e.g. `todo`, without
+    which 2.3.0 offers no todowrite tool at all and the rules' todo list cannot exist — found live
+    2026-11-16). Add-if-absent and recorded; a value the user set (true or false) is theirs, never
+    rewritten. Returns (missing, foreign_off) name lists."""
+    want = o.get("flags") or []
+    recorded = list(record.get("flags", [])) if isinstance(record, dict) else []
+    exp = doc.get("experimental")
+    missing, foreign_off = [], []
+    if exp is not None and not isinstance(exp, dict):
+        return list(want), []
+    for name in want:
+        cur = (exp or {}).get(name)
+        if cur is True:
+            continue
+        if cur is not None and name not in recorded:
+            foreign_off.append(name)
+            continue
+        missing.append(name)
+        if not check:
+            exp = doc.setdefault("experimental", OrderedDict())
+            exp[name] = True
+            if name not in recorded:
+                recorded.append(name)
+    if not check and isinstance(record, dict):
+        record["flags"] = sorted(n for n in recorded if n in want or (exp or {}).get(n) is True)
+    return missing, foreign_off
+
+
 def cmd_uninstall(o):
     cfg = o["config"]
     if not os.path.exists(cfg):
@@ -283,6 +314,12 @@ def cmd_uninstall(o):
         for e in record.get("instructions", []):
             if isinstance(doc.get("instructions"), list) and e in doc["instructions"]:
                 doc["instructions"].remove(e)
+        exp = doc.get("experimental")
+        for name in record.get("flags", []):
+            if isinstance(exp, dict) and exp.get(name) is True:
+                exp.pop(name)
+        if isinstance(exp, dict) and not exp:
+            doc.pop("experimental", None)
         doc.pop("_delegate", None)
     else:
         # pre-marker config: machine entries can only be ours if they carry exactly our value
@@ -355,6 +392,19 @@ def cmd_check(o, doc):
                 emit("permissions", "fail", detail + "; fix: re-run install.sh")
             else:
                 emit("permissions", "ok", "policy rows in sync")
+    if "flags" in areas:
+        if not o.get("flags"):
+            emit("flags", "ok", "no opencode feature flags needed")
+        else:
+            missing, foreign_off = merge_flags(doc, o, dict(record or {}), check=True)
+            if foreign_off:
+                emit("flags", "warn", "you set experimental." + ", experimental.".join(foreign_off)
+                     + " to something other than true; delegate's rules need it (the todo tool)")
+            elif missing:
+                emit("flags", "fail", "experimental." + ", experimental.".join(missing)
+                     + " not on in " + o["config"] + "; fix: re-run install.sh")
+            else:
+                emit("flags", "ok", "experimental." + ", experimental.".join(o["flags"]) + " on")
     return state["rc"]
 
 
@@ -407,6 +457,11 @@ def main(argv):
     if detail:
         print(f"merge-opencode-permissions: {detail}; file left untouched", file=sys.stderr)
         return 1
+    if o.get("flags") or record.get("flags"):
+        _m, foreign_off = merge_flags(doc, o, record)
+        for name in foreign_off:
+            print(f"NOTE: experimental.{name} is set by you to something other than true; left "
+                  "alone (delegate's rules need it)", file=sys.stderr)
     doc["_delegate"] = record
     save(cfg, doc)
     print(f"opencode permissions: merged delegate entries into {cfg}"

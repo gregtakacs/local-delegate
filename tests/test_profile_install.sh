@@ -246,6 +246,8 @@ DELEGATE_OPENCODE_MAJOR=2 inst "$H2" >/dev/null 2>&1
 check "oc2: plugin links point at the plugins-v2 entries" \
   "readlink -f '$(PLUG "$H2" todo-loop)' | grep -q '/opencode/plugins-v2/todo-loop.js\$'"
 check "oc2: adapt.js is a module, never linked as a plugin" "[ ! -e '$H2/.config/opencode/plugins/adapt.js' ]"
+check "oc2: experimental.todo turned on (2.x hides todowrite behind it)" \
+  "python3 -c \"import json;assert json.load(open('$(OCFG "$H2")'))['experimental']['todo'] is True\""
 L2="$H2/.local/share/opencode/log"; mkdir -p "$L2"
 out=$(DELEGATE_OPENCODE_MAJOR=2 doc "$H2" 2>&1)
 check "oc2: no load seen since linking -> WARN to restart opencode" \
@@ -259,6 +261,7 @@ done
 out=$(DELEGATE_OPENCODE_MAJOR=2 doc "$H2" 2>&1)
 check "oc2: loads after the link (older failures ignored) -> ok" \
   "printf %s \"\$out\" | grep -qE '^plugins: +ok.*loaded by opencode 2'"
+check "oc2: doctor reports the todo tool on" "printf %s \"\$out\" | grep -qE '^todo tool: +ok.*experimental.todo on'"
 echo "timestamp=$ts level=WARN message=\"failed to load plugin\" target=$H2/.config/opencode/plugins/todo-loop.js cause=x" >> "$L2/opencode.log"
 out=$(DELEGATE_OPENCODE_MAJOR=2 doc "$H2" 2>&1); rc=$?
 check "oc2: a failure logged after the link -> FAIL naming the plugin" \
@@ -270,6 +273,8 @@ check "oc2: a 1.x-shaped link on opencode 2 -> FAIL wrong-api" \
 H1="$T/oc1"; mkhome "$H1"; mkdir -p "$H1/.claude"; inst "$H1" >/dev/null 2>&1
 check "oc1 (the stub reports 0.0.0): links stay on the 1.x plugins" \
   "readlink -f '$(PLUG "$H1" todo-loop)' | grep -q '/opencode/plugins/todo-loop.js\$'"
+check "oc1: no experimental key, no todo-tool doctor line" \
+  "python3 -c \"import json;assert 'experimental' not in json.load(open('$(OCFG "$H1")'))\" && ! doc '$H1' 2>&1 | grep -q '^todo tool:'"
 
 # A settings.json carrying an in-file _delegate key (an earlier build of the helper) is migrated:
 # the key leaves settings.json, the record lands in the sibling file, doctor's hooks check FAILs first.

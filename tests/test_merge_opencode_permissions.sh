@@ -83,4 +83,26 @@ pol >/dev/null 2>&1
 check "policy: ...and still kept on a re-run" "python3 -c \"import json;d=json.load(open('$PC'));assert d['permission']['bash']['*']=='allow' and d['permission']['webfetch']['*']=='allow'\""
 check "policy: a policy deny row still landed" "python3 -c \"import json;d=json.load(open('$PC'));assert d['permission']['bash']['sudo *']=='deny'\""
 
+# OpenCode 2 feature flags (--flag NAME -> experimental.NAME: true): 2.3.0 hides todowrite behind
+# experimental.todo, so without it the rules' todo list cannot exist (live, 2026-11-16).
+FC="$T/flagcfg.json"
+fl() { python3 "$M" --config "$FC" --skill-dir "$T/skills/delegate" --real-dir "$here/claude/skills/delegate" "$@"; }
+printf '{"experimental":{"background_compaction":true}}\n' > "$FC"
+fl --flag todo >/dev/null 2>&1
+check "flags: experimental.todo turned on, the user's other flag kept" "python3 -c \"import json;d=json.load(open('$FC'));assert d['experimental']=={'background_compaction':True,'todo':True}, d\""
+check "flags: recorded as delegate's" "python3 -c \"import json;assert json.load(open('$FC'))['_delegate']['flags']==['todo']\""
+cp "$FC" "$FC.first"; fl --flag todo >/dev/null 2>&1
+check "flags: re-run byte-stable" "cmp -s '$FC' '$FC.first'"
+check "flags: check ok when on" "fl --check flags --flag todo | grep -q 'check flags: ok'"
+python3 -c "import json;d=json.load(open('$FC'));d['experimental'].pop('todo');json.dump(d,open('$FC','w'))"
+check "flags: check FAILs when ours went missing" "! fl --check flags --flag todo >/dev/null; fl --check flags --flag todo | grep -q 'check flags: fail'"
+fl --uninstall >/dev/null 2>&1; fl --flag todo >/dev/null 2>&1; fl --uninstall >/dev/null 2>&1
+check "flags: uninstall removes ours, keeps the user's" "python3 -c \"import json;d=json.load(open('$FC'));assert d.get('experimental')=={'background_compaction':True}, d\""
+printf '{"experimental":{"todo":false}}\n' > "$FC"
+fl --flag todo >/dev/null 2>&1
+check "flags: a user's todo=false is kept, never rewritten" "python3 -c \"import json;d=json.load(open('$FC'));assert d['experimental']['todo'] is False and 'todo' not in d['_delegate'].get('flags',[])\""
+check "flags: ...and check WARNs about it" "fl --check flags --flag todo | grep -q 'check flags: warn'"
+printf '{}\n' > "$FC"; fl >/dev/null 2>&1
+check "flags: no --flag (OpenCode 1) adds no experimental key" "python3 -c \"import json;assert 'experimental' not in json.load(open('$FC'))\""
+
 exit $fail

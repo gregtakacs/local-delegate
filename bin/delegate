@@ -8,7 +8,7 @@
 set -euo pipefail
 
 DELEGATE_HOME=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)
-VERSION=0.3.1
+VERSION=0.3.2
 
 die()  { echo "delegate: $*" >&2; exit 1; }
 warn() { echo "delegate: $*" >&2; }
@@ -1603,6 +1603,14 @@ PYEOF
     fi
   else
     emit plugins ok "four plugin links under $oc_plug"
+  fi
+
+  # todo tool: OpenCode 2 hides todowrite behind experimental.todo (off in releases); without it
+  # the rules' todo list cannot exist at all (2026-11-16: the model said it had no todo tool).
+  if [ "$oc_major" -ge 2 ] 2>/dev/null && [ -f "$oc_cfg" ]; then
+    local fl_st
+    fl_st=$(run_check python3 "$DELEGATE_HOME/lib/merge-opencode-permissions.py" --check flags --flag todo --config "$oc_cfg")
+    emit "todo tool" "$fl_st" "$(area flags "$tmp" | cut -f2-)"
   fi
 
   # hooks: the recorded ids present in settings.json with commands resolving under the tree
