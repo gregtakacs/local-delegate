@@ -2,9 +2,7 @@
 """todo-loop.py — Claude Code port of opencode/plugins/todo-loop.js (O1b step 4, design §5.2).
 
 FIDELITY: the source of truth is opencode/plugins/todo-loop.js. The constants below are copied
-from it verbatim (same names, same values) and the nudge text is byte-identical to the JS
-plugin's, so the shared test fixtures (tests/test_claude_hooks.sh) assert the SAME string on
-both engines. What deliberately differs: the JS plugin keeps its `state` Map in the server
+from it verbatim (same names, same values); the nudge TEXT is Claude-specific (see reminder()). What deliberately differs: the JS plugin keeps its `state` Map in the server
 process; a Claude command hook is a new process per call, so counters live in a per-session
 file (hooklib) — same budgets, same windows, file-backed (design §5.2: "the JS in-memory state
 does not port"). `stale`/`barren` windows and MAX_NUDGES are unchanged.
@@ -26,16 +24,17 @@ MAX_NUDGES = 8            # todo-loop.js:23
 
 def reminder(st):
     """The `<todo-reminder>` block, identical to the JS plugin's appended text (todo-loop.js:49-59)."""
-    return (
-        "<todo-reminder>"
-        + str(st["calls"])
-        + " tool calls since your last todowrite. opencode's todo panel renders ONLY your last"
-        " todowrite — statuses never update themselves. Re-send the FULL list right now, with"
-        " honest statuses (completed / in_progress / pending); do not save the rewrite for the"
-        " end of the task."
-        + ("" if st["ever_listed"] else " This task is long enough to plan: write the list before the next step.")
-        + "</todo-reminder>"
-    )
+    # Claude Code wording (the JS budgets, not its text): Claude's list tool differs by version
+    # (TodoWrite, the Task* tools) and some sessions have none, so the nudge names no tool and
+    # never mentions opencode's panel (found live 2026-11-15 on 2.1.325, which has no todo tool).
+    if st["ever_listed"]:
+        body = (" tool calls since you last updated your task list. Bring it up to date now, with"
+                " honest statuses (completed / in_progress / pending); do not save the update for"
+                " the end of the task.")
+    else:
+        body = (" tool calls and no task list yet. If this session has a todo or task-list tool,"
+                " this task is long enough to plan: write the list before the next step.")
+    return "<todo-reminder>" + str(st["calls"]) + body + "</todo-reminder>"
 
 
 def handle(event, st):
@@ -46,7 +45,7 @@ def handle(event, st):
     it and, at the window edge, emits once.
     """
     tool = (event.get("tool_name") or "")
-    if tool in ("TodoWrite", "todo"):
+    if tool in ("TodoWrite", "todo", "TaskCreate", "TaskUpdate"):
         st["ever_listed"] = True
         st["calls"] = 0
         st["nudges"] = 0  # complied: refresh the window and the budget (todo-loop.js:36)

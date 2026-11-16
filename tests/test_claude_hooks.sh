@@ -50,9 +50,9 @@ for i in $(seq 1 7); do
 done
 [ "$first7_clean" = 1 ] && ok "no todo nudge for calls 1-7 after a todowrite"
 o8=$(out "$(mk Bash call-8 '{"command":"echo x"}')")
-if has "<todo-reminder>" "$o8" && has "8 tool calls since your last todowrite" "$o8" \
-   && has "opencode's todo panel renders ONLY your last" "$o8" && has "</todo-reminder>" "$o8"; then
-  ok "todo nudge fires at call 8 with the JS todo-loop.js text (window advances)"
+if has "<todo-reminder>" "$o8" && has "8 tool calls since you last updated your task list" "$o8" \
+   && ! has "opencode" "$o8" && ! has "todowrite" "$o8" && has "</todo-reminder>" "$o8"; then
+  ok "todo nudge fires at call 8 with Claude wording, no opencode/todowrite (window advances)"
 else
   bad "todo nudge at call 8: got: $o8"
 fi
