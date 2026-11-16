@@ -22,6 +22,14 @@ bin_dir=${DELEGATE_BIN_DIR:-$HOME/.local/bin}
 skill_dir=${CLAUDE_SKILLS_DIR:-$HOME/.claude/skills}
 oc_cmd_dir=${OPENCODE_COMMANDS_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode/commands}
 oc_plugin_dir=${OPENCODE_PLUGINS_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins}
+# The installed OpenCode's major version (0 when absent or unreadable); DELEGATE_OPENCODE_MAJOR
+# overrides it (tests, and installs prepared before OpenCode itself is on PATH).
+opencode_major() {
+  if [ -n "${DELEGATE_OPENCODE_MAJOR:-}" ]; then echo "$DELEGATE_OPENCODE_MAJOR"; return; fi
+  local v
+  v=$(opencode --version 2>/dev/null | sed -nE 's/[^0-9]*([0-9]+)\..*/\1/p' | head -1)
+  echo "${v:-0}"
+}
 oc_cfg=${OPENCODE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json}
 agents_dir=${CLAUDE_AGENTS_DIR:-$HOME/.claude/agents}
 # An empty or relative XDG_DATA_HOME is invalid per the XDG base dir spec: treat it as unset.
@@ -161,15 +169,23 @@ if command -v opencode >/dev/null; then
   fi
   # The harness plugins (design §5.1), each a link through the install tree so an update is
   # picked up without re-running the installer. Same left-alone care as every other link.
+  # OpenCode 2.x rejects the 1.x plugin shape (all four failed to load on 2.3.0, 2026-11-16), so a
+  # 2.x install links the opencode/plugins-v2 entries, which wrap the same 1.x logic. Only the
+  # plugin names are linked: plugins-v2/adapt.js is a module, not a plugin.
+  oc_plugin_src=plugins
+  if [ "$(opencode_major)" -ge 2 ] 2>/dev/null && [ -d "$DELEGATE_HOME/opencode/plugins-v2" ]; then
+    oc_plugin_src=plugins-v2
+  fi
   if ls "$DELEGATE_HOME"/opencode/plugins/*.js >/dev/null 2>&1; then
     mkdir -p "$oc_plugin_dir"
     for p in "$DELEGATE_HOME"/opencode/plugins/*.js; do
       name=$(basename "$p"); dest="$oc_plugin_dir/$name"
+      [ -f "$DELEGATE_HOME/opencode/$oc_plugin_src/$name" ] || continue
       if [ -e "$dest" ] && [ ! -L "$dest" ]; then
         say "NOTE: $dest exists and is not a symlink; left alone"
       else
-        ln -sfn "$DELEGATE_HOME/opencode/plugins/$name" "$dest"
-        say "opencode plugin -> $dest"
+        ln -sfn "$DELEGATE_HOME/opencode/$oc_plugin_src/$name" "$dest"
+        say "opencode plugin -> $dest ($oc_plugin_src)"
       fi
     done
   fi

@@ -8,7 +8,7 @@
 set -euo pipefail
 
 DELEGATE_HOME=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)
-VERSION=0.2.5
+VERSION=0.3.0
 
 die()  { echo "delegate: $*" >&2; exit 1; }
 warn() { echo "delegate: $*" >&2; }
@@ -1531,25 +1531,73 @@ harness_drift() {
     *) emit rules ok "${rdet:-both sides in place}" ;;
   esac; fi
 
-  # plugins: four links, each resolving into this install tree
-  local p missing= offtree=
+  # plugins: four links, each resolving into this install tree, into the entries the installed
+  # OpenCode can load (2.x rejects the 1.x shape: opencode/plugins-v2 wraps it), and — on 2.x —
+  # actually loaded: OpenCode's own log must show each one loading, not failing, after the link was
+  # made (a link check alone passed for months while 2.3.0 refused every plugin, 2026-11-16).
+  local p missing= offtree= wrongapi= oc_major want_src=plugins real
+  oc_major=$(opencode --version 2>/dev/null | sed -nE 's/[^0-9]*([0-9]+)\..*/\1/p' | head -1)
+  oc_major=${DELEGATE_OPENCODE_MAJOR:-${oc_major:-0}}
+  if [ "$oc_major" -ge 2 ] 2>/dev/null && [ -d "$DELEGATE_HOME/opencode/plugins-v2" ]; then
+    want_src=plugins-v2
+  fi
   for p in chunk-cap notes-loop todo-loop verify-loop; do
     [ -f "$DELEGATE_HOME/opencode/plugins/$p.js" ] || continue
     if [ -L "$oc_plug/$p.js" ]; then
-      case "$(readlink -f "$oc_plug/$p.js" 2>/dev/null)" in
-        "$DELEGATE_HOME"/*|"$(readlink -f "$DELEGATE_HOME")"/*) ;;
+      real=$(readlink -f "$oc_plug/$p.js" 2>/dev/null)
+      case "$real" in
+        "$DELEGATE_HOME"/*|"$(readlink -f "$DELEGATE_HOME")"/*)
+          [ "$real" = "$(readlink -f "$DELEGATE_HOME/opencode/$want_src/$p.js")" ] || wrongapi="$wrongapi $p" ;;
         *) offtree="$offtree $p" ;;
       esac
     else
       missing="$missing $p"
     fi
   done
-  if [ -n "$missing$offtree" ]; then
-    emit plugins fail "missing:${missing:-} off-tree:${offtree:-}; fix: re-run install.sh"
-  elif [ -d "$oc_plug" ]; then
-    emit plugins ok "four plugin links under $oc_plug"
-  else
+  if [ -n "$missing$offtree$wrongapi" ]; then
+    emit plugins fail "missing:${missing:-} off-tree:${offtree:-} wrong-api:${wrongapi:-} (opencode $oc_major wants $want_src); fix: re-run install.sh"
+  elif [ ! -d "$oc_plug" ]; then
     emit plugins warn "no opencode plugins dir; fix: re-run install.sh"
+  elif [ "$want_src" = plugins-v2 ]; then
+    local oc_log=${XDG_DATA_HOME:-$HOME/.local/share}/opencode/log/opencode.log lstate
+    lstate=$(python3 - "$oc_log" "$oc_plug" <<'PYEOF' 2>/dev/null
+import os, re, sys, datetime
+log, plug = sys.argv[1], sys.argv[2]
+names = ["chunk-cap", "notes-loop", "todo-loop", "verify-loop"]
+since = {n: os.lstat(os.path.join(plug, n + ".js")).st_mtime for n in names}
+last = {}
+try:
+    with open(log, errors="replace") as fh:
+        for line in fh:
+            if "loading plugin" not in line and "failed to load plugin" not in line:
+                continue
+            m = re.search(r"timestamp=(\S+)", line)
+            if not m:
+                continue
+            ts = datetime.datetime.fromisoformat(m.group(1).replace("Z", "+00:00")).timestamp()
+            for n in names:
+                if os.path.join(plug, n + ".js") in line and ts >= since[n] - 1:
+                    last[n] = "failed" if "failed to load plugin" in line else "loaded"
+except OSError:
+    pass
+failed = [n for n in names if last.get(n) == "failed"]
+waiting = [n for n in names if n not in last]
+print("failed=" + ",".join(failed) + " waiting=" + ",".join(waiting))
+PYEOF
+)
+    local lfail=${lstate%% waiting=*} lwait=${lstate##* waiting=}
+    lfail=${lfail#failed=}
+    if [ -z "$lstate" ]; then
+      emit plugins warn "four plugin links (2.x entries); could not read $oc_log to confirm they load"
+    elif [ -n "$lfail" ]; then
+      emit plugins fail "opencode $oc_major failed to load: $lfail (see $oc_log); fix: re-run install.sh, then restart opencode"
+    elif [ -n "$lwait" ]; then
+      emit plugins warn "four plugin links (2.x entries); not loaded since they were linked: $lwait; fix: restart opencode"
+    else
+      emit plugins ok "four plugin links, loaded by opencode $oc_major (its log shows no failure)"
+    fi
+  else
+    emit plugins ok "four plugin links under $oc_plug"
   fi
 
   # hooks: the recorded ids present in settings.json with commands resolving under the tree
