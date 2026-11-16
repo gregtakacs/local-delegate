@@ -2,7 +2,7 @@
 
 `"hard": true` — this step parses untrusted reviewer output and decides what a reviewer can see
 (blindness is the point of R15): review the verdict parser and the blind-repo builder line by
-line. Slice B step 9 of 10 (`docs/specs/b-design.md` §Review, §Row schemas `verdict`/`match`,
+line. Slice B step 9 of 10, chain segment 2 (`docs/specs/b-design.md` §Review, §Row schemas `verdict`/`match`,
 R15, R16).
 
 ## Goal
@@ -63,8 +63,8 @@ resumes a batch. `usage()` line.
 
 - `delegate run <prompt file> --repo <blind repo> --name r<k> --timeout <review_timeout>` (`k` =
   the reviewer's 1-based index in the plan's `reviewers`), plus the reviewer condition's flags
-  exactly as B7 builds them for a worker condition (`--endpoint/--model/--effort` or
-  `--agent/--model/--effort/--endpoint/--grant`). No `--verify`, no `--service`. Environment: B7's
+  exactly as B7 builds them for a worker condition (`--model/--effort` or
+  `--agent/--model/--effort`). No `--verify`, no `--service`. Environment: B7's
   (`DELEGATE_READ_PATHS=` empty), with `DELEGATE_FILE_TIMELINE=0`.
 - The prompt file (in the batch dir, never inside the blind repo), verbatim:
 
@@ -104,7 +104,7 @@ resumes a batch. `usage()` line.
 ### Rows
 
 - `verdict` (B1 `verdict_row`, fields per the design): `review_id`, `batch`, `subject`, reviewer
-  label/mode/agent/model/effort/endpoint (meta.env `BASE_URL`), `reviewer_agent_version` and
+  label/mode/agent/model/effort, `reviewer_endpoint` = meta.env `BASE_URL`, `reviewer_agent_version` and
   `reviewer_model_reported` (report.json), `reviewer_task_id`, `status` (report.json), the parsed
   verdict fields, `duration_s`, tokens (report.json for own-harness; T's round row for delegate
   mode). Appended immediately after each review.
@@ -146,17 +146,19 @@ test. At least:
 ## Out of scope
 
 - Scoring reviewers and agreement (B10 computes them from rows). No change to `bin/delegate`
-  beyond the usage line/dispatch, nothing in `lib/agents.py`, `lib/grants.py`, `evals/**`, or
+  beyond the usage line/dispatch, nothing in `lib/agents.py`, `lib/grants.py`, the O1 functions (cage check), `evals/**`, or
   existing tests.
 
 ## Verify
 
 Mid-round, `tests/test_e2e_harness.sh`'s hygiene check blames untracked deliverables; the harness
 commits before the chain's verify runs. If that is the only failure mid-round, report it; never
-edit that test.
+edit that test. The **cage check** fails if this step changed any sandbox function or file
+(R19: orchestrator code; `docs/specs/b-design.md` §Who writes what) — never "fix" it by editing
+the check; leave the sandbox code alone and report what you needed under DEVIATIONS.
 
 ```bash
-set -o pipefail && bash -n bin/delegate && python3 -m py_compile lib/*.py && [ -f tests/test_bench_review.sh ] && for f in tests/test_*.sh; do l=/tmp/gate-$(basename "$f" .sh).log; env -u DELEGATE_EVIDENCE_DIR bash "$f" >"$l" 2>&1 || { echo "GATE FAIL $f"; grep -h FAIL "$l" | head -20; exit 1; }; done && ! git diff --name-only delegate/b-8-review-cases | grep -qvE '^docs/specs/b-|^bin/delegate$|^lib/bench\.py$|^tests/test_bench_(core|review)\.sh$' && echo GATE-OK
+set -o pipefail && bash -n bin/delegate && python3 -m py_compile lib/*.py && [ -f tests/test_bench_review.sh ] && for f in tests/test_*.sh; do l=/tmp/gate-$(basename "$f" .sh).log; env -u DELEGATE_EVIDENCE_DIR bash "$f" >"$l" 2>&1 || { echo "GATE FAIL $f"; grep -h FAIL "$l" | head -20; exit 1; }; done && for fn in run_worker run_worker_docker run_worker_native ensure_network ensure_egress ensure_task_egress host_args read_mount_args make_guard_shims net_args run_limited run_scorer agent_seed_home agent_scrub_home llmlog_start llmlog_stop; do cmp -s <(git show b-o1-sandbox:bin/delegate | sed -n "/^$fn() {/,/^}/p") <(sed -n "/^$fn() {/,/^}/p" bin/delegate) || { echo "CAGE CHANGED $fn (R19: orchestrator code)"; exit 1; }; done && { git diff --quiet b-o1-sandbox -- lib/grants.py worker/egress.Dockerfile worker/egress-entrypoint.sh worker/entrypoint.sh lib/render-opencode-config.py worker/agent-launch || { echo "CAGE CHANGED files (R19: orchestrator code)"; exit 1; }; } && ! git diff --name-only delegate/b-8-review-cases | grep -qvE '^docs/specs/b-|^bin/delegate$|^lib/bench\.py$|^tests/test_bench_(core|review)\.sh$' && echo GATE-OK
 ```
 
 ## Report format

@@ -1,6 +1,6 @@
 # Task B8: review cases — seeded defects at known places, and clean changes
 
-`"hard": false`. Slice B step 8 of 10 (`docs/specs/b-design.md` §Bundles "Review case", R16).
+`"hard": false`. Slice B step 8 of 10, chain segment 2 (`docs/specs/b-design.md` §Bundles "Review case", R16).
 
 ## Goal
 
@@ -97,10 +97,12 @@ For every dir in `evals/review-cases/`:
 
 Mid-round, `tests/test_e2e_harness.sh`'s hygiene check blames untracked deliverables; the harness
 commits before the chain's verify runs. If that is the only failure mid-round, report it; never
-edit that test.
+edit that test. The **cage check** fails if this step changed any sandbox function or file
+(R19: orchestrator code; `docs/specs/b-design.md` §Who writes what) — never "fix" it by editing
+the check; leave the sandbox code alone and report what you needed under DEVIATIONS.
 
 ```bash
-set -o pipefail && bash -n bin/delegate && python3 -m py_compile lib/*.py && [ -f tests/test_review_cases.sh ] && for f in tests/test_*.sh; do l=/tmp/gate-$(basename "$f" .sh).log; env -u DELEGATE_EVIDENCE_DIR bash "$f" >"$l" 2>&1 || { echo "GATE FAIL $f"; grep -h FAIL "$l" | head -20; exit 1; }; done && ! git diff --name-only delegate/b-7-bench-run | grep -qvE '^docs/specs/b-|^evals/review-cases/|^tests/test_review_cases\.sh$' && echo GATE-OK
+set -o pipefail && bash -n bin/delegate && python3 -m py_compile lib/*.py && [ -f tests/test_review_cases.sh ] && for f in tests/test_*.sh; do l=/tmp/gate-$(basename "$f" .sh).log; env -u DELEGATE_EVIDENCE_DIR bash "$f" >"$l" 2>&1 || { echo "GATE FAIL $f"; grep -h FAIL "$l" | head -20; exit 1; }; done && for fn in run_worker run_worker_docker run_worker_native ensure_network ensure_egress ensure_task_egress host_args read_mount_args make_guard_shims net_args run_limited run_scorer agent_seed_home agent_scrub_home llmlog_start llmlog_stop; do cmp -s <(git show b-o1-sandbox:bin/delegate | sed -n "/^$fn() {/,/^}/p") <(sed -n "/^$fn() {/,/^}/p" bin/delegate) || { echo "CAGE CHANGED $fn (R19: orchestrator code)"; exit 1; }; done && { git diff --quiet b-o1-sandbox -- lib/grants.py worker/egress.Dockerfile worker/egress-entrypoint.sh worker/entrypoint.sh lib/render-opencode-config.py worker/agent-launch || { echo "CAGE CHANGED files (R19: orchestrator code)"; exit 1; }; } && ! git diff --name-only delegate/b-7-bench-run | grep -qvE '^docs/specs/b-|^evals/review-cases/|^tests/test_review_cases\.sh$' && echo GATE-OK
 ```
 
 ## Report format

@@ -1,6 +1,6 @@
 # Task B10: `delegate bench report`, `evals/run.sh` on top of bench, and the docs
 
-`"hard": false`. Slice B step 10 of 10 (`docs/specs/b-design.md` §Report, §Review "Scores are
+`"hard": false`. Slice B step 10 of 10, chain segment 2 (`docs/specs/b-design.md` §Report, §Review "Scores are
 computed by the report", R10, R16).
 
 ## Goal
@@ -19,7 +19,7 @@ The docs explain the whole workflow to the owner.
 - T4's `delegate stats` implementation (in `lib/ledger.py` or wherever T4 put it) — the table
   style, `--json` shape conventions, the unknown-kind warning line. Match them.
 - `evals/run.sh`, `evals/README.md`, `docs/reference.md` §Measuring changes and §Layout,
-  `docs/grants.md` (B3's `[secrets]` section).
+  `docs/specs/b-o1-sandbox.md` (what the sandbox does with a harness setup, for the docs).
 
 ## Contract
 
@@ -76,10 +76,12 @@ says so and points at `docs/benchmarks.md`.
 ### Docs
 
 - `docs/benchmarks.md` — create: the workflow end to end (bundles and review cases; plans with a
-  full example using placeholders only — `llm.example.com`, `model-a`, `model-b`, `local-a`,
-  `agent-key-b`; delegate vs own-harness mode; agent profiles and where they are read from;
-  credentials: endpoints file and grant `[secrets]`, with the owner writing both and delegate
-  never; building `delegate build --agents`; `delegate bench check/run/review/report/
+  full example using placeholders only — `llm.example.com`, `model-a`, `model-b`; delegate mode
+  (models from `delegate models`, R18) vs own-harness mode; agent profiles, where they are read
+  from, and their `[setup]` lists; what happens to the owner's harness setup (copied per run into
+  a directory only the agent's container mounts, at the owner's `$HOME` path, scrubbed before
+  verify, never written back — B manages no credentials); the owner-run live checks from the
+  design; building `delegate build --agents`; `delegate bench check/run/review/report/
   import-legacy`; the three telemetry sources and when each is empty; scoring after the run on
   copies; blind review and the `match` rows; reviewer metrics and their exact definitions; the
   security model table from the design; what is unverified — codex, the claude `result` event,
@@ -87,7 +89,7 @@ says so and points at `docs/benchmarks.md`.
 - `evals/README.md` — the bundle format (work and review cases), `evals/run.sh` as the
   quick path, a pointer to `docs/benchmarks.md`; keep the cases table, add the review cases.
 - `docs/reference.md` — §Measuring changes points at `docs/benchmarks.md` and lists the `bench`,
-  `score`, `agent`, `endpoint` commands; §Layout gains `agents/`, `evals/review-cases/`.
+  `score`, `agent`, `models` commands; §Layout gains `agents/`, `evals/review-cases/`.
 - No host names, IPs, personal names or real model names anywhere (public repo).
 
 ### `tests/test_bench_report.sh` — create
@@ -122,10 +124,12 @@ Fixture rows appended through B1's builders into a temp ledger. At least:
 
 Mid-round, `tests/test_e2e_harness.sh`'s hygiene check blames untracked deliverables; the harness
 commits before the chain's verify runs. If that is the only failure mid-round, report it; never
-edit that test.
+edit that test. The **cage check** fails if this step changed any sandbox function or file
+(R19: orchestrator code; `docs/specs/b-design.md` §Who writes what) — never "fix" it by editing
+the check; leave the sandbox code alone and report what you needed under DEVIATIONS.
 
 ```bash
-set -o pipefail && bash -n bin/delegate && bash -n evals/run.sh && python3 -m py_compile lib/*.py && [ -f tests/test_bench_report.sh ] && [ -f docs/benchmarks.md ] && for f in tests/test_*.sh; do l=/tmp/gate-$(basename "$f" .sh).log; env -u DELEGATE_EVIDENCE_DIR bash "$f" >"$l" 2>&1 || { echo "GATE FAIL $f"; grep -h FAIL "$l" | head -20; exit 1; }; done && ! git diff --name-only delegate/b-9-review | grep -qvE '^docs/specs/b-|^bin/delegate$|^lib/bench\.py$|^evals/run\.sh$|^evals/README\.md$|^docs/benchmarks\.md$|^docs/reference\.md$|^tests/test_bench_report\.sh$' && echo GATE-OK
+set -o pipefail && bash -n bin/delegate && bash -n evals/run.sh && python3 -m py_compile lib/*.py && [ -f tests/test_bench_report.sh ] && [ -f docs/benchmarks.md ] && for f in tests/test_*.sh; do l=/tmp/gate-$(basename "$f" .sh).log; env -u DELEGATE_EVIDENCE_DIR bash "$f" >"$l" 2>&1 || { echo "GATE FAIL $f"; grep -h FAIL "$l" | head -20; exit 1; }; done && for fn in run_worker run_worker_docker run_worker_native ensure_network ensure_egress ensure_task_egress host_args read_mount_args make_guard_shims net_args run_limited run_scorer agent_seed_home agent_scrub_home llmlog_start llmlog_stop; do cmp -s <(git show b-o1-sandbox:bin/delegate | sed -n "/^$fn() {/,/^}/p") <(sed -n "/^$fn() {/,/^}/p" bin/delegate) || { echo "CAGE CHANGED $fn (R19: orchestrator code)"; exit 1; }; done && { git diff --quiet b-o1-sandbox -- lib/grants.py worker/egress.Dockerfile worker/egress-entrypoint.sh worker/entrypoint.sh lib/render-opencode-config.py worker/agent-launch || { echo "CAGE CHANGED files (R19: orchestrator code)"; exit 1; }; } && ! git diff --name-only delegate/b-9-review | grep -qvE '^docs/specs/b-|^bin/delegate$|^lib/bench\.py$|^evals/run\.sh$|^evals/README\.md$|^docs/benchmarks\.md$|^docs/reference\.md$|^tests/test_bench_report\.sh$' && echo GATE-OK
 ```
 
 ## Report format

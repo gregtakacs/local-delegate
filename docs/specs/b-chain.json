@@ -8,61 +8,25 @@
       "name": "b-1-bench-core",
       "spec": "docs/specs/b-1-bench-core.md",
       "hard": false,
-      "verify": "set -o pipefail && bash -n bin/delegate && python3 -m py_compile lib/*.py && [ -f tests/test_bench_core.sh ] && for f in tests/test_*.sh; do l=/tmp/gate-$(basename \"$f\" .sh).log; env -u DELEGATE_EVIDENCE_DIR bash \"$f\" >\"$l\" 2>&1 || { echo \"GATE FAIL $f\"; grep -h FAIL \"$l\" | head -20; exit 1; }; done && ! git diff --name-only bench | grep -qvE '^docs/specs/b-|^bin/delegate$|^lib/bench\\.py$|^lib/ledger\\.py$|^tests/test_ledger\\.sh$|^tests/test_bench_core\\.sh$' && echo GATE-OK"
+      "verify": "set -o pipefail && bash -n bin/delegate && python3 -m py_compile lib/*.py && [ -f tests/test_bench_core.sh ] && for f in tests/test_*.sh; do l=/tmp/gate-$(basename \"$f\" .sh).log; env -u DELEGATE_EVIDENCE_DIR bash \"$f\" >\"$l\" 2>&1 || { echo \"GATE FAIL $f\"; grep -h FAIL \"$l\" | head -20; exit 1; }; done && for fn in run_worker run_worker_docker run_worker_native ensure_network ensure_egress ensure_task_egress host_args read_mount_args make_guard_shims; do cmp -s <(git show bench:bin/delegate | sed -n \"/^$fn() {/,/^}/p\") <(sed -n \"/^$fn() {/,/^}/p\" bin/delegate) || { echo \"CAGE CHANGED $fn (R19: orchestrator code)\"; exit 1; }; done && { git diff --quiet bench -- lib/grants.py worker/egress.Dockerfile worker/egress-entrypoint.sh worker/entrypoint.sh lib/render-opencode-config.py worker/agent-launch || { echo \"CAGE CHANGED files (R19: orchestrator code)\"; exit 1; }; } && ! git diff --name-only bench | grep -qvE '^docs/specs/b-|^bin/delegate$|^lib/bench\\.py$|^lib/ledger\\.py$|^tests/test_ledger\\.sh$|^tests/test_bench_core\\.sh$' && echo GATE-OK"
     },
     {
-      "name": "b-2-endpoints-effort",
-      "spec": "docs/specs/b-2-endpoints-effort.md",
-      "hard": true,
-      "verify": "set -o pipefail && bash -n bin/delegate && python3 -m py_compile lib/*.py && [ -f tests/test_endpoints.sh ] && for f in tests/test_*.sh; do l=/tmp/gate-$(basename \"$f\" .sh).log; env -u DELEGATE_EVIDENCE_DIR bash \"$f\" >\"$l\" 2>&1 || { echo \"GATE FAIL $f\"; grep -h FAIL \"$l\" | head -20; exit 1; }; done && ! git diff --name-only delegate/b-1-bench-core | grep -qvE '^docs/specs/b-|^bin/delegate$|^lib/endpoints\\.py$|^lib/render-opencode-config\\.py$|^config\\.example\\.env$|^docs/reference\\.md$|^tests/test_endpoints\\.sh$' && echo GATE-OK"
+      "name": "b-2-effort-models",
+      "spec": "docs/specs/b-2-effort-models.md",
+      "hard": false,
+      "verify": "set -o pipefail && bash -n bin/delegate && python3 -m py_compile lib/*.py && [ -f tests/test_docker_stub.sh ] && [ -f tests/docker-stub.sh ] && for f in tests/test_*.sh; do l=/tmp/gate-$(basename \"$f\" .sh).log; env -u DELEGATE_EVIDENCE_DIR bash \"$f\" >\"$l\" 2>&1 || { echo \"GATE FAIL $f\"; grep -h FAIL \"$l\" | head -20; exit 1; }; done && for fn in run_worker run_worker_docker run_worker_native ensure_network ensure_egress ensure_task_egress host_args read_mount_args make_guard_shims; do cmp -s <(git show bench:bin/delegate | sed -n \"/^$fn() {/,/^}/p\") <(sed -n \"/^$fn() {/,/^}/p\" bin/delegate) || { echo \"CAGE CHANGED $fn (R19: orchestrator code)\"; exit 1; }; done && { git diff --quiet bench -- lib/grants.py worker/egress.Dockerfile worker/egress-entrypoint.sh worker/entrypoint.sh lib/render-opencode-config.py worker/agent-launch || { echo \"CAGE CHANGED files (R19: orchestrator code)\"; exit 1; }; } && ! git diff --name-only delegate/b-1-bench-core | grep -qvE '^docs/specs/b-|^bin/delegate$|^config\\.example\\.env$|^docs/reference\\.md$|^tests/docker-stub\\.sh$|^tests/test_docker_stub\\.sh$' && echo GATE-OK"
     },
     {
       "name": "b-3-agent-profiles",
       "spec": "docs/specs/b-3-agent-profiles.md",
       "hard": true,
-      "verify": "set -o pipefail && bash -n bin/delegate && python3 -m py_compile lib/*.py && [ -f tests/test_agents.sh ] && for f in tests/test_*.sh; do l=/tmp/gate-$(basename \"$f\" .sh).log; env -u DELEGATE_EVIDENCE_DIR bash \"$f\" >\"$l\" 2>&1 || { echo \"GATE FAIL $f\"; grep -h FAIL \"$l\" | head -20; exit 1; }; done && ! git diff --name-only delegate/b-2-endpoints-effort | grep -qvE '^docs/specs/b-|^bin/delegate$|^lib/agents\\.py$|^lib/grants\\.py$|^agents/(delegate|claude-code|codex)\\.toml$|^docs/grants\\.md$|^tests/test_(agents|grants)\\.sh$' && echo GATE-OK"
+      "verify": "set -o pipefail && bash -n bin/delegate && python3 -m py_compile lib/*.py && [ -f tests/test_agents.sh ] && for f in tests/test_*.sh; do l=/tmp/gate-$(basename \"$f\" .sh).log; env -u DELEGATE_EVIDENCE_DIR bash \"$f\" >\"$l\" 2>&1 || { echo \"GATE FAIL $f\"; grep -h FAIL \"$l\" | head -20; exit 1; }; done && for fn in run_worker run_worker_docker run_worker_native ensure_network ensure_egress ensure_task_egress host_args read_mount_args make_guard_shims; do cmp -s <(git show bench:bin/delegate | sed -n \"/^$fn() {/,/^}/p\") <(sed -n \"/^$fn() {/,/^}/p\" bin/delegate) || { echo \"CAGE CHANGED $fn (R19: orchestrator code)\"; exit 1; }; done && { git diff --quiet bench -- lib/grants.py worker/egress.Dockerfile worker/egress-entrypoint.sh worker/entrypoint.sh lib/render-opencode-config.py worker/agent-launch || { echo \"CAGE CHANGED files (R19: orchestrator code)\"; exit 1; }; } && ! git diff --name-only delegate/b-2-effort-models | grep -qvE '^docs/specs/b-|^bin/delegate$|^lib/agents\\.py$|^agents/(delegate|claude-code|codex|opencode-own)\\.toml$|^tests/test_agents\\.sh$' && echo GATE-OK"
     },
     {
-      "name": "b-4-agent-round",
-      "spec": "docs/specs/b-4-agent-round.md",
+      "name": "b-4-telemetry-libs",
+      "spec": "docs/specs/b-4-telemetry-libs.md",
       "hard": true,
-      "verify": "set -o pipefail && bash -n bin/delegate && bash -n worker/agent-launch && python3 -m py_compile lib/*.py && [ -f tests/test_agent_round.sh ] && [ -f tests/docker-stub.sh ] && for f in tests/test_*.sh; do l=/tmp/gate-$(basename \"$f\" .sh).log; env -u DELEGATE_EVIDENCE_DIR bash \"$f\" >\"$l\" 2>&1 || { echo \"GATE FAIL $f\"; grep -h FAIL \"$l\" | head -20; exit 1; }; done && ! git diff --name-only delegate/b-3-agent-profiles | grep -qvE '^docs/specs/b-|^bin/delegate$|^lib/report\\.py$|^lib/agents\\.py$|^worker/agent-launch$|^worker/agents\\.Dockerfile$|^config\\.example\\.env$|^docs/reference\\.md$|^tests/docker-stub\\.sh$|^tests/test_agent_round\\.sh$' && echo GATE-OK"
-    },
-    {
-      "name": "b-5-telemetry",
-      "spec": "docs/specs/b-5-telemetry.md",
-      "hard": true,
-      "verify": "set -o pipefail && bash -n bin/delegate && python3 -m py_compile lib/*.py && [ -f tests/test_bench_telemetry.sh ] && for f in tests/test_*.sh; do l=/tmp/gate-$(basename \"$f\" .sh).log; env -u DELEGATE_EVIDENCE_DIR bash \"$f\" >\"$l\" 2>&1 || { echo \"GATE FAIL $f\"; grep -h FAIL \"$l\" | head -20; exit 1; }; done && ! git diff --name-only delegate/b-4-agent-round | grep -qvE '^docs/specs/b-|^bin/delegate$|^lib/llmlog\\.py$|^lib/filetimeline\\.py$|^lib/report\\.py$|^config\\.example\\.env$|^docs/reference\\.md$|^tests/docker-stub\\.sh$|^tests/test_bench_telemetry\\.sh$' && echo GATE-OK"
-    },
-    {
-      "name": "b-6-score",
-      "spec": "docs/specs/b-6-score.md",
-      "hard": true,
-      "verify": "set -o pipefail && bash -n bin/delegate && python3 -m py_compile lib/*.py && [ -f tests/test_score.sh ] && for f in tests/test_*.sh; do l=/tmp/gate-$(basename \"$f\" .sh).log; env -u DELEGATE_EVIDENCE_DIR bash \"$f\" >\"$l\" 2>&1 || { echo \"GATE FAIL $f\"; grep -h FAIL \"$l\" | head -20; exit 1; }; done && ! git diff --name-only delegate/b-5-telemetry | grep -qvE '^docs/specs/b-|^bin/delegate$|^docs/reference\\.md$|^tests/docker-stub\\.sh$|^tests/test_score\\.sh$' && echo GATE-OK"
-    },
-    {
-      "name": "b-7-bench-run",
-      "spec": "docs/specs/b-7-bench-run.md",
-      "hard": true,
-      "verify": "set -o pipefail && bash -n bin/delegate && python3 -m py_compile lib/*.py && [ -f tests/test_bench_run.sh ] && for f in tests/test_*.sh; do l=/tmp/gate-$(basename \"$f\" .sh).log; env -u DELEGATE_EVIDENCE_DIR bash \"$f\" >\"$l\" 2>&1 || { echo \"GATE FAIL $f\"; grep -h FAIL \"$l\" | head -20; exit 1; }; done && ! git diff --name-only delegate/b-6-score | grep -qvE '^docs/specs/b-|^bin/delegate$|^lib/bench\\.py$|^tests/test_bench_run\\.sh$' && echo GATE-OK"
-    },
-    {
-      "name": "b-8-review-cases",
-      "spec": "docs/specs/b-8-review-cases.md",
-      "hard": false,
-      "verify": "set -o pipefail && bash -n bin/delegate && python3 -m py_compile lib/*.py && [ -f tests/test_review_cases.sh ] && for f in tests/test_*.sh; do l=/tmp/gate-$(basename \"$f\" .sh).log; env -u DELEGATE_EVIDENCE_DIR bash \"$f\" >\"$l\" 2>&1 || { echo \"GATE FAIL $f\"; grep -h FAIL \"$l\" | head -20; exit 1; }; done && ! git diff --name-only delegate/b-7-bench-run | grep -qvE '^docs/specs/b-|^evals/review-cases/|^tests/test_review_cases\\.sh$' && echo GATE-OK"
-    },
-    {
-      "name": "b-9-review",
-      "spec": "docs/specs/b-9-review.md",
-      "hard": true,
-      "verify": "set -o pipefail && bash -n bin/delegate && python3 -m py_compile lib/*.py && [ -f tests/test_bench_review.sh ] && for f in tests/test_*.sh; do l=/tmp/gate-$(basename \"$f\" .sh).log; env -u DELEGATE_EVIDENCE_DIR bash \"$f\" >\"$l\" 2>&1 || { echo \"GATE FAIL $f\"; grep -h FAIL \"$l\" | head -20; exit 1; }; done && ! git diff --name-only delegate/b-8-review-cases | grep -qvE '^docs/specs/b-|^bin/delegate$|^lib/bench\\.py$|^tests/test_bench_(core|review)\\.sh$' && echo GATE-OK"
-    },
-    {
-      "name": "b-10-report",
-      "spec": "docs/specs/b-10-report.md",
-      "hard": false,
-      "verify": "set -o pipefail && bash -n bin/delegate && bash -n evals/run.sh && python3 -m py_compile lib/*.py && [ -f tests/test_bench_report.sh ] && [ -f docs/benchmarks.md ] && for f in tests/test_*.sh; do l=/tmp/gate-$(basename \"$f\" .sh).log; env -u DELEGATE_EVIDENCE_DIR bash \"$f\" >\"$l\" 2>&1 || { echo \"GATE FAIL $f\"; grep -h FAIL \"$l\" | head -20; exit 1; }; done && ! git diff --name-only delegate/b-9-review | grep -qvE '^docs/specs/b-|^bin/delegate$|^lib/bench\\.py$|^evals/run\\.sh$|^evals/README\\.md$|^docs/benchmarks\\.md$|^docs/reference\\.md$|^tests/test_bench_report\\.sh$' && echo GATE-OK"
+      "verify": "set -o pipefail && bash -n bin/delegate && python3 -m py_compile lib/*.py && [ -f tests/test_bench_telemetry.sh ] && for f in tests/test_*.sh; do l=/tmp/gate-$(basename \"$f\" .sh).log; env -u DELEGATE_EVIDENCE_DIR bash \"$f\" >\"$l\" 2>&1 || { echo \"GATE FAIL $f\"; grep -h FAIL \"$l\" | head -20; exit 1; }; done && for fn in run_worker run_worker_docker run_worker_native ensure_network ensure_egress ensure_task_egress host_args read_mount_args make_guard_shims; do cmp -s <(git show bench:bin/delegate | sed -n \"/^$fn() {/,/^}/p\") <(sed -n \"/^$fn() {/,/^}/p\" bin/delegate) || { echo \"CAGE CHANGED $fn (R19: orchestrator code)\"; exit 1; }; done && { git diff --quiet bench -- lib/grants.py worker/egress.Dockerfile worker/egress-entrypoint.sh worker/entrypoint.sh lib/render-opencode-config.py worker/agent-launch || { echo \"CAGE CHANGED files (R19: orchestrator code)\"; exit 1; }; } && ! git diff --name-only delegate/b-3-agent-profiles | grep -qvE '^docs/specs/b-|^lib/llmlog\\.py$|^lib/filetimeline\\.py$|^tests/test_bench_telemetry\\.sh$' && echo GATE-OK"
     }
   ]
 }

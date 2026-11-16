@@ -1,53 +1,83 @@
-# B design: benchmarks — models, own-harness agents, blind pluggable reviewers (R9–R17)
+# B design: benchmarks — models, own-harness agents, blind pluggable reviewers (R9–R19)
 
-Slice B of `docs/specs/bench-rulings.md`. This file is the design; `b-<n>-*.md` are the step
-specs; `b-chain.json` is the chain plan. B builds on slice T (`docs/specs/t-design.md`): every
-result is a row in T's ledger (`lib/ledger.py`: `append`, `read_rows`, `KINDS`), never a second
-store (R2–R8 are T's). B's chain starts from `bench` after T is squashed onto it.
+Slice B of `docs/specs/bench-rulings.md`, revised for the owner's amendments (R14 amended, R18,
+R19). This file is the design; `b-<n>-*.md` and `b-o1-sandbox.md` are the step specs;
+`b-chain.json` (segment 1) and `b-chain-2.json` (segment 2) are the chain plans. B builds on
+slice T (`docs/specs/t-design.md`): every result is a row in T's ledger (`lib/ledger.py`:
+`append`, `read_rows`, `KINDS`), never a second store. B starts from `bench` after T lands.
 
 ## Goal
 
-Run a fixed task bundle (R9) many times (R10) under named **conditions** — the delegate worker on
-a chosen endpoint/model/effort, or a standalone agent in its own harness (R11) — score each run
-outside the sandbox after it ended (R12), record what telemetry each harness can give (R13), and
-have pluggable agents review the results blind (R15), with the reviewers themselves scored
-against seeded ground truth and against each other (R16). One report command reads it all back
-from the ledger as medians and spread.
+Run a fixed task bundle (R9) many times (R10) under named **conditions** — the delegate worker
+with a model and effort the configured endpoint serves (R18), or a standalone agent in its own
+harness exactly as the owner set it up (R11, R14) — score each run outside the sandbox after it
+ended (R12), record what telemetry each harness can give (R13), and have pluggable agents review
+the results blind (R15), with the reviewers themselves scored against seeded ground truth and
+against each other (R16). One report command reads it all back from the ledger as medians and
+spread. B creates, stores, rotates or maps no credentials (R14 amended).
+
+## Who writes what (R19)
+
+The sandboxed worker never writes `run_worker_*`, `lib/grants.py`, `worker/egress*`, or any
+other code that builds a sandbox or carries the owner's harness setup into one. That code is
+**one orchestrator-written piece, `b-o1-sandbox`**, between two chain segments:
+
+| order | piece | written by |
+|---|---|---|
+| 1–4 | chain segment 1 (`b-chain.json`): `b-1-bench-core`, `b-2-effort-models`, `b-3-agent-profiles`, `b-4-telemetry-libs` | worker |
+| 5 | **`b-o1-sandbox`** (`docs/specs/b-o1-sandbox.md`): the agent variant of `run_worker_docker`, `agent_seed_home` / `agent_scrub_home`, `worker/agent-launch`, `llmlog_start` / `llmlog_stop`, `run_scorer`, the reasoning-effort env in `run_worker_docker`/`run_worker_native` and `render-opencode-config.py`'s `model_entry`, with `tests/test_sandbox_bench.sh` | **orchestrator, by hand** |
+| 6–11 | chain segment 2 (`b-chain-2.json`, base = the orchestrator's branch `b-o1-sandbox`): `b-5-agent-round`, `b-6-score`, `b-7-bench-run`, `b-8-review-cases`, `b-9-review`, `b-10-report` | worker |
+
+How it is enforced, not just stated: every worker step's verify also runs a **cage check** that
+fails when the step changed a sandbox function or file. In segment 1 it compares the text of
+`run_worker`, `run_worker_docker`, `run_worker_native`, `ensure_network`, `ensure_egress`,
+`ensure_task_egress`, `host_args`, `read_mount_args`, `make_guard_shims` (each extracted with
+`sed -n '/^NAME() {/,/^}/p'`) and the files `lib/grants.py`, `worker/egress.Dockerfile`,
+`worker/egress-entrypoint.sh`, `worker/entrypoint.sh`, `lib/render-opencode-config.py`,
+`worker/agent-launch` against `bench` (nothing in segment 1 may change or create them). In
+segment 2 the same lists plus the functions O1 writes or touches — `net_args`, `run_limited`,
+`run_scorer`, `agent_seed_home`, `agent_scrub_home`, `llmlog_start`, `llmlog_stop` — are compared
+against `b-o1-sandbox`. Proven on a scratch worktree of `bench`: clean → passes; one inserted line
+in `run_worker_docker` → `CAGE CHANGED run_worker_docker`, rc 1; one appended line in
+`lib/grants.py` → `CAGE CHANGED files`, rc 1. Every worker step still runs the full
+gate, so segment 2's steps pass against the orchestrator piece they build on (its tests are in
+the gate).
 
 ## Ruling map
 
-| ruling | this design | step |
+| ruling | this design | piece |
 |---|---|---|
-| R9 bundle | `evals/cases/<case>/` unchanged in shape (case.env, setup.sh, spec.md, hidden/); case.env is **parsed, never sourced**; a bundle is identified by `case_hash` (content hash of its dir); review bundles live in `evals/review-cases/<case>/` with the same shape plus `change/` and `truth.json` | B1, B8 |
-| R10 several runs | a bench **plan** names cases × conditions × `repeat` (default 3); runs are interleaved in a seeded shuffled order; the report shows n, median, p25–p75, min–max per group and hides groups below `--min-n` (default 3) | B1, B7, B10 |
-| R11 two modes | `mode:"delegate"` = `delegate run` with `--endpoint/--model/--effort` per run; `mode:"own-harness"` = `delegate run --agent NAME`: the same task machinery (worktree, task network, egress proxy, timeout, grants), a different program in the container, one prompt, no nudges, no continue | B2, B3, B4 |
-| R12 scoring after, on a copy | `delegate score`: refuses while the task's agent container or round lock exists; copies the final tree out; runs hidden checks, then the visible verify, each on its own copy, in a fresh **scorer** container with no credentials, no grants, no shared caches; hidden/ is never under any path a task container mounts (B7 checks it before every run) | B6, B7 |
-| R13 telemetry | (a) `lib/llmlog.py`, a pass-through logging proxy sidecar on the task network, when the agent profile names a base-URL variable and the run's grant supplies the profile's API-key secret; (b) the harness's own output parsed by `lib/agents.py` (`claude-stream`, `codex-json`), each parser with the versions it was checked against; (c) always, `lib/filetimeline.py`, a host-side poller of the worktree; empty stays empty; every row carries `mode` | B3, B5 |
-| R14 auto-approve only in the sandbox; creds only via owner grants | `--agent` refuses the native runner and `--here`; agent profiles carry the auto-approve flags, so they only ever run inside `run_worker_docker`; a new grant table `[secrets]` mounts owner-named files read-only at `/run/secrets/grant/<name>`; the in-container launcher turns them into the env vars the profile names; delegate code never writes a grant (tests run against temp grant dirs) | B3, B4 |
-| R15 blind review | reviewers get a **subject** id (`s-<10 hex>`), a fresh two-commit repo (fixture, then the sanitized final tree) under a path that names no session, plan, model or agent, and the spec; the `verdict` row is appended first; a `match` row (subject → run or review case) is appended only after every verdict of the batch | B9 |
-| R16 reviewers pluggable + benchmarked | a reviewer is a condition like a worker (delegate worker or any agent profile); review cases with seeded defects at known file/line ranges plus clean changes give recall, false positives, verdict accuracy; on real runs, pairwise agreement between reviewers and agreement with the hidden checks; one report table compares reviewer conditions | B8, B9, B10 |
-| R17 lost history | bundles are rebuilt by `setup.sh` from files, never from a commit; a case whose setup fails is reported `setup-failed` and skipped, never rescued | B7 |
+| R9 bundle | `evals/cases/<case>/` unchanged in shape; case.env **parsed, never sourced**; `case_hash`; review bundles in `evals/review-cases/` | B1, B8 |
+| R10 several runs | plans: cases × conditions × `repeat` (default 3), seeded interleaved order; report shows n, median, p25–p75, min–max; groups below `--min-n` 3 hidden | B1, B7, B10 |
+| R11 two modes | delegate mode = `delegate run --model M --effort E`; own-harness = `delegate run --agent NAME`: same task machinery, a different program in the container, one prompt, no nudges, no continue | B2, B5, O1 |
+| R12 scoring after, on a copy | `delegate score` (B6) on `run_scorer` (O1): refuses while the run lives; hidden then verify, each on its own copy, in a scorer with no credentials, no harness setup, no grants, no shared caches | O1, B6, B7 |
+| R13 telemetry | (a) `lib/llmlog.py` sidecar only when the copied setup already authenticates with an API key and the harness takes a base-URL setting; (b) the harness's own output (`claude-stream`, `codex-json`, `opencode-json`); (c) always, `lib/filetimeline.py` | B3, B4, O1, B5 |
+| R14 (amended) | the harness's existing setup — the profile's declared paths under the owner's `$HOME` and declared env variables — is copied by the orchestrator-written `agent_seed_home` into a per-round directory that only the agent's container mounts (writable there, so refreshing logins work), never written back, deleted after the agent ends (before verify); auto-approve flags live in profiles, which run only in `run_worker_docker`; `--agent` refuses native and `--here`; B adds no grant format and no key files | B3, O1, B5 |
+| R15 blind review | subject ids, blind two-commit repos, `verdict` rows first, `match` rows after the batch | B9 |
+| R16 reviewers benchmarked | reviewer = any condition; seeded review cases → recall / false positives / verdict accuracy; agreement on real runs | B8, B9, B10 |
+| R17 lost history | bundles rebuilt by `setup.sh`; a failing setup is `setup-failed`, never rescued | B7 |
+| R18 configured endpoint | delegate mode has no endpoint choice: `delegate models` lists what the configured endpoint serves; a plan's delegate-mode `model` must be in that list (checked at session start) | B2, B7 |
+| R19 orchestrator writes sandbox code | `b-o1-sandbox` + the cage check above | O1, all |
 
 ## Architecture in one picture
 
 ```
 delegate bench run PLAN ──► for each (repeat, case, condition), in seeded shuffled order:
    lib/bench.py               1. fixture repo  ← bash setup.sh (host, as evals/run.sh does today)
-                              2. leak guard    ← no hidden/ file content inside the fixture or any mount
-                              3. delegate run  ← mode delegate: --endpoint E --model M --effort X --verify V
-                                                 mode own-harness: --agent A --model M --effort X [--grant G]
-                                 (bin/delegate: worktree, task network, egress, timeout, grants;
+                              2. leak guard    ← no hidden/ file content inside the fixture
+                              3. delegate run  ← delegate mode: --model M --effort X --verify V
+                                                 own-harness:   --agent A --model M --effort X --verify V
+                                 (worktree, task network, egress, timeout as for any round;
+                                  own-harness: agent_seed_home copies the harness setup into
+                                  $TASK_DIR/agent-home/r1, mounted only into the agent container
+                                  at the owner's $HOME path, scrubbed when the agent ends;
                                   DELEGATE_FILE_TIMELINE=1 → lib/filetimeline.py beside the round;
-                                  own-harness + API key → lib/llmlog.py sidecar on the task network)
-                              4. delegate score ← copy out, hidden checks, verify, in a scorer container
+                                  API-key setups → lib/llmlog.py sidecar on the task network)
+                              4. delegate score ← copies, hidden checks, verify, in a scorer container
                               5. ledger append  ← one `benchmark` row
-delegate bench review SESSION ──► subjects (runs + review cases) → reviewer tasks → `verdict` rows
-                                  → then `match` rows
+delegate bench review SESSION ──► subjects → reviewer tasks → `verdict` rows → then `match` rows
 delegate bench report [...] ──► tables from `benchmark` / `verdict` / `match` rows
 ```
-
-Everything that starts a container stays in `bin/delegate` (bash), next to the code it must match;
-everything that parses, plans and aggregates is stdlib Python in `lib/`.
 
 ## Bundles (R9, R17)
 
@@ -79,10 +109,10 @@ and `hidden/check.sh` which proves the truth: on the after-state it prints `FAIL
 for every seeded defect and `PASS` otherwise; a clean case (`"verdict": "accept"`,
 `"defects": []`) prints only `PASS` lines.
 
-## Conditions and plans (R10, R11)
+## Conditions and plans (R10, R11, R18)
 
-A **plan** is a JSON file the owner writes (it may sit in a repo; it names profiles, endpoints and
-grants by name only, and every name resolves through owner-written stores — see Trust):
+A **plan** is a JSON file the owner writes. It names agent profiles by name only; it carries no
+endpoint, key, grant or path:
 
 ```json
 {
@@ -91,186 +121,162 @@ grants by name only, and every name resolves through owner-written stores — se
   "repeat": 3,
   "seed": 7,
   "conditions": [
-    {"label": "a-high", "mode": "delegate", "endpoint": "local-a", "model": "model-a", "effort": "high"},
+    {"label": "a-high", "mode": "delegate", "model": "model-a", "effort": "high"},
     {"label": "a-rules-old", "mode": "delegate", "model": "model-a", "rules_ref": "HEAD~1"},
-    {"label": "cc", "mode": "own-harness", "agent": "claude-code", "model": "model-b",
-     "effort": "high", "grants": ["agent-key-b"]}
+    {"label": "cc", "mode": "own-harness", "agent": "claude-code", "model": "model-b", "effort": "high"},
+    {"label": "oc", "mode": "own-harness", "agent": "opencode-own", "model": "provider-x/model-b"}
   ],
   "reviewers": [
-    {"label": "rv-cc", "mode": "own-harness", "agent": "claude-code", "model": "model-b", "grants": ["agent-key-b"]},
-    {"label": "rv-a", "mode": "delegate", "endpoint": "local-a", "model": "model-a"}
+    {"label": "rv-cc", "mode": "own-harness", "agent": "claude-code", "model": "model-b"},
+    {"label": "rv-a", "mode": "delegate", "model": "model-a"}
   ],
   "review_cases": "all",
   "review_timeout": 1800
 }
 ```
 
-- `cases`: names or `"all"` (every work case). `review_cases`: names, `"all"` or `[]`.
-- A condition's `label` is `[a-z0-9][a-z0-9._-]{0,31}`, unique in its list. `mode` is
-  `delegate` or `own-harness`. Delegate mode takes `endpoint` (a name in the endpoints file,
-  optional — default: the configured `DELEGATE_BASE_URLS`), `model` (optional — default
-  `DELEGATE_MODEL`), `effort` (optional), `rules_ref` (optional git ref of this repo whose
-  `opencode/` tree is the worker rules, as `evals/run.sh --rules-ref` today). Own-harness takes
-  `agent` (a profile name, required), `model`, `effort` (must be in the profile's `efforts`),
-  `endpoint` (optional: the endpoint's `base_url` only, never its key) and `grants`.
-- Unknown keys anywhere are an error; `delegate bench check PLAN` validates and prints the run
-  matrix without running anything.
-- Order: for each repeat 1..N, the case × condition pairs shuffled with `random.Random(seed)`
-  (seed recorded in the session); one run at a time. Interleaving spreads time-of-day and load
-  effects over conditions; T's `parallel_rounds` records anything else that ran.
-- A **session** (`<plan name>-<YYYYmmdd-HHMMSS>`) is one execution of a plan; its state lives in
-  `$DELEGATE_STATE/bench/<session>/`; `--session S` resumes it, skipping every (case, condition,
-  repeat) that already has a `benchmark` row in the ledger for S.
+- `cases`: names or `"all"`. `review_cases`: names, `"all"` or `[]`.
+- A condition's `label` is `[a-z0-9][a-z0-9._-]{0,31}`, unique in its list; `mode` is
+  `delegate` or `own-harness`. Delegate mode takes `model` (optional; default `DELEGATE_MODEL`),
+  `effort` (optional), `rules_ref` (optional git ref whose `opencode/` tree is the worker rules).
+  Own-harness takes `agent` (required), `model` (optional: empty = the harness's own configured
+  default), `effort` (must be in the profile's `efforts`).
+- R18: before the first run of a session, every delegate-mode `model` must appear in `delegate
+  models` (the ids the configured endpoint's `/models` returns with the configured key); a
+  missing one stops the session before anything runs. Own-harness models are the harness's
+  business: they are passed as given and recorded as requested and as reported.
+- Unknown keys are errors; `delegate bench check PLAN` validates and prints the run matrix.
+- Order: per repeat, case × condition pairs shuffled with `random.Random(f"{seed}:{repeat}")`;
+  one run at a time.
+- A **session** (`<plan name>-<YYYYmmdd-HHMMSS>`) is one execution of a plan, state in
+  `$DELEGATE_STATE/bench/<session>/`, resumable with `--session S`.
 
 ## Agent profiles (R11, R14, R16) — one abstraction for workers and reviewers
 
-A profile says how to start one agent inside the sandbox. The same profile serves both roles: a
-worker condition and a reviewer condition differ only in the prompt and what is read back.
+A profile says how to start one agent in the sandbox and which parts of the owner's existing
+setup it needs. The same profile serves the worker and the reviewer role.
 
 Profiles are TOML files read only from `$DELEGATE_HOME/agents/` (shipped, public, placeholders)
-and `$DELEGATE_AGENTS_DIR` (default `~/.config/delegate/agents/`, the owner's; same ownership
-rule as grants: file and folder owned by the user, not group/world-writable). Never from a repo,
-a worktree, a plan's folder or a spec. An owner file of the same name overrides the shipped one.
+and `$DELEGATE_AGENTS_DIR` (default `~/.config/delegate/agents/`; file and folder owned by the
+user, not group/world-writable — the grants ownership rule, imported from `lib/grants.py`, not
+changed). Never from a repo, worktree, plan folder or spec. An owner file overrides a shipped one.
 
 ```toml
 # agents/claude-code.toml
-name = "claude-code"                 # must equal the file stem
+name = "claude-code"
 kind = "command"                     # "command" | "delegate"
 image = ""                           # "" = DELEGATE_AGENT_IMAGE (default delegate-agents:local)
 argv = ["claude", "-p", "--verbose", "--output-format", "stream-json",
         "--dangerously-skip-permissions", "--no-session-persistence",
         "{model_args}", "{effort_args}"]
-model_args = ["--model", "{model}"]  # spliced where "{model_args}" stands; nothing when no model
+model_args = ["--model", "{model}"]
 effort_args = ["--effort", "{effort}"]
 efforts = ["low", "medium", "high", "xhigh", "max"]
 version_argv = ["claude", "--version"]
-tested_versions = ["2.1.325"]        # prefixes the output parser was checked against
-output = "claude-stream"             # parser: claude-stream | codex-json | none
-[env]                                # plain values only, never secrets
+tested_versions = ["2.1.325"]
+output = "claude-stream"             # claude-stream | codex-json | opencode-json | none
+[setup]
+paths = [".claude/.credentials.json", ".claude/settings.json", ".claude/CLAUDE.md",
+         ".claude/rules", ".claude/skills", ".claude/agents", ".claude/commands", ".claude.json"]
+env = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL"]
+[env]
 DISABLE_AUTOUPDATER = "1"
-[secrets_env]                        # env var in the container  <-  grant secret name
-ANTHROPIC_API_KEY = "anthropic-api-key"
-CLAUDE_CODE_OAUTH_TOKEN = "claude-oauth-token"
 [api]
-base_url_env = "ANTHROPIC_BASE_URL"
+base_url_env = "ANTHROPIC_BASE_URL"  # the harness takes its API base URL from this variable
 default_upstream = "https://api.anthropic.com"
-proxy_key_env = "ANTHROPIC_API_KEY"  # the logging proxy runs only when THIS variable gets a secret
-dialect = "anthropic"                # how the proxy reads usage: anthropic | openai
+key_env = ["ANTHROPIC_API_KEY"]      # API-key mode = one of these is in the copied setup env
+dialect = "anthropic"
 ```
 
-- `kind = "delegate"` (`agents/delegate.toml`) means the delegate worker itself: the normal
-  opencode path, `--endpoint/--model/--effort`. Only `name` and `kind` are allowed with it.
-- `argv` rendering (`lib/agents.py render`): placeholders `{model}`, `{effort}`, `{model_args}`,
-  `{effort_args}` only, anything else in braces is an error (`{{`/`}}` escape); `{model_args}` /
-  `{effort_args}` must be whole elements and splice lists (empty when the value is empty); values
-  must match `^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$`. The result is an argv list handed to
-  `docker run ... IMAGE <launcher> <argv...>` — no shell is involved at any point, on the host or
-  in the container.
-- The prompt reaches the agent on stdin (`RL_STDIN`, as delegate mode does today), never in argv.
-- Shipped: `delegate`, `claude-code` (flags checked against claude 2.1.325's `--help` and a live
-  probe this session), `codex` (codex is not installed on the design host: flags from codex's
-  documentation, `tested_versions = []`, marked unverified in the file and in `delegate agent show`).
+- `[setup] paths`: relative to the owner's `$HOME`; no `..`, not absolute, no glob. Copied when
+  present, skipped when absent. Deliberately file- and folder-precise: the profile never names a
+  whole harness folder that also holds the owner's transcripts or histories of other sessions
+  (`~/.claude/projects` is not copied). `[setup] env`: names of variables copied from the
+  environment of the process that runs `delegate` (the owner's shell), when set.
+- Shipped profiles: `delegate` (the worker itself; `kind = "delegate"`), `claude-code`, `codex`
+  (`.codex/auth.json`, `.codex/config.toml`, `.codex/AGENTS.md`; env `OPENAI_API_KEY`,
+  `CODEX_API_KEY`, `OPENAI_BASE_URL`; `verified = false`), and `opencode-own` — OpenCode as the
+  owner configured it, e.g. with a Claude API key: argv `["opencode", "run", "--format",
+  "json", "{model_args}"]`, `model_args = ["-m", "{model}"]`, paths `.config/opencode`,
+  `.local/share/opencode/auth.json`, env `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, output
+  `opencode-json` (today's opencode event stream, the parser `lib/report.py` already has),
+  `[api]` `base_url_env = "ANTHROPIC_BASE_URL"`, `key_env = ["ANTHROPIC_API_KEY"]` — whether its
+  provider honours that variable is unverified (`verified = false` until the owner's live check).
+- `argv` rendering (`lib/agents.py`): placeholders `{model}`, `{effort}`, `{model_args}`,
+  `{effort_args}` only; values `^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$`; an argv list, no shell.
+  The prompt goes on stdin.
 
-## Credentials (R14)
+## The owner's harness setup in the sandbox (R14 amended)
 
-- **Own-harness agents**: only through a grant the owner writes, via a new grant table:
+Written by the orchestrator (`b-o1-sandbox`), consumed by B5.
 
-  ```toml
-  [secrets]                       # name -> host file; mounted read-only, never blanked
-  anthropic-api-key = "/home/USER/.config/delegate/keys/anthropic.key"
-  ```
-
-  Each secret is mounted `-v FILE:/run/secrets/grant/<name>:ro`. Names follow the grant-name rule;
-  the file must exist, be a regular file owned by the user and not group/world-writable; the same
-  name in two of a task's grants is an error; the native runner refuses a grant with secrets (it
-  cannot isolate them). Report, summary and `delegate grant show` list secret **names and host
-  paths**, never content. `mounts.ro` stays as it is (it blanks secret-looking names — the reason a
-  separate table is needed).
-- The in-container launcher (`worker/agent-launch`, the agent image's entrypoint for agent rounds)
-  reads `DELEGATE_AGENT_SECRETS="ENV=name ENV2=name2"`, exports each `ENV` from
-  `/run/secrets/grant/<name>` when that file exists, exports the profile's plain `[env]`, sets the
-  base-URL variable, unsets its own `DELEGATE_AGENT_*` variables, and `exec`s the argv. Secret
-  values never appear in a `docker run` command line, `docker inspect`, a log or a report.
-- **Delegate mode, per-run endpoint**: an owner-written endpoints file (`$DELEGATE_ENDPOINTS`,
-  default `~/.config/delegate/endpoints.toml`, the grants ownership rule):
-
-  ```toml
-  [local-a]
-  base_url = "https://llm.example.com/v1"
-  key_file = "~/.config/delegate/keys/local-a.key"
-  ```
-
-  `delegate run --endpoint NAME` pins `BASE_URL` to that entry (its `/models` must answer 200 with
-  its key, else the run dies — no fallback to another endpoint) and mounts its `key_file` where
-  `DELEGATE_API_KEY_FILE` is mounted today. Every endpoint's host joins the egress allow list
-  (`url_hosts`) permanently, so the shared proxy's fingerprint does not flip between runs. For an
-  own-harness condition an `endpoint` contributes its `base_url` only; the key still comes from a
-  grant.
-- Agent rounds never receive the delegate endpoint key, `DELEGATE_BASE_URL` or the worker rules.
+- `agent_seed_home RD`: creates `$TASK_DIR/agent-home/r<n>` (mode 700). For each validated
+  `[setup] paths` entry under `$HOME`, copies it with `cp -RL` (symlinks dereferenced, so the
+  copy holds the files the owner's setup actually reads; sockets/fifos skipped), keeping
+  relative layout. Total copy capped at `DELEGATE_AGENT_SETUP_MAX_MB` (default 64): over the cap,
+  the round dies naming the largest path. For each `[setup] env` name set in the invoking
+  environment, a line `NAME=<printf %q value>` goes to `<agent home>/.delegate-agent-env` (mode
+  600). The original files are only read; nothing is ever copied back.
+- The agent container mounts that directory **read-write at the owner's own `$HOME` path** and
+  runs with `HOME` set to it, so absolute paths inside the owner's config resolve inside the copy,
+  and a login token the harness refreshes is refreshed in the copy only. The normal task home is
+  not mounted into the agent container; the agent-home is mounted into nothing else.
+- `worker/agent-launch` (the agent container's entrypoint) sources and deletes
+  `.delegate-agent-env`, exports the profile's plain `[env]`, sets the base-URL variable when the
+  proxy is on, and `exec`s the argv. Values never appear in `docker run` arguments, `docker
+  inspect`, logs or reports.
+- `agent_scrub_home RD`: `rm -rf` of the agent-home right after the agent's container exits —
+  before commit, verify and report — and on every exit path (INT/TERM trap, `delegate stop`,
+  `delegate rm`, `delegate prune`). The verify container, `delegate exec`, the scorer and the
+  reviewer never see it.
+- R14's "read-only" holds for the owner's originals: the sandbox never has them, only a copy;
+  the copy is writable in the sandbox because refreshing logins must write, and it is discarded.
 
 ## Own-harness round (R11, R13b, R14)
 
-`delegate run SPEC --agent NAME [--model M] [--effort E] [--endpoint E] [--grant G]...` plus the
-usual `--repo/--name/--base/--timeout/--verify/--service/--read/--copy`.
+`delegate run SPEC --agent NAME [--model M] [--effort E]` plus the usual
+`--repo/--name/--base/--timeout/--verify/--service/--read/--copy` (B5).
 
-- Refused: `DELEGATE_RUNNER=native`, `--here`, `--raw`, `--orb`, `--orb-flash`, `--github`
-  ("own-harness agents run only in the docker sandbox (R14)"). `delegate continue` on an agent task
-  dies: own-harness runs are one-shot (R11: the prompt is given once).
-- `meta.env` gains `MODE=own-harness`, `AGENT`, `AGENT_IMAGE`, `AGENT_MODEL`, `AGENT_EFFORT`,
-  `AGENT_ENDPOINT`, `AGENT_UPSTREAM`. `BASE_URL` is the upstream the agent talks to (endpoint
-  `base_url`, else the profile's `default_upstream`) — that is what T's round row records as
-  `endpoint` (R7).
-- Prompt (exact text in B4): the same environment lines delegate mode writes (worktree, evidence
-  dir, `$DATABASE_URL`, verify command, network), none of the delegate rules, no closing block, then
-  the spec verbatim.
-- `do_round`'s agent branch: capture the agent version (`version_argv` in the image), render argv,
-  start the telemetry side processes, `run_limited` → `run_worker` with `AGENT_MODE=1`, stdout to
-  `$rd/agent.jsonl`; no nudge loop; `finalize_round` as for every round (commit, verify, report),
-  with `lib/report.py report --agent-format F --agent-output $rd/agent.jsonl` building the same
-  `report.json` keys from the agent's output.
-- `run_worker_docker` with `AGENT_MODE=1`: the agent image, `--entrypoint
-  /usr/local/bin/delegate-agent-launch`, no delegate key mount, no `DELEGATE_BASE_URL`/`MODEL`/
-  rules mounts or env, the same worktree / read-only `.git` / home / evidence / cache mounts, the
-  same network arguments, the grants' docker args (now including secrets), and `NO_PROXY` extended
-  with the logging sidecar's name.
-- Image: `worker/agents.Dockerfile`, `FROM ${BASE}` (the worker image: same OS, toolchain,
-  browser, user model), adding the claude and codex CLIs at pinned versions and the launcher.
-  `delegate build --agents` builds `DELEGATE_AGENT_IMAGE` with the same stamp label; agent rounds
-  check its freshness like the worker image.
+- Refused: `DELEGATE_RUNNER=native`, `--here`, `--raw`, `--orb`, `--orb-flash`, `--github`,
+  `--grant`. `delegate continue` on an agent task dies (one-shot, R11).
+- `meta.env`: `MODE`, `AGENT`, `AGENT_IMAGE`, `AGENT_MODEL`, `AGENT_EFFORT`; `BASE_URL` = the
+  setup env's base-URL variable if set, else the profile's `default_upstream` (what T's round row
+  records as `endpoint`; for a subscription login it is the harness's claim, R7).
+- Prompt: the delegate environment lines (worktree, evidence dir, `$DATABASE_URL`, verify,
+  network), no delegate rules, no closing block, then the spec verbatim (exact text in B5).
+- `do_round`'s agent branch: version (`version_argv` in the image, `--network none`, no
+  setup), argv, `agent_seed_home`, optional `llmlog_start`, `run_limited` → `run_worker` with
+  `AGENT_MODE=1`, `llmlog_stop`, `agent_scrub_home`, then `finalize_round` as for every round with
+  `lib/report.py report --agent-format F --agent-output $rd/agent.jsonl`.
+- Image: `worker/agents.Dockerfile` `FROM ${BASE}` (the worker image) + the claude and codex CLIs
+  at pinned versions + `worker/agent-launch`; opencode is already in the base. `delegate build
+  --agents`.
 
 ## Telemetry (R13)
 
-- **(b) harness output** — `lib/agents.py summarize(fmt, path)` → `{steps, tool_calls, tools,
-  tool_errors, errors, input_tokens, output_tokens, reasoning_tokens, cache_read, cache_write,
-  final_text, model_reported, success, session}`; `version_checked` is true when the captured
-  version starts with one of `tested_versions`, false otherwise, null when unknown. Untrusted
-  input: line cap 4 MiB, total cap 512 MiB read, non-JSON lines counted, never raised.
-  Delegate mode's (b) is today's opencode events (T's round row and `report.json`).
-- **(a) logging proxy** — `lib/llmlog.py serve` in a sidecar `delegate-<id>-llmlog` (the worker
-  image, `--entrypoint python3`, the script mounted read-only, only its log dir mounted
-  read-write, on the task network, its upstream reached through the same egress proxy as
-  everything else). It forwards to the **one** configured upstream origin only (absolute-URI
-  requests and `CONNECT` get 405), passes headers through (minus hop-by-hop; `Accept-Encoding:
-  identity` so usage can be read), streams the response through unchanged, and logs per request:
-  `start_ms, first_byte_ms, end_ms, method, path` (no query), `status, stream, model` (request's
-  top-level `model` string), `usage` (`input, output, cache_read, cache_write, reasoning`), byte
-  counts, and an exception class name on failure. Never a header, never a body. It holds no key:
-  the agent's own key passes through in the request headers.
-  Started only when the profile has `[api] base_url_env` and the round's grants provide the secret
-  mapped to `proxy_key_env`; otherwise (b)/(c) only, and the `llm_*` fields stay empty. Not in
-  `host` network mode.
-- **(c) file timeline** — `lib/filetimeline.py watch` on the host, every `DELEGATE_FILE_TIMELINE_S`
-  (default 1) seconds: a stat walk of the worktree (skipping `.git`, `node_modules`, `.venv`,
-  `__pycache__`), events `{t_ms, op: add|mod|del, path, size, delta}` to `$rd/files.jsonl`;
-  caps: 50 000 files, 200 000 events (then one `truncated` event). `summary` → `first_edit_s`,
-  `last_edit_s`, `idle_tail_s` (round end − last edit), `churn_events`, `churn_bytes`,
-  `files_touched`, `rewrites` (files modified ≥ 3 times). Polling misses writes inside one interval;
-  that is stated, not hidden. On for every round when `DELEGATE_FILE_TIMELINE=1`, which
-  `delegate bench` sets (both modes, so the timeline compares like with like).
+- **(b) harness output** — `lib/agents.py summarize(fmt, path)` → one normalized summary
+  (`steps, tool_calls, tools, tool_errors, errors, input/output/reasoning tokens, cache_read,
+  cache_write, final_text, model_reported, agent_version, success, session, unparsed_lines`);
+  `opencode-json` reuses `lib/report.py summarize`. `version_checked` per run against the
+  profile's `tested_versions`. Untrusted input: line cap 4 MiB, 512 MiB total, never raises.
+- **(a) logging proxy** — on only when all hold: the profile has `[api] base_url_env`; one of
+  its `key_env` variables is set in the copied setup env (the owner's existing setup already
+  authenticates with an API key); the network mode is not `host`. Upstream = the setup env's
+  base-URL value if set (the owner's own), else `default_upstream`. The agent's base-URL variable
+  is pointed at `http://delegate-<id>-llmlog:8080` + the upstream path. A subscription login, a
+  key held only in a file the profile cannot point elsewhere, or a harness without a base-URL
+  setting → no proxy; (b) and (c) only, `llm_*` fields empty. A proxy that saw no request while
+  the harness reported tokens records `proxy_bypassed: true` (the harness ignored the variable).
+  `lib/llmlog.py` (B4) forwards to that one origin only, passes headers through, streams bodies
+  unchanged, logs per request only timing, path (no query), status, model, usage, byte counts —
+  never a header or body; it holds no key. Sidecar launch is O1's `llmlog_start`.
+- **(c) file timeline** — `lib/filetimeline.py` (B4), wired by B5 for every round when
+  `DELEGATE_FILE_TIMELINE=1` (bench sets it in both modes).
 
 ## Scoring (R12)
 
-`delegate score ID --hidden DIR --out DIR [--verify CMD] [--timeout S]` (B6):
+`delegate score ID --hidden DIR --out DIR [--verify CMD] [--timeout S]` (B6, over O1's
+`run_scorer`):
 
 1. Refuses while the task's round lock is held or any `delegate-<id>-r*` container exists.
 2. `out/final/`: the worktree copied out (`tar` excluding `./.git`), kept pristine for review;
@@ -285,7 +291,7 @@ Scorer container: the worker image with `--entrypoint bash` (the worker entrypoi
 endpoint the scorer must not have), `--user` as the worker, the task network with the same mode as
 the task, the copy mounted read-write at its own path, a scratch home, the evidence copy
 read-only as `DELEGATE_EVIDENCE_DIR`, a **fresh** postgres sidecar per pass when the case has
-`SERVICE=postgres` (`delegate-<id>-spg`, removed after). No key mount, no grants, no rules, no
+`SERVICE=postgres` (`delegate-<id>-spg`, removed after). No key mount, no harness-setup copy, no grants, no rules, no
 shared caches (the agent could have written them). Native runner: the same steps natively in the
 copy with a scratch `HOME` (the native runner already trusts the code it runs). The agent's code
 does execute during scoring — in a sandbox holding nothing worth taking.
@@ -304,7 +310,7 @@ does execute during scoring — in a sandbox holding nothing worth taking.
    `.venv`, `__pycache__`, `.eval-hidden`, `.claude/`, `.codex/`, `.opencode/`, `.delegate*`, and
    `CLAUDE.md`/`AGENTS.md` unless present in the base.
 3. **Reviewers**: for each subject × reviewer condition, a delegate task on the blind repo
-   (`delegate run` with the reviewer's mode/agent/endpoint/model/effort/grants, `--name rv`,
+   (`delegate run` with the reviewer's mode/agent/model/effort, `--name r<k>`,
    no `--verify`, `review_timeout`) with the review prompt (verbatim in B9). The reviewer writes
    `REVIEW-VERDICT.json` at the repo root. Bench reads it from the worktree with `lstat` (regular
    file only, ≤ 256 KiB), validates it, and appends one `verdict` row — invalid or missing files are
@@ -334,7 +340,7 @@ the source did not give it (`""`, `null`, never a guess).
 `hidden_all` (bool), `hidden_rc`, `verify_rc`, `start`, `end`, `duration_s`, `steps`,
 `tool_calls`, `tool_errors` (count), `input_tokens`, `output_tokens`, `reasoning_tokens`,
 `cache_read`, `cache_write`, `final_context_tokens`, `tokens_source` (`harness` | `proxy` | ``),
-`llm_requests`, `llm_errors`, `llm_input`, `llm_output`, `first_edit_s`, `last_edit_s`,
+`llm_requests`, `llm_errors`, `llm_input`, `llm_output`, `proxy_bypassed`, `first_edit_s`, `last_edit_s`,
 `idle_tail_s`, `churn_events`, `churn_bytes`, `files_touched`, `rewrites`, `diff_added`,
 `diff_deleted`, `diff_files`, `nudges` (object, delegate mode), `telemetry` (list of
 `harness`/`proxy`/`files`), `source` (`""` | `legacy`), `ts`.
@@ -386,107 +392,124 @@ nothing (skipped and counted).
 
 | thing | from where | why it can't widen access |
 |---|---|---|
-| grants (incl. `[secrets]`) | owner dir only, ownership-checked | unchanged rule; secrets are files, mounted read-only |
-| endpoints | owner file only, ownership-checked | a plan names an endpoint; it cannot point a key file at an arbitrary host path |
-| agent profiles | `$DELEGATE_HOME/agents/` + owner dir | argv runs only inside `run_worker_docker`; no shell; values regex-checked; secrets only by grant |
-| plans | anywhere | names only; every name resolves through the three stores above |
-| bundle setup.sh | the delegate repo | runs on the host, as `evals/run.sh` runs it today (no change in trust) |
-| hidden/ | the delegate repo | never inside a fixture (content-hash check), never mounted; scored after, in a scorer with nothing to steal |
+| agent profiles | `$DELEGATE_HOME/agents/` + owner dir | argv runs only inside `run_worker_docker`'s agent variant; no shell; values regex-checked; setup paths relative to `$HOME`, re-validated by the orchestrator-written copier |
+| the owner's harness setup | the owner's `$HOME` and shell env, copied per round | only the agent's container mounts the copy; scrubbed before verify; never written back; never in argv, inspect, logs, reports or the ledger |
+| plans | anywhere | names only (profiles, models); no path, endpoint, key or grant |
+| bundle setup.sh | the delegate repo | runs on the host, as `evals/run.sh` runs it today |
+| hidden/ | the delegate repo | never inside a fixture (content-hash check), never mounted; scored after, in a scorer that has no setup copy, key, grant or cache |
 | agent/reviewer output | untrusted | size-capped, lstat-checked, schema-validated parsers; never executed |
+| sandbox code | orchestrator only (R19) | the cage check in every worker step's verify |
 
 ## Steps
 
-| step | hard | what |
-|---|---|---|
-| B1 `b-1-bench-core` | no | `lib/bench.py` core: case.env parser, bundles, `case_hash`, plans, ids, row builders, stats helpers, legacy import; `match` kind; `delegate bench check/import-legacy` |
-| B2 `b-2-endpoints-effort` | yes | endpoints file, `--endpoint` pin and key mount, endpoint hosts in egress allow, `--effort` → opencode `reasoningEffort` |
-| B3 `b-3-agent-profiles` | yes | `lib/agents.py` (profiles, trust, argv rendering, launch env, output parsers), shipped profiles, grant `[secrets]`, `delegate agent list/show` |
-| B4 `b-4-agent-round` | yes | `delegate run --agent`: prompt, `do_round` agent branch, `run_worker_docker` agent variant, launcher, agents image, report from agent output, docker test stub |
-| B5 `b-5-telemetry` | yes | `lib/llmlog.py` proxy + sidecar, `lib/filetimeline.py` + its wiring |
-| B6 `b-6-score` | yes | `delegate score`: copies, scorer container, fresh postgres, native path |
-| B7 `b-7-bench-run` | yes | `delegate bench run`: sessions, fixtures, leak guard, runs, scoring, `benchmark` rows, resume; `evals/run.sh` becomes a wrapper |
-| B8 `b-8-review-cases` | no | five review cases (three seeded, two clean) with truth and proving checks |
-| B9 `b-9-review` | yes | `delegate bench review`: subjects, blind repos, reviewer tasks, verdict parsing, `verdict` then `match` rows |
-| B10 `b-10-report` | no | `delegate bench report`, docs (`docs/benchmarks.md`, `evals/README.md`, reference) |
+| # | piece | by | hard | what |
+|---|---|---|---|---|
+| 1 | `b-1-bench-core` | worker | no | `lib/bench.py` core: case.env parser, bundles, `case_hash`, plans, ids, row builders, stats, legacy import; `match` kind; `delegate bench check/import-legacy` |
+| 2 | `b-2-effort-models` | worker | no | `--effort` (meta `REASONING_EFFORT`), `delegate models`, `tests/docker-stub.sh` + its test against today's docker path |
+| 3 | `b-3-agent-profiles` | worker | yes | `lib/agents.py` (profiles, trust, argv, setup lists, proxy decision, parsers), four shipped profiles, `delegate agent list/show` |
+| 4 | `b-4-telemetry-libs` | worker | yes | `lib/llmlog.py` proxy and `lib/filetimeline.py`, pure stdlib, tested offline |
+| O1 | `b-o1-sandbox` | **orchestrator** | — | agent variant of `run_worker_docker`, `agent_seed_home`/`agent_scrub_home`, `worker/agent-launch`, `llmlog_start`/`llmlog_stop`, `run_scorer`, effort env + `model_entry` option; `tests/test_sandbox_bench.sh` |
+| 5 | `b-5-agent-round` | worker | yes | `delegate run --agent`: options, prompt, `do_round` agent branch over O1's functions, report from agent output, file-timeline wiring, agents image, `build --agents` |
+| 6 | `b-6-score` | worker | yes | `delegate score` over O1's `run_scorer` |
+| 7 | `b-7-bench-run` | worker | yes | `delegate bench run`: sessions, R18 model check, fixtures, leak guard, runs, scoring, `benchmark` rows, resume |
+| 8 | `b-8-review-cases` | worker | no | five review cases with truth and proving checks |
+| 9 | `b-9-review` | worker | yes | `delegate bench review`: subjects, blind repos, reviewers, verdict parsing, `verdict` then `match` rows |
+| 10 | `b-10-report` | worker | no | `delegate bench report`, `evals/run.sh` wrapper, docs |
 
-Every step's verify is the full gate in the brief's proven form: `bash -n`, `py_compile`, the
-step's new test file present, every `tests/test_*.sh` passing under `env -u
-DELEGATE_EVIDENCE_DIR`, and a scope check against the **previous step's branch** (`bench` for
-B1). Steps that need docker or real agent CLIs carry offline tests (a stub `docker` and stub agent
-CLIs on PATH, `tests/docker-stub.sh` from B4); the live checks are the lead's, in Phase 3.
+Every worker step's verify is the full gate in the proven form (`bash -n`, `py_compile`, the
+step's new test present, every `tests/test_*.sh` passing under `env -u DELEGATE_EVIDENCE_DIR`),
+then the cage check, then the scope check against the **previous piece's branch** (`bench` for
+step 1; `b-o1-sandbox` for step 5).
+
+**Running it.** (1) `delegate chain docs/specs/b-chain.json` (segment 1, base `bench`). (2) The
+orchestrator cuts `b-o1-sandbox` from `delegate/b-4-telemetry-libs`, writes O1 by hand per its
+spec, passes `tests/test_sandbox_bench.sh` and the full gate, commits. (3) `delegate chain
+docs/specs/b-chain-2.json` (segment 2, base `b-o1-sandbox`). (4) Phase 3: the orchestrator's
+review and live checks, then the owner-run checks below.
 
 ## Decisions taken here
 
-1. Own-harness runs reuse the task machinery (`delegate run --agent`) instead of a second
-   sandbox: "same base, same kind of sandbox, same time limit and network rules" (R11) holds by
-   construction, and the egress and grant code stays in one place.
-2. Delegate mode keeps `--verify` (so its prompt is exactly today's and legacy results stay
-   comparable); the authoritative `verify_rc` is always the scorer's, on a copy, in both modes.
-3. Scoring uses no shared caches; `npm install` in a verify fetches through the egress proxy.
+1. Own-harness runs reuse the task machinery (`delegate run --agent`); "same kind of sandbox,
+   same time limit and network rules" holds by construction.
+2. Delegate mode keeps `--verify` (prompt parity with today and with legacy results); the
+   authoritative `verify_rc` is always the scorer's, on a copy.
+3. Scoring uses no shared caches.
 4. One run at a time; order shuffled per repeat with a recorded seed.
-5. Blind mapping lives in `match` rows written after the verdicts, not in `benchmark` rows.
-6. Reviewer findings carry a ≤ 200-character summary (the only free text B writes to the ledger);
-   no prompts, diffs or code ever reach the ledger.
-7. The report hides groups below n = 3 by default (R10: never a single run).
+5. Blind mapping lives in `match` rows written after the verdicts.
+6. Reviewer findings carry a ≤ 200-character summary; no prompts, diffs, code or setup content
+   ever reach the ledger.
+7. The report hides groups below n = 3 by default.
+8. The harness setup copy is mounted at the owner's own `$HOME` path, so absolute paths in the
+   owner's config keep working inside the copy.
+9. The copier and the copy's lifetime are sandbox code (they carry credentials into a
+   container), so they are in O1, not in a worker step; the profile's path list is data the
+   worker's `lib/agents.py` validates and O1 re-validates.
+10. `render-opencode-config.py` writes the worker's permission rules, so its `model_entry` change
+    is in O1 too, though R19 does not name the file.
 
 ## Owner questions (each with the option picked)
 
-1. **AGENTS.md says the worker must not write the code that limits the worker**
-   (`run_worker_*`, `lib/grants.py`, egress). B must extend exactly that code: the `[secrets]`
-   grant table (B3), the endpoint key mount and egress allow hosts (B2), the agent variant of
-   `run_worker_docker` and the launcher (B4), the logging sidecar launch (B5) and the scorer
-   container (B6). Option A: the worker writes them as `hard` steps whose specs dictate the cage
-   tests verbatim, and the lead reads those functions in full in Phase 3. Option B: the lead
-   hand-writes those hunks (≈ 200 lines over five functions) on the step branches before review.
-   **Picked A** — it is what this slice's brief asks for (security steps `hard: true` on the
-   chain); each cage change is confined to named functions listed in the spec so Phase 3 can read
-   all of them, and the specs make the assertions tests, not prose. If the owner holds the AGENTS.md
-   rule literally, B is the fallback and the specs already isolate the hunks.
-2. **How own-harness credentials enter the sandbox.** Option A: reuse `mounts.ro` (the key file
-   appears at its host path; but secret-looking names are blanked by design). Option B: a new grant
-   table `[secrets]` mounted at `/run/secrets/grant/<name>`. **Picked B** — a fixed path the
-   launcher can rely on, never blanked, and listed by name in reports.
-3. **Where a delegate-mode run's endpoint key comes from.** Option A: an owner-written endpoints
-   file. Option B: a grant secret. **Picked A** — the delegate endpoint key is the harness's own
-   credential (mounted today from config), not an agent credential; R14's grant rule stays
-   specific to own-harness agents.
-4. **T's round rows for own-harness rounds.** T's builder sums tokens from the opencode timeline,
-   which agent rounds do not have, so their round rows show zero tokens. Option A: leave T as
-   designed; the `benchmark` row is where agent tokens live. Option B: B4 makes T's builder fall
-   back to `report.json` token fields when the timeline is empty. **Picked A** (no change to T's
-   design); B is a small follow-up if `delegate stats` should count agent tokens.
-5. **Effort in delegate mode.** R3's `effort` is `hard`/`normal`; a bench condition's effort is a
-   reasoning level. **Picked**: a separate `REASONING_EFFORT` (meta.env) rendered as opencode's
-   `reasoningEffort` model option (opencode 2.3's binary maps it to `reasoning_effort` on the wire;
-   confirmed live in Phase 3); T's `EFFORT` keeps its meaning.
+1. ~~Who writes the sandbox code~~ — settled by R19: the orchestrator (`b-o1-sandbox`).
+2. ~~How agent credentials enter~~ — settled by R14 amended: the owner's existing setup, copied.
+3. ~~Delegate-mode endpoints~~ — settled by R18: the configured endpoint only.
+4. **T's round rows for own-harness rounds** show zero tokens (T sums the opencode timeline).
+   **Picked A**: leave T; agent tokens live in the `benchmark` row. (Stands.)
+5. **Effort in delegate mode**: a separate `REASONING_EFFORT`, rendered as opencode's
+   `reasoningEffort`; T's `EFFORT` keeps hard/normal. (Stands.)
+6. **Which setup paths a shipped profile copies.** Option A: whole harness folders (`~/.claude`,
+   `~/.codex`, `~/.config/opencode`), exactly as set up. Option B: the precise config, login and
+   instruction files listed above. **Picked B** — whole folders carry transcripts and histories of
+   unrelated sessions into every run (and can be hundreds of MB); an owner who wants more lists it
+   in an owner profile of the same name.
+7. **Owner config that names paths outside the copied set** (a hook script in another folder, an
+   `apiKeyHelper` command, a plugin symlinked from elsewhere). Option A: copy it too, chasing
+   references. Option B: copy only the declared paths (symlinks dereferenced); anything else is
+   absent in the sandbox and fails visibly in that harness's own way. **Picked B** — B cannot
+   parse every harness's config safely; the owner adds paths to the profile when a harness needs
+   them, and the owner-run checks below show it.
 
-## What the owner must do (not delegate code, not the worker)
+## What the owner must do (not delegate code, not an agent session)
 
-- Write the grants that carry agent credentials, e.g. `~/.config/delegate/grants/agent-key-b.toml`
-  with `[secrets] anthropic-api-key = "<path>"` (API key: proxy telemetry on) or
-  `claude-oauth-token = "<path>"` (a `claude setup-token` token: no proxy telemetry, R13a), and one
-  for codex if used. Key files mode 600.
-- Write `~/.config/delegate/endpoints.toml` for delegate-mode endpoints other than the default.
-- After B lands: `delegate build` (the worker stamp changes) and `delegate build --agents`.
-- Install codex in the agent image only after checking its flags (`codex exec --help`) against
-  `agents/codex.toml`; until then the `codex` profile is marked unverified.
+- After B lands: `delegate build` (the worker stamp changes at O1 and B5), then `delegate build
+  --agents`.
+- If a shipped profile's path list does not match how a harness is set up, write an owner profile
+  of the same name in `~/.config/delegate/agents/`.
+- Check `agents/codex.toml` against `codex exec --help` once codex is installed in the image.
+
+### Owner-run live checks (an agent session must not run these: they copy setup paths the session may not read)
+
+1. `delegate run <tiny spec> --agent claude-code` with the owner's subscription login: the run
+   completes; `report.json` has the stream's tokens and `version_checked: true`; no proxy
+   sidecar; afterwards `$TASK_DIR/agent-home` is gone and the owner's `~/.claude/.credentials.json`
+   modification time is unchanged.
+2. The same with `ANTHROPIC_API_KEY` set in the owner's shell: the `llmlog` sidecar ran, `llm.json`
+   shows requests and tokens matching the stream's within rounding, and the proxy log contains no
+   header or body (grep it for the first 8 characters of the key: no match).
+3. `--agent opencode-own` with the owner's OpenCode configured for a Claude API key: completes;
+   whether `ANTHROPIC_BASE_URL` reached the provider is visible as `proxy_bypassed`; set
+   `verified = true` in an owner copy of the profile only if it did.
+4. `--agent codex` once its flags are checked.
+5. A small `delegate bench run` plan with one own-harness condition and `delegate bench review`
+   with an own-harness reviewer, end to end.
+
+The orchestrator's own Phase 3 live checks need no owner setup: delegate-mode `bench run` on two
+cases with two models from `delegate models`, `delegate score` against a real docker scorer
+(including the postgres case), the logging proxy's TLS tunnel through the egress proxy using a
+throwaway local upstream, `delegate bench review` with delegate-mode reviewers on the review
+cases, and `delegate bench report`.
 
 ## CLI facts and what is unverified
 
-- claude 2.1.325 (installed), checked this session: `-p`, `--output-format stream-json` (requires
-  `--verbose` with `-p`: verified by the error it prints), `--dangerously-skip-permissions`,
-  `--permission-mode`, `--no-session-persistence`, `--model`, `--effort low|medium|high|xhigh|max`,
-  `--version`, `setup-token`; `ANTHROPIC_BASE_URL` + `ANTHROPIC_API_KEY` honoured (a probe against a
-  dead local port reported `apiKeySource: ANTHROPIC_API_KEY` and retried against that URL); the
-  stream's first event is `{"type":"system","subtype":"init", ..., "model", "claude_code_version"}`.
-  Not observed (no live call made): the `result` event's fields (`num_turns`, `usage`,
-  `is_error`, `duration_ms`) — documented, the parser is tolerant, B4's fixture is built from the
-  documentation and replaced by a captured stream in the Phase 3 live check.
-  `CLAUDE_CODE_OAUTH_TOKEN` is present in the binary; its behaviour is unverified.
-- codex: **not installed** — every flag in `agents/codex.toml` (`exec`, `--json`,
-  `--dangerously-bypass-approvals-and-sandbox`, `--skip-git-repo-check`, `--model`,
-  `-c model_reasoning_effort=`, `-` for stdin, `CODEX_API_KEY`, `OPENAI_BASE_URL`) and its JSONL
-  event names (`thread.started`, `item.completed`, `turn.completed` with `usage`) are from its
+- claude 2.1.325 (installed), checked this session against `--help` and an offline probe:
+  `-p`, `--output-format stream-json` (requires `--verbose` with `-p`),
+  `--dangerously-skip-permissions`, `--no-session-persistence`, `--model`, `--effort
+  low|medium|high|xhigh|max`, `--version`; `ANTHROPIC_BASE_URL` + `ANTHROPIC_API_KEY` honoured;
+  the stream's first event is `system`/`init` with `model` and `claude_code_version`. Not
+  observed: the `result` event's fields; how a copied subscription login behaves under a different
+  machine path (owner check 1).
+- codex: **not installed** — every flag and event name in `agents/codex.toml` is from its
   documentation, unverified.
-- opencode 2.3.0: `reasoningEffort` → `reasoning_effort` found in the binary; wire effect
-  unverified.
+- opencode 2.3.0: `opencode run --format json` and `-m` are what delegate uses today;
+  `reasoningEffort` → `reasoning_effort` found in the binary (wire effect unverified); whether its
+  Anthropic provider honours `ANTHROPIC_BASE_URL` is unverified (owner check 3); the auth store
+  path `.local/share/opencode/auth.json` is from its documentation.

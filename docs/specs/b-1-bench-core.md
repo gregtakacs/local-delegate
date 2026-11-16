@@ -1,6 +1,6 @@
 # Task B1: lib/bench.py core — bundles, plans, ids, row builders, stats, legacy import
 
-`"hard": false`. Slice B step 1 of 10 (`docs/specs/b-design.md`). Base: `bench` with slice T
+`"hard": false`. Slice B step 1 of 10, chain segment 1 (`docs/specs/b-design.md`). Base: `bench` with slice T
 landed (`lib/ledger.py`, `delegate ledger`, `delegate stats` exist).
 
 ## Goal
@@ -57,14 +57,14 @@ Library functions (exact names; later steps import them):
   (int 1..50, default 3), `seed` (int, default 0), `conditions` (non-empty list), `reviewers`
   (list, default `[]`), `review_cases` (list or `"all"`, default `[]`), `review_timeout` (int
   60..86400, default 1800). Each condition/reviewer: `label` per the design regex, unique within
-  its list; `mode` `delegate` | `own-harness`; delegate mode allows only `label, mode, endpoint,
-  model, effort, rules_ref`; own-harness allows only `label, mode, agent, model, endpoint, effort,
-  grants` and requires `agent`. Values: `endpoint`, `agent` and each grant name match
-  `[a-z0-9][a-z0-9._-]{0,47}`; `model` and `effort` match `^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$`
+  its list; `mode` `delegate` | `own-harness`; delegate mode allows only `label, mode, model,
+  effort, rules_ref`; own-harness allows only `label, mode, agent, model, effort` and requires
+  `agent` (R14 amended, R18: a plan carries no endpoint, key, grant or path). Values: `agent`
+  matches `[a-z0-9][a-z0-9._-]{0,47}`; `model` and `effort` match `^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$`
   (or are absent/empty); `rules_ref` matches `^[A-Za-z0-9._/~^@{}-]{1,64}$` and does not start
   with `-`. Unknown keys anywhere → `BenchError`. Case names resolved (`"all"` → `list_cases`),
-  each must exist and be of the right kind. Profile/endpoint/grant names are only shape-checked here
-  (later steps resolve them). Returns the normalized plan dict (defaults filled).
+  each must exist and be of the right kind. Profile names are only shape-checked here (B3 resolves them;
+  B7 checks delegate-mode models against `delegate models`). Returns the normalized plan dict (defaults filled).
 - `run_matrix(plan) -> list[dict]` — `[{"repeat", "case", "condition"}]`: for repeat 1..N the
   case × condition pairs (case order then condition order) shuffled by
   `random.Random(f"{plan['seed']}:{repeat}")`; deterministic for a given plan.
@@ -118,8 +118,9 @@ Offline, temp dirs only, `DELEGATE_LEDGER` into `mktemp -d`. At least:
    `VERIFY=$(touch $T/pwned)` parses as the literal string and `$T/pwned` does not exist.
 3. `case_hash` stable across two calls, changes when one byte of `hidden/check.sh` changes,
    errors on a symlink.
-4. Plan validation: a good plan passes; each of — unknown top key, unknown condition key,
-   duplicate label, own-harness without agent, model `"; rm -rf /"`, rules_ref `--upload-pack=x`,
+4. Plan validation: a good plan passes; each of — unknown top key, unknown condition key
+   (including `endpoint` and `grants`, which plans no longer take), duplicate label,
+   own-harness without agent, model `"; rm -rf /"`, rules_ref `--upload-pack=x`,
    unknown case — fails with a message naming the field.
 5. `run_matrix` deterministic for a seed, differs for another seed, has R×C×K entries.
 6. Row builders: `kind`/`schema` first, `ts` last, field order equals the exported list, unknown
@@ -141,7 +142,7 @@ Offline, temp dirs only, `DELEGATE_LEDGER` into `mktemp -d`. At least:
 
 ## Out of scope
 
-- Running anything (B7), agent profiles (B3), endpoints (B2), reports (B10), docs (B10).
+- Running anything (B7), agent profiles (B3), reports (B10), docs (B10).
 - Do not modify `evals/run.sh`, `evals/cases/**`, `lib/report.py`, `lib/chain.py`, or any test
   other than creating `tests/test_bench_core.sh`.
 
@@ -149,10 +150,12 @@ Offline, temp dirs only, `DELEGATE_LEDGER` into `mktemp -d`. At least:
 
 Mid-round, `tests/test_e2e_harness.sh`'s hygiene check blames untracked deliverables; the harness
 commits before the chain's verify runs. If that is the only failure mid-round, report it; never
-edit that test.
+edit that test. The **cage check** fails if this step changed any sandbox function or file
+(R19: orchestrator code; `docs/specs/b-design.md` §Who writes what) — never "fix" it by editing
+the check; leave the sandbox code alone and report what you needed under DEVIATIONS.
 
 ```bash
-set -o pipefail && bash -n bin/delegate && python3 -m py_compile lib/*.py && [ -f tests/test_bench_core.sh ] && for f in tests/test_*.sh; do l=/tmp/gate-$(basename "$f" .sh).log; env -u DELEGATE_EVIDENCE_DIR bash "$f" >"$l" 2>&1 || { echo "GATE FAIL $f"; grep -h FAIL "$l" | head -20; exit 1; }; done && ! git diff --name-only bench | grep -qvE '^docs/specs/b-|^bin/delegate$|^lib/bench\.py$|^lib/ledger\.py$|^tests/test_ledger\.sh$|^tests/test_bench_core\.sh$' && echo GATE-OK
+set -o pipefail && bash -n bin/delegate && python3 -m py_compile lib/*.py && [ -f tests/test_bench_core.sh ] && for f in tests/test_*.sh; do l=/tmp/gate-$(basename "$f" .sh).log; env -u DELEGATE_EVIDENCE_DIR bash "$f" >"$l" 2>&1 || { echo "GATE FAIL $f"; grep -h FAIL "$l" | head -20; exit 1; }; done && for fn in run_worker run_worker_docker run_worker_native ensure_network ensure_egress ensure_task_egress host_args read_mount_args make_guard_shims; do cmp -s <(git show bench:bin/delegate | sed -n "/^$fn() {/,/^}/p") <(sed -n "/^$fn() {/,/^}/p" bin/delegate) || { echo "CAGE CHANGED $fn (R19: orchestrator code)"; exit 1; }; done && { git diff --quiet bench -- lib/grants.py worker/egress.Dockerfile worker/egress-entrypoint.sh worker/entrypoint.sh lib/render-opencode-config.py worker/agent-launch || { echo "CAGE CHANGED files (R19: orchestrator code)"; exit 1; }; } && ! git diff --name-only bench | grep -qvE '^docs/specs/b-|^bin/delegate$|^lib/bench\.py$|^lib/ledger\.py$|^tests/test_ledger\.sh$|^tests/test_bench_core\.sh$' && echo GATE-OK
 ```
 
 ## Report format

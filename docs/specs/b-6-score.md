@@ -1,9 +1,9 @@
 # Task B6: `delegate score` — hidden checks and verify on copies, after the run, outside the sandbox
 
-`"hard": true` — this step creates a new container launch (the scorer) and decides what hidden
-checks can see: security code. Confine the container launch to one new function `run_scorer` and
-the command to `cmd_score`; the reviewer reads both in full. Slice B step 6 of 10
-(`docs/specs/b-design.md` §Scoring, R12).
+`"hard": true` — this step decides what hidden checks can see and when scoring may start. Slice B
+step 6 of 10, chain segment 2 (`docs/specs/b-design.md` §Scoring, R12). R19: the scorer
+container itself is the orchestrator's `run_scorer` (`docs/specs/b-o1-sandbox.md` §Interface,
+item 7); you call it, you never edit it — the verify's cage check fails if you do.
 
 ## Goal
 
@@ -16,7 +16,8 @@ review.
 
 ## Read first
 
-- `docs/specs/b-design.md` §Scoring.
+- `docs/specs/b-design.md` §Scoring; `docs/specs/b-o1-sandbox.md` §Interface item 7 and the
+  `run_scorer` it describes (read the function in `bin/delegate`).
 - `bin/delegate`: `cmd_exec` (the closest existing command), `load_task`, `lock_task` (how the
   round lock looks), `ensure_service` / `ensure_network` / `ensure_egress` / `svc_net` /
   `svc_name`, `run_worker_docker` (the network-mode case block to mirror; copy only what the
@@ -25,7 +26,7 @@ review.
 - `evals/run.sh` (how hidden checks run today: `.eval-hidden/check.sh`, PASS/FAIL counting) and
   `evals/cases/ui-tip/hidden/check.sh` (it reads `$DELEGATE_EVIDENCE_DIR`),
   `evals/cases/long-refactor/hidden/check.sh` (it writes `/tmp`).
-- `tests/docker-stub.sh` (B4/B5).
+- `tests/docker-stub.sh` (B2) and `tests/test_sandbox_bench.sh` (O1).
 
 ## Contract
 
@@ -57,31 +58,14 @@ review.
    `verify-tree/` are deleted. Print one line `score ID: hidden P/T, verify RC` to stdout. Exit 0
    whenever scoring ran (whatever the checks said); non-zero only for refusals and setup errors.
 
-### `run_scorer TAG DIR CMD...` (new function beside `run_worker_docker`)
+### Scorer container
 
-- Docker runner: `docker run --rm --init --name "delegate-$ID-$TAG" --label delegate.task="$ID"
-  --user UID:GID --entrypoint bash -v "$DIR:$DIR" -v "<scratch home>:/home/worker" -v
-  "$OUT/evidence:$OUT/evidence:ro" -e HOME=/home/worker -e DELEGATE_EVIDENCE_DIR="$OUT/evidence"
-  <network args> [-e DATABASE_URL=...] -w "$DIR" "$DELEGATE_IMAGE" -lc "<cmd>"`.
-  - Network args mirror the task's grant network mode exactly as `run_worker_docker` builds them
-    (`filtered`/`allow` → task network + `HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY` to the same proxy;
-    `open` → task network; `host` → `--network host`), using `ensure_network`/`ensure_egress`.
-  - Not present, by construction (the tests assert each): `/run/secrets` anything, the delegate key,
-    `DELEGATE_BASE_URL`, `DELEGATE_MODEL`, the rules mount, the grants' `docker-args` (no devices,
-    no rw mounts, no grant env), the guard shims, `GIT_COMMON`, the worktree, `$TASK_DIR/home`,
-    the shared `delegate-cache`/`delegate-npm` volumes, `$DELEGATE_DOCKER_ARGS`.
-  - The scratch home is `out/.home-$TAG` (created, deleted with the copies).
-  - `--entrypoint bash`: the worker entrypoint renders an opencode config that needs a model
-    endpoint; the scorer must have none.
-- Service: when the task's `SERVICE=postgres`, a fresh sidecar `delegate-$ID-spg` (same image,
-  env and readiness loop as `ensure_service`, on the task network) is started before each pass and
-  removed (`docker rm -f`) after it; `DATABASE_URL` points at it. It is never the task's own
-  `delegate-$ID-pg`. `NO_PROXY` gains its name.
-- Native runner: the same pass natively — `env -i HOME=<scratch home> PATH="$PATH"
-  DELEGATE_EVIDENCE_DIR=... bash -lc "<cmd>"` with cwd `DIR` (no service: `SERVICE=postgres`
-  under native dies at option time, as `delegate run` does).
-- Each pass runs through `run_limited` with its tag (the existing timeout/stop path; a timeout
-  sets `*_timed_out` and rc 124).
+- Every pass calls `run_scorer TAG DIR OUT CMD` (O1) through `run_limited` with its tag (`s1`
+  hidden, `s2` verify), so timeouts and `delegate stop` use the existing path; create
+  `OUT/.home-TAG` before and delete it after. `run_scorer` decides the container (no credentials,
+  no harness setup, no grants, no shared caches, a fresh `-spg` postgres when `SERVICE=postgres`);
+  `cmd_score` decides only what is copied where and in which order.
+- `SERVICE=postgres` under the native runner dies at option time, as `delegate run` does.
 
 ### `cmd_rm` / `reap_leftovers`
 
@@ -91,18 +75,17 @@ review.
 
 ### `tests/test_score.sh` — create
 
-Offline, the docker stub from B4 (its `run --rm` with `--entrypoint bash` executes the `-lc`
-command in the `-w` dir on the host — add that behaviour to the stub if it lacks it). A temp task
-made by a real `delegate run` with the stub agent or the stub opencode (whichever B4's rig makes
-simplest), then:
+Offline, the docker stub from B2 (its `run --rm` with `--entrypoint bash` executes the `-lc`
+command in the `-w` dir on the host). A temp task made by a real delegate-mode `delegate run`
+with the stub opencode (as `tests/test_docker_stub.sh` does), then:
 1. Hidden dir with a `check.sh` printing 2 PASS + 1 FAIL and `cat`ing a file only present in the
    hidden dir → `score.json` counts 2/3, `hidden.log` has the hidden file's text; `final/` exists
    and has no `.eval-hidden`; `hidden-tree/` and `verify-tree/` are gone.
 2. Verify `test ! -e .eval-hidden && echo ok` → `verify_rc` 0 (verify never sees hidden files).
 3. Scorer `docker run` lines (stub log) contain `--entrypoint bash`, the task network,
    `HTTPS_PROXY=`, and do **not** contain `/run/secrets`, `delegate_key`, `DELEGATE_BASE_URL`,
-   `delegate-cache`, `delegate-npm`, the task's home path, the worktree path, `GIT_COMMON`; with a
-   task run under a grant that has env + a secret + an rw mount, none of those appear either.
+   `delegate-cache`, `delegate-npm`, the task's home path, the worktree path, `GIT_COMMON`, the
+   agent home (O1's own suite covers the scorer in depth; this checks `cmd_score` calls it).
 4. `SERVICE=postgres` task: a `delegate-<id>-spg` `run -d` before each pass and an `rm -f` after,
    `DATABASE_URL=` naming `-spg`, never `-pg`.
 5. Refusals: lock dir present → die with the R12 message and `--out` not created; a stub `ps`
@@ -113,17 +96,20 @@ simplest), then:
 
 ## Out of scope
 
-- Writing ledger rows (B7). No change to `run_worker_docker`, `run_worker_native`, `lib/grants.py`,
-  `lib/agents.py`, the images, or existing tests (additive stub changes only).
+- Writing ledger rows (B7). No edits to `run_scorer` or any other O1 function or file (the cage
+  check), `run_worker_*`, `lib/grants.py`, `lib/agents.py`, the images, or existing tests
+  (additive changes to `tests/docker-stub.sh` only, if a behaviour you need is missing).
 
 ## Verify
 
 Mid-round, `tests/test_e2e_harness.sh`'s hygiene check blames untracked deliverables; the harness
 commits before the chain's verify runs. If that is the only failure mid-round, report it; never
-edit that test.
+edit that test. The **cage check** fails if this step changed any sandbox function or file
+(R19: orchestrator code; `docs/specs/b-design.md` §Who writes what) — never "fix" it by editing
+the check; leave the sandbox code alone and report what you needed under DEVIATIONS.
 
 ```bash
-set -o pipefail && bash -n bin/delegate && python3 -m py_compile lib/*.py && [ -f tests/test_score.sh ] && for f in tests/test_*.sh; do l=/tmp/gate-$(basename "$f" .sh).log; env -u DELEGATE_EVIDENCE_DIR bash "$f" >"$l" 2>&1 || { echo "GATE FAIL $f"; grep -h FAIL "$l" | head -20; exit 1; }; done && ! git diff --name-only delegate/b-5-telemetry | grep -qvE '^docs/specs/b-|^bin/delegate$|^docs/reference\.md$|^tests/docker-stub\.sh$|^tests/test_score\.sh$' && echo GATE-OK
+set -o pipefail && bash -n bin/delegate && python3 -m py_compile lib/*.py && [ -f tests/test_score.sh ] && for f in tests/test_*.sh; do l=/tmp/gate-$(basename "$f" .sh).log; env -u DELEGATE_EVIDENCE_DIR bash "$f" >"$l" 2>&1 || { echo "GATE FAIL $f"; grep -h FAIL "$l" | head -20; exit 1; }; done && for fn in run_worker run_worker_docker run_worker_native ensure_network ensure_egress ensure_task_egress host_args read_mount_args make_guard_shims net_args run_limited run_scorer agent_seed_home agent_scrub_home llmlog_start llmlog_stop; do cmp -s <(git show b-o1-sandbox:bin/delegate | sed -n "/^$fn() {/,/^}/p") <(sed -n "/^$fn() {/,/^}/p" bin/delegate) || { echo "CAGE CHANGED $fn (R19: orchestrator code)"; exit 1; }; done && { git diff --quiet b-o1-sandbox -- lib/grants.py worker/egress.Dockerfile worker/egress-entrypoint.sh worker/entrypoint.sh lib/render-opencode-config.py worker/agent-launch || { echo "CAGE CHANGED files (R19: orchestrator code)"; exit 1; }; } && ! git diff --name-only delegate/b-5-agent-round | grep -qvE '^docs/specs/b-|^bin/delegate$|^docs/reference\.md$|^tests/docker-stub\.sh$|^tests/test_score\.sh$' && echo GATE-OK
 ```
 
 ## Report format

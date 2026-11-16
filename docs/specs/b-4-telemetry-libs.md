@@ -1,28 +1,22 @@
-# Task B5: own-harness telemetry — logging proxy sidecar and the file timeline
+# Task B4: telemetry libraries — the logging proxy and the file timeline (pure stdlib)
 
-`"hard": true` — a network proxy that carries API keys in transit and parses untrusted response
-bodies, launched as a container on the task network: security code. Confine the bash changes to
-two new functions (`llmlog_start`, `llmlog_stop`) plus their call sites in `do_round`, and the
-file-timeline start/stop beside them. Slice B step 5 of 10 (`docs/specs/b-design.md` §Telemetry,
-R13).
+`"hard": true` — a proxy that carries the owner's API keys in transit and parses untrusted
+response bodies. Slice B step 4 of 10, chain segment 1 (`docs/specs/b-design.md` §Telemetry,
+R13). R19: this step writes the two programs and their offline tests only. Starting the proxy as
+a container on a task network is the orchestrator's `llmlog_start` (`b-o1-sandbox`); wiring the
+file timeline into rounds is B5. No change to `bin/delegate` at all.
 
 ## Goal
 
-Every benchmark round records the best telemetry its harness allows: (a) for own-harness agents
-that use an API key and accept a base URL, a pass-through logging proxy sidecar records each
-model request's timing and token usage — never a header or a body; (c) for every round when
-`DELEGATE_FILE_TIMELINE=1`, a host-side poller records when files in the worktree changed.
+Two standalone stdlib programs: `lib/llmlog.py`, a pass-through logging proxy that records each
+model request's timing and token usage and never a header or a body, and `lib/filetimeline.py`,
+a poller that records when files in a work tree changed and summarizes it.
 
 ## Read first
 
-- `docs/specs/b-design.md` §Telemetry (all three), §Own-harness round.
-- `bin/delegate`: `do_round` (B4's agent branch), `run_worker_docker` (network modes, the egress
-  proxy names `EGRESS_NAME` / `egress_task_name`, `svc_net`), `progress_start`/`progress_stop`
-  (the side-process pattern to copy: start, stop file, bounded wait, kill by PID).
-- `lib/agents.py` `proxy` subcommand (B3), `lib/progress.py` (a long-running stdlib side process
-  in this repo, `--ppid` handling).
-- `tests/docker-stub.sh` (B4) — extend it only additively if the sidecar's `docker run -d` needs
-  emulation it lacks.
+- `docs/specs/b-design.md` §Telemetry (all three sources).
+- `lib/progress.py` — a long-running stdlib side process in this repo (`--ppid` handling).
+- `tests/test_ledger.sh` — house style for a Python-lib suite.
 
 ## Contract
 
@@ -85,36 +79,6 @@ model request's timing and token usage — never a header or a body; (c) for eve
   with ≥ 3 `mod` events), "truncated" (bool)}`; times relative to start, rounded to 0.1 s; no
   events → zeros for counts and nulls for times.
 
-### `bin/delegate`
-
-- Config: `: "${DELEGATE_FILE_TIMELINE:=0}"`, `: "${DELEGATE_FILE_TIMELINE_S:=1}"`.
-- File timeline, in `do_round` for **both** modes when `DELEGATE_FILE_TIMELINE=1`: start the
-  watcher right before the first `run_limited` (`$rd/files.jsonl`, stop file `$rd/.files-stop`,
-  `--ppid $$`, its PID kept); stop it after the last worker invocation of the round (after the
-  nudge loop in delegate mode): touch the stop file, wait up to 5 s, then kill **by that PID**;
-  write `$rd/files.json` from `summary` with the round's start/end. Failure anywhere: one `warn`,
-  never fatal, never a changed round status.
-- `llmlog_start RD UPSTREAM DIALECT` / `llmlog_stop RD` (new functions next to
-  `run_worker_docker`): only for `MODE=own-harness`, only when `lib/agents.py proxy "$AGENT"
-  --have "<secrets>" --upstream "$BASE_URL"` prints a line, and only when the grant network mode is
-  `filtered`, `allow` or `open` (host mode: no proxy, one `note`).
-  - `docker run -d --rm --name "delegate-$ID-llmlog" --label delegate.task="$ID" --network "$(svc_net)"
-    --user UID:GID --read-only --tmpfs /tmp --entrypoint python3
-    -v "$DELEGATE_HOME/lib/llmlog.py:/opt/delegate/llmlog.py:ro" -v "$RD/llm:/log"
-    "$DELEGATE_IMAGE" /opt/delegate/llmlog.py serve --listen 0.0.0.0:8080 --upstream "$UPSTREAM"
-    --dialect "$DIALECT" --log /log/llm.jsonl [--via http://<egress name>:3128]` — `--via` is the
-    shared egress proxy in `filtered`, the task's own in `allow`, absent in `open`. No key, no
-    grant args, no worktree, no home mounted.
-  - The agent's base URL (B4's `AGENT_BASE_URL`) becomes `http://delegate-$ID-llmlog:8080` + the
-    upstream's path.
-  - `llmlog_stop`: `docker rm -f` the sidecar (after the agent's `run_limited` returns, before
-    `finalize_round`), then `$RD/llm.json` from `summary`. Also stopped on the round's INT/TERM
-    path and by `reap_leftovers` (it carries the task label).
-  - Failure to start: one `warn`, the round runs without the proxy and with the agent's base URL
-    left at the real upstream.
-- `report.json` (via `lib/report.py`, two optional args `--files-json`, `--llm-json`): the two
-  summaries are embedded under `files` and `llm` when the files exist; nothing else changes.
-
 ### `tests/test_bench_telemetry.sh` — create
 
 Offline. A fake upstream (Python `http.server` written by the test) serving: an Anthropic
@@ -139,26 +103,22 @@ records the request headers it received. The proxy runs locally on port 0. At le
 9. `filetimeline.py watch` on a temp dir with a scripted writer (add, modify ×3, delete, a file
    under `node_modules/` and `.git/` that must not appear): events and `summary` numbers exact
    (`rewrites` 1, `files_touched` 2…); stop file honoured; `--ppid` of a dead PID exits.
-10. `bin/delegate` wiring with the docker stub (B4's rig): an agent round whose grant has the API-key
-    secret runs a sidecar `docker run -d` whose argv has the llmlog mount, `--read-only`, `--via
-    http://delegate-egress:3128`, and **no** `/run/secrets`, `delegate_key` or worktree mount; the
-    agent's env has `ANTHROPIC_BASE_URL=http://delegate-<id>-llmlog:8080`; a `docker rm -f
-    delegate-<id>-llmlog` follows. With an OAuth-token-only grant: no sidecar, base URL is the
-    upstream. With `DELEGATE_FILE_TIMELINE=1`: `files.json` exists and `report.json` embeds it.
 
 ## Out of scope
 
-- Scoring (B6), bench rows (B7). No change to the egress images or `worker/*`, `lib/grants.py`,
-  `lib/agents.py`, existing tests (beyond additive changes to `tests/docker-stub.sh`).
+- Any container launch or round wiring (O1, B5). Do not modify `bin/delegate`, `lib/report.py`,
+  `lib/agents.py`, `lib/grants.py`, `worker/*`, or existing tests.
 
 ## Verify
 
 Mid-round, `tests/test_e2e_harness.sh`'s hygiene check blames untracked deliverables; the harness
 commits before the chain's verify runs. If that is the only failure mid-round, report it; never
-edit that test.
+edit that test. The **cage check** fails if this step changed any sandbox function or file
+(R19: orchestrator code; `docs/specs/b-design.md` §Who writes what) — never "fix" it by editing
+the check; leave the sandbox code alone and report what you needed under DEVIATIONS.
 
 ```bash
-set -o pipefail && bash -n bin/delegate && python3 -m py_compile lib/*.py && [ -f tests/test_bench_telemetry.sh ] && for f in tests/test_*.sh; do l=/tmp/gate-$(basename "$f" .sh).log; env -u DELEGATE_EVIDENCE_DIR bash "$f" >"$l" 2>&1 || { echo "GATE FAIL $f"; grep -h FAIL "$l" | head -20; exit 1; }; done && ! git diff --name-only delegate/b-4-agent-round | grep -qvE '^docs/specs/b-|^bin/delegate$|^lib/llmlog\.py$|^lib/filetimeline\.py$|^lib/report\.py$|^config\.example\.env$|^docs/reference\.md$|^tests/docker-stub\.sh$|^tests/test_bench_telemetry\.sh$' && echo GATE-OK
+set -o pipefail && bash -n bin/delegate && python3 -m py_compile lib/*.py && [ -f tests/test_bench_telemetry.sh ] && for f in tests/test_*.sh; do l=/tmp/gate-$(basename "$f" .sh).log; env -u DELEGATE_EVIDENCE_DIR bash "$f" >"$l" 2>&1 || { echo "GATE FAIL $f"; grep -h FAIL "$l" | head -20; exit 1; }; done && for fn in run_worker run_worker_docker run_worker_native ensure_network ensure_egress ensure_task_egress host_args read_mount_args make_guard_shims; do cmp -s <(git show bench:bin/delegate | sed -n "/^$fn() {/,/^}/p") <(sed -n "/^$fn() {/,/^}/p" bin/delegate) || { echo "CAGE CHANGED $fn (R19: orchestrator code)"; exit 1; }; done && { git diff --quiet bench -- lib/grants.py worker/egress.Dockerfile worker/egress-entrypoint.sh worker/entrypoint.sh lib/render-opencode-config.py worker/agent-launch || { echo "CAGE CHANGED files (R19: orchestrator code)"; exit 1; }; } && ! git diff --name-only delegate/b-3-agent-profiles | grep -qvE '^docs/specs/b-|^lib/llmlog\.py$|^lib/filetimeline\.py$|^tests/test_bench_telemetry\.sh$' && echo GATE-OK
 ```
 
 ## Report format

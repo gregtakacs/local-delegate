@@ -1,8 +1,8 @@
 # Task B7: `delegate bench run` — sessions, fixtures, leak guard, runs, scoring, `benchmark` rows
 
 `"hard": true` — this step turns plan and bundle data into `delegate` command lines and decides
-what an agent's sandbox may contain (the hidden-check leak guard, the mount check): security
-relevant. Slice B step 7 of 10 (`docs/specs/b-design.md` §Conditions and plans, §Scoring,
+what an agent's sandbox may contain (the hidden-check leak guard, the setup check): security
+relevant. Slice B step 7 of 10, chain segment 2 (`docs/specs/b-design.md` §Conditions and plans, §Scoring,
 §Row schemas `benchmark`, R9–R12, R17).
 
 ## Goal
@@ -19,8 +19,7 @@ session is resumable; nothing is run twice for the same (case, condition, repeat
   field), §Trust and security summary, Decisions 2 and 4.
 - `lib/bench.py` (B1: `load_plan`, `run_matrix`, `load_case`, `case_hash`, `benchmark_row`,
   `new_run_id`, `session_id`), `lib/ledger.py` (`append`, `read_rows`, the `round` row fields),
-  `lib/agents.py` (`load_profile`, `version_checked`), `lib/endpoints.py` (resolve), `lib/grants.py`
-  (`resolve` — to validate a condition's grants and read their mount/secret paths).
+  `lib/agents.py` (`load_profile`, `setup_paths`, `version_checked`); `bin/delegate models` (B2).
 - `evals/run.sh` — fixture building today (setup.sh, `git init`, the eval commit identity) and
   the `rules_ref` archive trick; reuse both behaviours.
 - `bin/delegate` `cmd_run` (task id = `<repo basename>-<name slug>`), meta.env format (`%q`),
@@ -43,11 +42,15 @@ order and each run's `delegate` argv (as a JSON list per line) and runs nothing.
   `plan.json` = the normalized plan + `seed` + `case_hashes` (`{case: hash}` at start) +
   `delegate_version`.
 - Before the first run: every condition's `agent` loads (`kind` checked against `mode`:
-  own-harness needs `kind = "command"`), every `endpoint` resolves, every condition's `grants`
-  resolve via `grants.resolve(gdir, names, [], runner="docker")`; any failure → error, nothing run.
-- **Mount check**: for every grant of every condition, no `ro`/`rw` mount and no secret path may be
-  equal to, inside, or a parent of the bundle roots (`evals/cases`, `evals/review-cases`, their
-  realpaths) → error `grant G mounts P, which contains benchmark bundles (R12)`.
+  own-harness needs `kind = "command"`); **R18**: `delegate models --json` (through
+  `DELEGATE_BENCH_BIN`) is run once and every
+  delegate-mode condition's `model` (or `DELEGATE_MODEL` when empty) must be in its list, else
+  `model M is not served by the configured endpoint (delegate models lists what is)`; any failure
+  → error, nothing run.
+- **Setup check**: for every own-harness profile, no `[setup] paths` entry, resolved under
+  `$HOME` (realpath), may be equal to, inside, or a parent of the bundle roots (`evals/cases`,
+  `evals/review-cases`, their realpaths) → error `agent A copies P, which contains benchmark
+  bundles (R12)`. (The delegate repo under a copied path would put hidden checks in the sandbox.)
 - Resume: rows already in the ledger with `kind == "benchmark"` and this `session` mark their
   `(case, condition, repeat)` done; those are skipped.
 - Before each run the case's `case_hash` is recomputed; a mismatch with `plan.json` stops the
@@ -74,8 +77,8 @@ order and each run's `delegate` argv (as a JSON list per line) and runs nothing.
 5. Run (argv list, `subprocess.run`, never a shell; `DELEGATE_BENCH_BIN` overrides
    `$DELEGATE_HOME/bin/delegate` for tests):
    `run <case>/spec.md --repo <repo> --name <run_id> --timeout <TIMEOUT> [--verify <VERIFY>]
-   [--service postgres]` plus, delegate mode: `[--endpoint E] [--model M] [--effort X]`;
-   own-harness: `--agent A [--model M] [--effort X] [--endpoint E] [--grant G]...`.
+   [--service postgres]` plus, delegate mode: `[--model M] [--effort X]`; own-harness: `--agent A
+   [--model M] [--effort X]`. No `--grant`, no `--read`.
    Environment: inherited, plus `DELEGATE_FILE_TIMELINE=1`, `DELEGATE_READ_PATHS=` (empty: no
    configured reference mounts in a benchmark), `DELEGATE_PROGRESS` as inherited, and
    `DELEGATE_RULES_DIR` when step 4 applies. Output to `runs/<run_id>/run.log`.
@@ -109,12 +112,13 @@ order and each run's `delegate` argv (as a JSON list per line) and runs nothing.
 ### `tests/test_bench_run.sh` — create
 
 Offline. Temp `DELEGATE_STATE`, `DELEGATE_LEDGER`, `DELEGATE_BENCH_CASES` (two tiny cases written
-by the test: one `setup.sh` that writes a file, one that exits 1), a temp grants dir and agents
-dir, and a fake `delegate` (`DELEGATE_BENCH_BIN`) that records its argv and environment, and
+by the test: one `setup.sh` that writes a file, one that exits 1), a temp agents dir, and a fake `delegate`
+(`DELEGATE_BENCH_BIN`) that records its argv and environment, answers `models --json` with a
+fixed list, and
 plays `run` (creates `$DELEGATE_STATE/<id>/meta.env` with `%q` values, a worktree with a change
 committed on top of the fixture, `rounds/1/report.json` with `files`/`llm` sections), `score`
 (writes `score.json` and `final/`), `rm`. At least:
-1. Two conditions (delegate with endpoint/model/effort; own-harness with agent/model/grant) ×
+1. Two conditions (delegate with model/effort; own-harness with agent/model/effort) ×
    one good case × repeat 2 → 4 rows, each with every `BENCHMARK_FIELDS` key, the right `mode`,
    `endpoint`, `model`, `hidden_all`, diff numbers, telemetry list; the recorded argv lists match
    the contract exactly, and each env had `DELEGATE_FILE_TIMELINE=1` and empty
@@ -124,8 +128,9 @@ committed on top of the fixture, `rounds/1/report.json` with `files`/`llm` secti
    3 of the 4 rows) → exactly 1 new run.
 4. Leak guard: a case whose `setup.sh` copies `hidden/check.mjs` (≥ 32 bytes) into the fixture →
    `leak-refused`, no `run` call.
-5. A grant with `mounts.ro` = the cases root → refused before any run; a secret path inside it →
-   refused.
+5. R18: a delegate-mode model the fake's `models` list lacks → refused before any run, message
+   names it; an owner profile whose `[setup] paths` includes a path that is (a parent of) the cases
+   root under a temp `HOME` → refused before any run.
 6. A changed `hidden/check.sh` between two runs of one session → the session stops with the
    bundle-changed message.
 7. `rules_ref: "HEAD"` → the fake saw `DELEGATE_RULES_DIR` pointing at an extracted `opencode/`
@@ -137,16 +142,18 @@ committed on top of the fixture, `rounds/1/report.json` with `files`/`llm` secti
 
 - Review (B9), report (B10), `evals/run.sh` (B10). No change to `bin/delegate` beyond the `bench
   run` usage line and dispatch (if B1's dispatch already forwards, no change at all); no change to
-  `lib/grants.py`, `lib/agents.py`, `lib/endpoints.py` (import only) or existing tests.
+  `lib/grants.py`, `lib/agents.py` (import only), the O1 functions (cage check) or existing tests.
 
 ## Verify
 
 Mid-round, `tests/test_e2e_harness.sh`'s hygiene check blames untracked deliverables; the harness
 commits before the chain's verify runs. If that is the only failure mid-round, report it; never
-edit that test.
+edit that test. The **cage check** fails if this step changed any sandbox function or file
+(R19: orchestrator code; `docs/specs/b-design.md` §Who writes what) — never "fix" it by editing
+the check; leave the sandbox code alone and report what you needed under DEVIATIONS.
 
 ```bash
-set -o pipefail && bash -n bin/delegate && python3 -m py_compile lib/*.py && [ -f tests/test_bench_run.sh ] && for f in tests/test_*.sh; do l=/tmp/gate-$(basename "$f" .sh).log; env -u DELEGATE_EVIDENCE_DIR bash "$f" >"$l" 2>&1 || { echo "GATE FAIL $f"; grep -h FAIL "$l" | head -20; exit 1; }; done && ! git diff --name-only delegate/b-6-score | grep -qvE '^docs/specs/b-|^bin/delegate$|^lib/bench\.py$|^tests/test_bench_run\.sh$' && echo GATE-OK
+set -o pipefail && bash -n bin/delegate && python3 -m py_compile lib/*.py && [ -f tests/test_bench_run.sh ] && for f in tests/test_*.sh; do l=/tmp/gate-$(basename "$f" .sh).log; env -u DELEGATE_EVIDENCE_DIR bash "$f" >"$l" 2>&1 || { echo "GATE FAIL $f"; grep -h FAIL "$l" | head -20; exit 1; }; done && for fn in run_worker run_worker_docker run_worker_native ensure_network ensure_egress ensure_task_egress host_args read_mount_args make_guard_shims net_args run_limited run_scorer agent_seed_home agent_scrub_home llmlog_start llmlog_stop; do cmp -s <(git show b-o1-sandbox:bin/delegate | sed -n "/^$fn() {/,/^}/p") <(sed -n "/^$fn() {/,/^}/p" bin/delegate) || { echo "CAGE CHANGED $fn (R19: orchestrator code)"; exit 1; }; done && { git diff --quiet b-o1-sandbox -- lib/grants.py worker/egress.Dockerfile worker/egress-entrypoint.sh worker/entrypoint.sh lib/render-opencode-config.py worker/agent-launch || { echo "CAGE CHANGED files (R19: orchestrator code)"; exit 1; }; } && ! git diff --name-only delegate/b-6-score | grep -qvE '^docs/specs/b-|^bin/delegate$|^lib/bench\.py$|^tests/test_bench_run\.sh$' && echo GATE-OK
 ```
 
 ## Report format
