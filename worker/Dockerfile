@@ -15,7 +15,10 @@
 # ships 2.47.3. Check ``git --version`` before downgrading the base.
 FROM node:24-trixie-slim
 
-ARG OPENCODE_VERSION=1.18.30
+# OpenCode 2 (the plugins and the worker config are 2.x-only). The release asset is pinned by sha256,
+# the same pin codehub's OpenCode image uses.
+ARG OPENCODE_VERSION=2.3.0
+ARG OPENCODE_SHA256=fc0f81522aceeabac47693d88389efa2bc517ce74c2c38fd6967819fcc6e4d3b
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl git unzip zip xz-utils jq less procps \
@@ -27,9 +30,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/* \
  && corepack enable
 
-# Pinned through npm rather than the curl installer so a rebuild is reproducible.
-RUN npm install -g "opencode-ai@${OPENCODE_VERSION}" && npm cache clean --force \
- && opencode --version
+# Verify-then-extract, then ask the binary its version ("opencode v<version>"; anything else fails
+# the build). Nothing may be left at /tmp/opencode: OpenCode makes that directory at start and dies
+# with EEXIST if a file is in the way (found by codehub's first real build, 2026-11-15).
+RUN set -eu; \
+    curl -fsSL -o /tmp/opencode.tgz \
+        "https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-x64.tar.gz"; \
+    echo "${OPENCODE_SHA256}  /tmp/opencode.tgz" | sha256sum --check; \
+    mkdir /tmp/opencode-dl; \
+    tar -xzf /tmp/opencode.tgz -C /tmp/opencode-dl opencode; \
+    install -m 0755 /tmp/opencode-dl/opencode /usr/local/bin/opencode; \
+    rm -rf /tmp/opencode-dl /tmp/opencode.tgz
+RUN opencode --version | grep -qx "opencode v${OPENCODE_VERSION}"
+# Never self-update inside a worker: this flag plus the rendered config's "autoupdate": false.
+ENV OPENCODE_DISABLE_AUTOUPDATE=1
 
 # HOME is bind-mounted per task (so opencode's session store survives between review
 # rounds). The cache dirs are named volumes shared across tasks; 1777 so the volume's first

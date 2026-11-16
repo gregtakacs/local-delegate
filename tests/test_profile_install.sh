@@ -239,13 +239,12 @@ check "move: one entry per SessionStart matcher" "[ \"\$(jq '$VS' 'len(d[\"hooks
 check "move: re-run is byte-stable" "cp '$VS' '$T/move.before' && python3 '$V/data/v9/lib/merge-claude-settings.py' --home '$V/home' --install '$V/data/current' --real-dir '$V/data/v9' >/dev/null 2>&1 && cmp -s '$VS' '$T/move.before'"
 check "move: hooks check ok" "python3 '$V/data/v9/lib/merge-claude-settings.py' --home '$V/home' --install '$V/data/current' --real-dir '$V/data/v9' --check hooks | grep -q 'hooks: ok'"
 
-# ---- OpenCode 2.x: the plugins-v2 entries are linked, and doctor reads OpenCode's own log ----
+# ---- OpenCode 2: the plugins are linked, the todo flag is on, and doctor reads OpenCode's own log ----
 # 2.3.0 refused every 1.x-shaped plugin while doctor's link check said "ok" (2026-11-16).
 H2="$T/oc2"; mkhome "$H2"; mkdir -p "$H2/.claude"
 DELEGATE_OPENCODE_MAJOR=2 inst "$H2" >/dev/null 2>&1
-check "oc2: plugin links point at the plugins-v2 entries" \
-  "readlink -f '$(PLUG "$H2" todo-loop)' | grep -q '/opencode/plugins-v2/todo-loop.js\$'"
-check "oc2: adapt.js is a module, never linked as a plugin" "[ ! -e '$H2/.config/opencode/plugins/adapt.js' ]"
+check "oc2: plugin links point at the tree's plugins" \
+  "readlink -f '$(PLUG "$H2" todo-loop)' | grep -q '/opencode/plugins/todo-loop.js\$'"
 check "oc2: experimental.todo turned on (2.x hides todowrite behind it)" \
   "python3 -c \"import json;assert json.load(open('$(OCFG "$H2")'))['experimental']['todo'] is True\""
 L2="$H2/.local/share/opencode/log"; mkdir -p "$L2"
@@ -266,15 +265,12 @@ echo "timestamp=$ts level=WARN message=\"failed to load plugin\" target=$H2/.con
 out=$(DELEGATE_OPENCODE_MAJOR=2 doc "$H2" 2>&1); rc=$?
 check "oc2: a failure logged after the link -> FAIL naming the plugin" \
   "[ $rc -eq 1 ] && printf %s \"\$out\" | grep -qE '^plugins: +FAIL.*failed to load: todo-loop'"
-ln -sfn "$here/opencode/plugins/todo-loop.js" "$(PLUG "$H2" todo-loop)"
-out=$(DELEGATE_OPENCODE_MAJOR=2 doc "$H2" 2>&1); rc=$?
-check "oc2: a 1.x-shaped link on opencode 2 -> FAIL wrong-api" \
-  "[ $rc -eq 1 ] && printf %s \"\$out\" | grep -qE '^plugins: +FAIL.*wrong-api: todo-loop.*wants plugins-v2'"
-H1="$T/oc1"; mkhome "$H1"; mkdir -p "$H1/.claude"; inst "$H1" >/dev/null 2>&1
-check "oc1 (the stub reports 0.0.0): links stay on the 1.x plugins" \
-  "readlink -f '$(PLUG "$H1" todo-loop)' | grep -q '/opencode/plugins/todo-loop.js\$'"
-check "oc1: no experimental key, no todo-tool doctor line" \
-  "python3 -c \"import json;assert 'experimental' not in json.load(open('$(OCFG "$H1")'))\" && ! doc '$H1' 2>&1 | grep -q '^todo tool:'"
+out=$(DELEGATE_OPENCODE_MAJOR=1 doc "$H2" 2>&1); rc=$?
+check "opencode 1: doctor FAILs, these plugins need OpenCode 2" \
+  "[ $rc -eq 1 ] && printf %s \"\$out\" | grep -qE '^plugins: +FAIL.*cannot load these OpenCode 2 plugins'"
+H1="$T/oc1"; mkhome "$H1"; mkdir -p "$H1/.claude"
+out=$(DELEGATE_OPENCODE_MAJOR=1 inst "$H1" 2>&1)
+check "opencode 1: install says delegate needs OpenCode 2" "printf %s \"\$out\" | grep -q 'need OpenCode 2 or later'"
 
 # A settings.json carrying an in-file _delegate key (an earlier build of the helper) is migrated:
 # the key leaves settings.json, the record lands in the sibling file, doctor's hooks check FAILs first.

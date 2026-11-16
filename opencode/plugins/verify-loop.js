@@ -1,14 +1,15 @@
-// verify-loop.js — mechanical enforcement of the worker's UI verification rule.
+// verify-loop.js — mechanical enforcement of the worker's UI verification rule (OpenCode 2 plugin).
 //
 // AGENTS.md is advisory: a model under context pressure drops it. This makes the nudge
-// unavoidable by appending a reminder to the tool result of every UI file edit. opencode's
-// own system prompt already instructs the model to act on <system-reminder> tags found in
-// tool results, which is why this hook is the cheapest reliable lever available.
+// unavoidable by appending a reminder to the tool result of a UI file edit. opencode's own system
+// prompt already instructs the model to act on reminder tags found in tool results, which is why
+// this hook is the cheapest reliable lever available.
 //
-// Seeded into ~/.config/opencode/plugins/ by entrypoint.sh — that dir is regenerated per
-// boot and is not a named volume, so it must be copied, not mounted.
+// Seeded into the worker's ~/.config/opencode/plugins/ per task, and linked into an interactive
+// install's plugins dir by install.sh.
 
 const UI = /\.(html?|css|jsx|tsx|vue|svelte|astro|mdx)$/i;
+const EDIT_TOOLS = new Set(["write", "edit", "apply_patch"]);
 
 // sessionID -> Set of UI files edited and not yet visually verified.
 const pending = new Map();
@@ -21,47 +22,60 @@ const pending = new Map();
 // file per session keeps the gate and removes the incentive to one-shot.
 const reminded = new Set();
 
-// NOTE: there is deliberately NO `experimental.chat.system.transform` hook here. Pushing
-// into `output.system` makes opencode emit system content the vLLM chat template rejects
-// with "System message must be at the beginning." (reproduced against an SGLang-served model),
-// which kills every request in the session -- a total failure, not a degraded
-// one. §1 and §4 of AGENTS.md already carry the instruction, and the reminder below is the
-// part that actually fires at the moment of decision. Do not re-add a system hook without
-// re-testing against the openai-compatible endpoint.
-export const VerifyLoop = async () => ({
-  "tool.execute.after": async (input, output) => {
-    const isEdit = input.tool === "write" || input.tool === "edit" || input.tool === "apply_patch";
-    if (!isEdit) return;
+// NOTE: there is deliberately NO system-prompt hook adding a system message here. Extra system
+// content made opencode emit a second system message, which the vLLM/SGLang chat template rejects
+// with "System message must be at the beginning." (reproduced against an SGLang-served model) —
+// every request in the session fails. Compaction context below is appended to the system text the
+// request already has, never a new message. Re-test against the openai-compatible endpoint before
+// changing that.
 
-    const args = input.args || {};
-    const file = args.filePath || args.path || args.file_path || "";
-    if (!UI.test(file)) return;
+function appendToResult(result, extra) {
+  const r = result || {};
+  if (typeof r.content === "string") return { ...r, content: r.content + extra };
+  if (Array.isArray(r.content)) return { ...r, content: [...r.content, { type: "text", text: extra }] };
+  const shown = r.output === undefined ? "" : typeof r.output === "string" ? r.output : JSON.stringify(r.output);
+  return { ...r, content: shown ? [{ type: "text", text: shown }, { type: "text", text: extra }] : [{ type: "text", text: extra }] };
+}
 
-    if (!pending.has(input.sessionID)) pending.set(input.sessionID, new Set());
-    pending.get(input.sessionID).add(file);
+function appendToSystem(event, text) {
+  const parts = event.system;
+  if (parts.length) parts[parts.length - 1].text += "\n\n" + text;
+  else parts.push({ type: "text", text });
+}
 
-    // One reminder per file per session. The compaction hook below is the repeat mechanism.
-    const seen = input.sessionID + "\0" + file;
-    if (reminded.has(seen)) return;
-    reminded.add(seen);
+export default {
+  id: "delegate-verify-loop",
+  async setup(context) {
+    await context.tool.hook("execute.after", (event) => {
+      if (event.status !== "completed" || !EDIT_TOOLS.has(event.tool)) return;
+      const args = event.input || {};
+      const file = args.path || args.filePath || args.file_path || "";
+      if (!UI.test(file)) return;
 
-    output.output +=
-      "\n\n<verify-reminder>UI file changed: " + file +
-      ". Per ~/.config/opencode/rules/verify-ui.md \u00a7C: GROW THE ARTIFACT FIRST (\u00a7C's edit" +
-      " cap makes one-shot writes impossible \u2014 grow it feature by feature until the \u00a710" +
-      " enumeration is exhausted), then do" +
-      " ONE sweep: capture and READ a screenshot of every user-visible state of it (`delegate-shot` is" +
-      " in the image) before ending the task. Do not verify between passes, and do not one-shot" +
-      " the whole file to dodge this reminder. If no renderer is available, say so out loud.</verify-reminder>";
+      if (!pending.has(event.sessionID)) pending.set(event.sessionID, new Set());
+      pending.get(event.sessionID).add(file);
+
+      // One reminder per file per session. The compaction hook below is the repeat mechanism.
+      const seen = event.sessionID + "\0" + file;
+      if (reminded.has(seen)) return;
+      reminded.add(seen);
+
+      event.result = appendToResult(event.result,
+        "\n\n<verify-reminder>UI file changed: " + file +
+        ". Per ~/.config/opencode/rules/verify-ui.md §C: GROW THE ARTIFACT FIRST (§C's edit" +
+        " cap makes one-shot writes impossible — grow it feature by feature until the §10" +
+        " enumeration is exhausted), then do" +
+        " ONE sweep: capture and READ a screenshot of every user-visible state of it (`delegate-shot` is" +
+        " in the image) before ending the task. Do not verify between passes, and do not one-shot" +
+        " the whole file to dodge this reminder. If no renderer is available, say so out loud.</verify-reminder>");
+    });
+
+    // Compaction is where a long session loses "I still owe a screenshot". Re-inject it.
+    await context.session.hook("compaction", (event) => {
+      const open = [...(pending.get(event.sessionID) || [])];
+      if (!open.length) return;
+      appendToSystem(event, "UI files edited this session that still lack visual verification" +
+        " (verify-ui.md before finishing): " + JSON.stringify(open));
+    });
   },
-
-  // Compaction is where a long session loses "I still owe a screenshot". Re-inject it.
-  "experimental.session.compacting": async (_input, output) => {
-    const open = [...pending.values()].flatMap((s) => [...s]);
-    if (!open.length) return;
-    output.context.push(
-      "UI files edited this session that still lack visual verification (verify-ui.md" +
-        " before finishing): " + JSON.stringify(open),
-    );
-  },
-});
+};

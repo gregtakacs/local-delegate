@@ -163,7 +163,7 @@ your code to the internet. Don't hand it code you can't share with your model's 
 ## Status
 
 It's used daily, by one person, on real projects, and has been run on Linux and WSL, not yet on
-macOS. The worker harness is opencode at a pinned version.
+macOS. The worker harness is OpenCode 2 at a pinned version (2.3.0, sha256-pinned in `worker/Dockerfile`); interactive installs need OpenCode 2 too, since the plugins are 2.x-only.
 
 Issues and pull requests are welcome. If you change the sandbox or grant code, bring tests
 (`tests/test_grants.sh`, `DOCKER=1` for the proxy).

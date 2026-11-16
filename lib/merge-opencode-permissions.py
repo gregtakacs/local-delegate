@@ -6,8 +6,8 @@ prompt for its own skill, loads the delegate rules, and carries the harness perm
 It only ever ADDS entries it needs and are still absent; it never rewrites a value you set
 (policy `deny` rows excepted: those are refused, not shadowed); and it refuses to touch a config
 that is not valid JSON. What is ours is recorded under the top-level `_delegate` key (opencode's
-loader ignores unknown keys — verified against 1.18.30; if a later validator ever objects the
-marker moves to a sibling delegate-managed.json, design §8.1).
+loader ignores unknown keys — verified against 2.3.0 with `opencode debug config`; if a later
+validator ever objects the marker moves to a sibling delegate-managed.json, design §8.1).
 
   --config PATH        default: $XDG_CONFIG_HOME|~/.config /opencode/opencode.json
   --skill-dir PATH     the skills dir entry that was linked (for external_directory)

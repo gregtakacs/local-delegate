@@ -21,7 +21,7 @@ check "core exists"           '[ -f "$core" ]'
 check "opencode adapter exists" '[ -f "$ao" ]'
 check "claude adapter exists" '[ -f "$ac" ]'
 check "worker adapter exists" '[ -f "$dr" ]'
-stray=$(ls -A "$here/opencode" | grep -vE '^(delegate-rules\.md|plugins|plugins-v2|rules)$' || true)
+stray=$(ls -A "$here/opencode" | grep -vE '^(delegate-rules\.md|plugins|rules)$' || true)
 check "interactive rules file is gone (only the post-split layout ships)" '[ -z "$stray" ]'
 
 # ---------------------------------------------------- core neutrality (no tools/paths) ----

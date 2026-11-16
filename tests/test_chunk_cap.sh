@@ -1,6 +1,7 @@
 #!/bin/bash
 # chunk-cap.js honours DELEGATE_CHUNK_CAP (default 8000, Cline's own is 6000; invalid or < 1000 -> 8000).
-# Runs the plugin's hook in node inside the worker image, since the host may have no node.
+# Runs the OpenCode 2 plugin (its tool.transform wrap) in node inside the worker image, since the host
+# may have no node.
 # Also: with no config, bin/delegate hands workers 8000 (delegate's default); a config value wins.
 set -u
 here=$(cd "$(dirname "$0")/.." && pwd)
@@ -15,10 +16,13 @@ probe() { # cap-env-or-"unset" tool field size -> prints "ok" or "rejected:<limi
   local envarg=(); [ "$1" != unset ] && envarg=(-e "DELEGATE_CHUNK_CAP=$1")
   docker run --rm "${envarg[@]}" -v "$here/opencode/plugins/chunk-cap.js:/p/chunk-cap.mjs:ro" \
     --entrypoint node "$img" --input-type=module -e "
-      const { ChunkCap } = await import('/p/chunk-cap.mjs');
-      const h = await ChunkCap();
+      const { default: plugin } = await import('/p/chunk-cap.mjs');
+      const tools = Object.fromEntries(['write', 'edit', 'shell'].map((id) =>
+        [id, { description: id, execute: async () => ({ content: 'ran' }) }]));
+      await plugin.setup({ tool: { transform: async (cb) => cb({ update: (id, fn) => tools[id] && fn(tools[id]) }) },
+                           session: { hook: async () => {} } });
       const args = { ['$3']: 'x'.repeat($4) };
-      try { await h['tool.execute.before']({ tool: '$2', args }, {}); console.log('ok'); }
+      try { await tools['$2'].execute(args, {}); console.log('ok'); }
       catch (e) { console.log('rejected:' + (e.message.match(/limit of (\d+)/) || [])[1]); }"
 }
 check() { local got; got=$(probe "$1" "$2" "$3" "$4"); if [ "$got" = "$5" ]; then echo "ok   cap=$1 $2.$3=$4 -> $got"; else echo "FAIL cap=$1 $2.$3=$4 -> $got (want $5)"; fail=1; fi; }
@@ -29,7 +33,7 @@ check 8000  write content    8000 ok
 check 8000  write content    8001 rejected:8000
 check 8000  edit  newString  8500 rejected:8000
 check 8000  edit  oldString  8500 rejected:8000
-check 8000  bash  command    50000 ok
+check 8000  shell command    50000 ok
 check junk  write content    8001 rejected:8000
 check 500   write content    8001 rejected:8000
 exit $fail

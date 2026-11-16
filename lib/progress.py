@@ -28,7 +28,7 @@ RECENT = 30
 # any harness overhead between the round's events), so the dashboard can show a duty-cycle
 # without guessing: a round that reads "87% exec" really did spend 87% of its clock in bash.
 TOOL_BUCKETS = {
-    "bash": "exec",
+    "shell": "exec", "bash": "exec",  # OpenCode 2 names it `shell`; `bash` reads old events
     "read": "files", "write": "files", "edit": "files", "multiedit": "files",
     "multi_edit": "files", "apply_patch": "files", "list": "files",
     "grep": "search", "glob": "search",
@@ -60,7 +60,7 @@ def tool_line(part, worktree):
     tool = part.get("tool") or "?"
     st = part.get("state") or {}
     inp = st.get("input") or {}
-    if tool == "bash":
+    if tool in ("shell", "bash"):
         txt = inp.get("command") or inp.get("description") or ""
     elif tool in ("read", "edit", "write", "apply_patch", "list"):
         txt = short_path(inp.get("filePath") or inp.get("path") or "", worktree)

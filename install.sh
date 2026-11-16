@@ -165,10 +165,8 @@ if command -v opencode >/dev/null; then
     oc_extra+=(--permission-policy "$DELEGATE_HOME/policy/harness-permissions.json" --render)
   fi
   # OpenCode 2 ships todowrite behind a feature flag that is off in releases; the rules require
-  # a todo list, so a 2.x install turns it on (2026-11-16: 2.3.0 offered the model no todo tool).
-  if [ "$(opencode_major)" -ge 2 ] 2>/dev/null; then
-    oc_extra+=(--flag todo)
-  fi
+  # a todo list, so the install turns it on (2026-11-16: 2.3.0 offered the model no todo tool).
+  oc_extra+=(--flag todo)
   python3 "$DELEGATE_HOME/lib/merge-opencode-permissions.py" \
     --skill-dir "$skill_dir/delegate" --real-dir "$DELEGATE_REAL/claude/skills/delegate" \
     ${oc_extra[@]+"${oc_extra[@]}"} \
@@ -183,23 +181,20 @@ if command -v opencode >/dev/null; then
   fi
   # The harness plugins (design §5.1), each a link through the install tree so an update is
   # picked up without re-running the installer. Same left-alone care as every other link.
-  # OpenCode 2.x rejects the 1.x plugin shape (all four failed to load on 2.3.0, 2026-11-16), so a
-  # 2.x install links the opencode/plugins-v2 entries, which wrap the same 1.x logic. Only the
-  # plugin names are linked: plugins-v2/adapt.js is a module, not a plugin.
-  oc_plugin_src=plugins
-  if [ "$(opencode_major)" -ge 2 ] 2>/dev/null && [ -d "$DELEGATE_HOME/opencode/plugins-v2" ]; then
-    oc_plugin_src=plugins-v2
+  # The plugins are OpenCode 2 plugins (a default-exported {id, setup}); 1.x cannot load them.
+  oc_major_found=$(opencode_major)
+  if [ "$oc_major_found" -lt 2 ] 2>/dev/null && [ "$oc_major_found" -ge 1 ] 2>/dev/null; then
+    say "NOTE: opencode $(opencode --version 2>/dev/null) found; delegate's plugins and config need OpenCode 2 or later"
   fi
   if ls "$DELEGATE_HOME"/opencode/plugins/*.js >/dev/null 2>&1; then
     mkdir -p "$oc_plugin_dir"
     for p in "$DELEGATE_HOME"/opencode/plugins/*.js; do
       name=$(basename "$p"); dest="$oc_plugin_dir/$name"
-      [ -f "$DELEGATE_HOME/opencode/$oc_plugin_src/$name" ] || continue
       if [ -e "$dest" ] && [ ! -L "$dest" ]; then
         say "NOTE: $dest exists and is not a symlink; left alone"
       else
-        ln -sfn "$DELEGATE_HOME/opencode/$oc_plugin_src/$name" "$dest"
-        say "opencode plugin -> $dest ($oc_plugin_src)"
+        ln -sfn "$DELEGATE_HOME/opencode/plugins/$name" "$dest"
+        say "opencode plugin -> $dest"
       fi
     done
   fi

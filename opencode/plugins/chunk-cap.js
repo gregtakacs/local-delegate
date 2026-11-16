@@ -21,17 +21,17 @@
 // patch. Cline's model had the identical hole and never used it. Reproducing Cline includes
 // reproducing the hole; a run that exploits it is measured behavior, not a bug to patch.
 //
-// REJECTION MECHANISM (verified against installed 1.17.10 source): Plugin.trigger runs hooks via
-// bare `yield* Effect.promise(fn)` with no catch, and tool.execute.before fires before the real
-// tool — a throw fails the call and the message reaches the model as the tool result. Same
-// position, same shape as Cline's validator.
+// REJECTION MECHANISM (OpenCode 2, @opencode/plugin 2.3.0): `context.tool.transform` wraps the
+// write and edit tools' `execute`, so the size check runs before the real tool; a throw fails the
+// call and the message reaches the model as the tool result. Same position, same shape as Cline's
+// validator. (OpenCode 1 did this from a `tool.execute.before` hook; 2.x has no such rejection
+// point, so the wrap is the faithful equivalent.)
 //
-// tool.definition (packages/plugin/src/index.ts): "Modify tool definitions (description and
-// parameters) sent to LLM". Cline's model sees the size guidance BEFORE the call, in the tool
-// schema; opencode's own descriptions say nothing. We APPEND (never replace — opencode's own
-// descriptions document opencode's args and must stay true) Cline's constraint sentences verbatim,
-// minus clauses describing Cline-tool mechanics opencode lacks (insert_line), since those would be
-// false here.
+// The same transform edits the tool descriptions. Cline's model sees the size guidance BEFORE the
+// call, in the tool schema; opencode's own descriptions say nothing. We APPEND (never replace —
+// opencode's own descriptions document opencode's args and must stay true) Cline's constraint
+// sentences verbatim, minus clauses describing Cline-tool mechanics opencode lacks (insert_line),
+// since those would be false here. OpenCode 2 names the shell tool `shell` (1.x: `bash`).
 
 // Cline schemas.ts:10 is INPUT_ARG_CHAR_LIMIT = 6000. delegate departs from it deliberately, twice:
 // the default is 8000, and DELEGATE_CHUNK_CAP lets an operator raise or lower the cap for their own
@@ -62,35 +62,40 @@ const CLINE_NEW_TEXT_GUIDE =
 const CLINE_BASH_GUIDE =
   `MUST keep input short and concise (within ${INPUT_ARG_CHAR_LIMIT * 2} characters) to avoid timeouts.`;
 
-export const ChunkCap = async () => ({
-  "tool.execute.before": async (input, output) => {
-    // apply_patch deliberately absent: Cline's apply_patch is not size-gated. See DODGE above.
-    if (input.tool !== "write" && input.tool !== "edit") return;
+// The payload fields each capped tool carries in OpenCode 2 (write: path/content; edit:
+// path/oldString/newString). Cline checks old_text before new_text; that order is preserved.
+const PAYLOADS = {
+  write: ["content"], // Cline: editor create path, capped via new_text
+  edit: ["oldString", "newString"],
+};
+const GUIDES = {
+  edit: "\n" + CLINE_OLD_TEXT_GUIDE + "\n" + CLINE_NEW_TEXT_GUIDE,
+  write: "\n" + CLINE_NEW_TEXT_GUIDE,
+  shell: "\n" + CLINE_BASH_GUIDE,
+};
 
-    // args live in input.args in production (the shape verify-loop.js runs against); the docs
-    // show before-hooks seeing output.args. Read both, prefer whichever is populated.
-    const args = (input && input.args) || (output && output.args) || {};
-    const payloads =
-      input.tool === "write"
-        ? [["content", args.content]] // Cline: editor create path, capped via new_text
-        : [["oldString", args.oldString], ["newString", args.newString]];
-
-    for (const [field, value] of payloads) {
-      if (typeof value === "string" && value.length > INPUT_ARG_CHAR_LIMIT) {
-        throw new Error(sizeError(field, value));
+export default {
+  id: "delegate-chunk-cap",
+  async setup(context) {
+    await context.tool.transform((editor) => {
+      for (const id of Object.keys(GUIDES)) {
+        editor.update(id, (tool) => {
+          tool.description = (tool.description || "") + GUIDES[id];
+          const fields = PAYLOADS[id];
+          if (!fields) return;
+          const execute = tool.execute;
+          tool.execute = async (input, ctx) => {
+            const args = input || {};
+            for (const field of fields) {
+              const value = args[field];
+              if (typeof value === "string" && value.length > INPUT_ARG_CHAR_LIMIT) {
+                throw new Error(sizeError(field, value));
+              }
+            }
+            return execute(input, ctx);
+          };
+        });
       }
-    }
+    });
   },
-
-  // Cline's pre-call steer, made letter-portable: append Cline's schema guidance to the exact
-  // descriptions the model reads, so our model gets the same pre-call steer Cline's got.
-  "tool.definition": async (input, output) => {
-    if (input.toolID === "edit") {
-      output.description += "\n" + CLINE_OLD_TEXT_GUIDE + "\n" + CLINE_NEW_TEXT_GUIDE;
-    } else if (input.toolID === "write") {
-      output.description += "\n" + CLINE_NEW_TEXT_GUIDE;
-    } else if (input.toolID === "bash") {
-      output.description += "\n" + CLINE_BASH_GUIDE;
-    }
-  },
-});
+};

@@ -73,6 +73,9 @@ config = {
     "$schema": "https://opencode.ai/config.json",
     "autoupdate": False,
     "share": "disabled",
+    # OpenCode 2 ships todowrite behind this flag, off in release builds; the worker rules require a
+    # todo list (and the dashboard shows it), so it must be on.
+    "experimental": {"todo": True},
     # Not AGENTS.md: opencode auto-loads ~/.config/opencode/AGENTS.md as global rules, and
     # naming it explicitly too would load the rules twice.
     "instructions": [f"{cfg_dir}/delegate-rules.md"],

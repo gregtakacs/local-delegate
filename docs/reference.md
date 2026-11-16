@@ -47,10 +47,9 @@ produced markedly more complete and better-checked work:
 - `opencode/plugins/todo-loop.js`: nudges the model to keep its todo list current (and survives
   context compaction): once at the first file change made with no list, once at 12 calls with no
   list, and every 8 calls while a list is stale. `claude/hooks/todo-loop.py` is the Claude Code twin.
-- `opencode/plugins-v2/`: the OpenCode 2.x entries for the four plugins. 2.x only loads a default-exported
-  `{id, setup}` definition, so each entry wraps the 1.x plugin unchanged through `adapt.js`; `install.sh` links
-  these when `opencode --version` is 2 or later, and `delegate doctor` reads OpenCode's log to confirm they
-  loaded. The worker image (OpenCode 1.x) keeps loading `opencode/plugins/`.
+- The four plugins are OpenCode 2 plugins (a default-exported `{id, setup}` registering `tool.hook`,
+  `tool.transform` and `session.hook`); OpenCode 1 cannot load them. `delegate doctor` reads OpenCode's log
+  to confirm they loaded, and the install turns on `experimental.todo` (2.x ships `todowrite` off).
 - `opencode/plugins/verify-loop.js` + `opencode/rules/verify-ui.md`: any UI change has to be checked
   by **screenshots the model reads back**, via `delegate-shot` (headless chromium in the image),
   across states and viewports.

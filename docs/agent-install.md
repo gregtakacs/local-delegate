@@ -92,9 +92,7 @@ tool calls**, streaming and non-streaming. It must end with `doctor: OK`.
   opencode lists commands there, not skills. A WARN means re-run `install.sh`; a file of the
   person's own at that path is left alone.
 - Confirm the skill's frontmatter parses: run `tests/test_skill_frontmatter.sh` (a `: ` inside the
-  unquoted `description:` line makes opencode skip the skill silently). On opencode 1.x you can
-  also run `opencode debug skill | grep -c '"name": "delegate"'` (must print 1); opencode 2.x
-  removed that subcommand.
+  unquoted `description:` line makes opencode skip the skill silently).
 - If the tool-call probe fails, the model or server isn't usable as a worker yet. That's usually a
   server flag for tool parsing (for example vLLM's `--enable-auto-tool-choice --tool-call-parser
   …`). Report what doctor printed; don't change their server for them.

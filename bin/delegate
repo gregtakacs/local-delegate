@@ -8,7 +8,7 @@
 set -euo pipefail
 
 DELEGATE_HOME=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)
-VERSION=0.3.2
+VERSION=0.4.0
 
 die()  { echo "delegate: $*" >&2; exit 1; }
 warn() { echo "delegate: $*" >&2; }
@@ -658,7 +658,7 @@ do_round() {
   phase "$rd" worker
   progress_start "$n" "$rd" "$start"
   RL_STDIN="$rd/prompt.md" run_limited "$secs" "r$n" run_worker "r$n" \
-    opencode run --format json --title "$ID round $n" -m "delegate/$MODEL" "${sess_args[@]}" \
+    opencode run --standalone --format json --title "$ID round $n" -m "delegate/$MODEL" "${sess_args[@]}" \
     > "$rd/events.jsonl" 2> "$rd/stderr.log" || rc=$?
   end=$(date +%s)
   reap_leftovers "round $n" "$rd/stderr.log"
@@ -702,7 +702,7 @@ for l in open(sys.argv[1]):
     phase "$rd" worker
     rc=0
     run_limited "$left" "r${n}n" run_worker "r${n}n" \
-      opencode run --format json -m "delegate/$MODEL" --session "$SESSION" "$msg" \
+      opencode run --standalone --format json -m "delegate/$MODEL" --session "$SESSION" "$msg" \
       >> "$rd/events.jsonl" 2>> "$rd/stderr.log" || rc=$?
     end=$(date +%s)
     reap_leftovers "round $n (nudge)" "$rd/stderr.log"
@@ -1531,11 +1531,11 @@ harness_drift() {
     *) emit rules ok "${rdet:-both sides in place}" ;;
   esac; fi
 
-  # plugins: four links, each resolving into this install tree, into the entries the installed
-  # OpenCode can load (2.x rejects the 1.x shape: opencode/plugins-v2 wraps it), and — on 2.x —
-  # actually loaded: OpenCode's own log must show each one loading, not failing, after the link was
-  # made (a link check alone passed for months while 2.3.0 refused every plugin, 2026-11-16).
-  local p missing= offtree= wrongapi= oc_major want_src=plugins real
+  # plugins: four links, each resolving into this install tree, and actually loaded: OpenCode's own
+  # log must show each one loading, not failing, after the link was made (a link check alone passed
+  # while 2.3.0 refused every 1.x-shaped plugin, 2026-11-16). They are OpenCode 2 plugins; 1.x
+  # cannot load them.
+  local p missing= offtree= oc_major real
   # relative XDG dirs are dropped for the call: OpenCode logs under XDG_DATA_HOME even for --version
   local xdg_unset= xv
   for xv in XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME XDG_CONFIG_HOME; do
@@ -1543,27 +1543,25 @@ harness_drift() {
   done
   oc_major=$(env $xdg_unset opencode --version 2>/dev/null | sed -nE 's/[^0-9]*([0-9]+)\..*/\1/p' | head -1)
   oc_major=${DELEGATE_OPENCODE_MAJOR:-${oc_major:-0}}
-  if [ "$oc_major" -ge 2 ] 2>/dev/null && [ -d "$DELEGATE_HOME/opencode/plugins-v2" ]; then
-    want_src=plugins-v2
-  fi
   for p in chunk-cap notes-loop todo-loop verify-loop; do
     [ -f "$DELEGATE_HOME/opencode/plugins/$p.js" ] || continue
     if [ -L "$oc_plug/$p.js" ]; then
       real=$(readlink -f "$oc_plug/$p.js" 2>/dev/null)
       case "$real" in
-        "$DELEGATE_HOME"/*|"$(readlink -f "$DELEGATE_HOME")"/*)
-          [ "$real" = "$(readlink -f "$DELEGATE_HOME/opencode/$want_src/$p.js")" ] || wrongapi="$wrongapi $p" ;;
+        "$DELEGATE_HOME"/*|"$(readlink -f "$DELEGATE_HOME")"/*) ;;
         *) offtree="$offtree $p" ;;
       esac
     else
       missing="$missing $p"
     fi
   done
-  if [ -n "$missing$offtree$wrongapi" ]; then
-    emit plugins fail "missing:${missing:-} off-tree:${offtree:-} wrong-api:${wrongapi:-} (opencode $oc_major wants $want_src); fix: re-run install.sh"
+  if [ -n "$missing$offtree" ]; then
+    emit plugins fail "missing:${missing:-} off-tree:${offtree:-}; fix: re-run install.sh"
   elif [ ! -d "$oc_plug" ]; then
     emit plugins warn "no opencode plugins dir; fix: re-run install.sh"
-  elif [ "$want_src" = plugins-v2 ]; then
+  elif [ "$oc_major" = 1 ]; then
+    emit plugins fail "opencode $(opencode --version 2>/dev/null) cannot load these OpenCode 2 plugins; fix: install OpenCode 2 or later"
+  elif [ "$oc_major" -ge 2 ] 2>/dev/null; then
     local oc_log=${XDG_DATA_HOME:-$HOME/.local/share}/opencode/log/opencode.log lstate
     lstate=$(python3 - "$oc_log" "$oc_plug" <<'PYEOF' 2>/dev/null
 import os, re, sys, datetime
@@ -1593,11 +1591,11 @@ PYEOF
     local lfail=${lstate%% waiting=*} lwait=${lstate##* waiting=}
     lfail=${lfail#failed=}
     if [ -z "$lstate" ]; then
-      emit plugins warn "four plugin links (2.x entries); could not read $oc_log to confirm they load"
+      emit plugins warn "four plugin links; could not read $oc_log to confirm they load"
     elif [ -n "$lfail" ]; then
       emit plugins fail "opencode $oc_major failed to load: $lfail (see $oc_log); fix: re-run install.sh, then restart opencode"
     elif [ -n "$lwait" ]; then
-      emit plugins warn "four plugin links (2.x entries); not loaded since they were linked: $lwait; fix: restart opencode"
+      emit plugins warn "four plugin links; not loaded since they were linked: $lwait; fix: restart opencode"
     else
       emit plugins ok "four plugin links, loaded by opencode $oc_major (its log shows no failure)"
     fi
