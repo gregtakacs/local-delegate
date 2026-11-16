@@ -70,6 +70,28 @@ for i in $(seq 1 13); do
 done
 [ "$barren_hit" = 1 ] && ok "no-list session nudges once at call 12 (CALLS_WITHOUT_LIST)" || bad "barren nudge wrong (hit=$barren_hit)"
 
+# First file change with no list: one reminder right away (harness-core §5 "before editing"),
+# never again in that session; a session that already has a list never gets it.
+e=$(SID)
+emk(){ ev hook_event_name=PostToolUse session_id="$e" cwd=/tmp tool_name="$1" tool_use_id="$2" tool_input='{"file_path":"/tmp/x.py","content":"x"}'; }
+o1=$(out "$(emk Write edit-1)")
+if has "<todo-reminder>You changed a file and there is no task list yet" "$o1" && ! has "todowrite" "$o1" && ! has "opencode" "$o1"; then
+  ok "first Write with no list nudges at once, Claude wording"
+else
+  bad "first-edit nudge missing or wrong: $o1"
+fi
+o2=$(out "$(emk Edit edit-2)")
+has "<todo-reminder>" "$o2" && bad "first-edit nudge repeated on the second change" || ok "first-edit nudge fires once per session"
+l=$(SID)
+lmk(){ ev hook_event_name=PostToolUse session_id="$l" cwd=/tmp tool_name="$1" tool_use_id="$2" tool_input="$3"; }
+out "$(lmk TodoWrite lst-0 '{"todos":[]}')" >/dev/null
+o3=$(out "$(lmk Write lst-1 '{"file_path":"/tmp/y.py","content":"y"}')")
+has "<todo-reminder>" "$o3" && bad "first-edit nudge fired although a list exists" || ok "no first-edit nudge when the session already has a list"
+r=$(SID)
+rmk(){ ev hook_event_name=PostToolUse session_id="$r" cwd=/tmp tool_name=Read tool_use_id="$1" tool_input='{"file_path":"/tmp/z.py"}'; }
+o4=$(out "$(rmk rd-1)")
+has "<todo-reminder>" "$o4" && bad "a read-only call got the first-edit nudge" || ok "read-only calls never get the first-edit nudge"
+
 # --- 2. verify-loop: once per UI file per session, points at the UI rule §C ---------------------
 s2=$(SID)
 w(){ ev hook_event_name=PostToolUse session_id="$s2" cwd=/tmp tool_name=Write tool_use_id="$1" tool_input="$2"; }

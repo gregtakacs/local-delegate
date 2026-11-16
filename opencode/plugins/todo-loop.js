@@ -21,13 +21,19 @@ const CALLS_WITHOUT_LIST = 12;  // no list at all: long enough that only real ta
 // 10 pending. A nudge is a short appended line, cheap at this spacing; a compliant model resets
 // the budget anyway.
 const MAX_NUDGES = 8;
+// File-changing tools (opencode 2: write/edit; opencode 1 also patch/multiedit). The rules say
+// "call the todo tool before editing" (harness-core §5); the 12-call barren window let a 6-call
+// multi-file task finish with no list at all (live, 2026-11-15), so the FIRST change made with no
+// list gets one reminder right away. Once per session, like barren: never per edit.
+const EDIT_TOOLS = new Set(["write", "edit", "patch", "multiedit", "apply_patch"]);
 
-// sessionID -> { calls, nudges, everListed }
+// sessionID -> { calls, nudges, everListed, editNudged }
 const state = new Map();
 
 export const TodoLoop = async () => ({
   "tool.execute.after": async (input, output) => {
-    const st = state.get(input.sessionID) || { calls: 0, nudges: 0, everListed: false };
+    const st = state.get(input.sessionID) ||
+      { calls: 0, nudges: 0, everListed: false, editNudged: false };
     state.set(input.sessionID, st);
 
     if (input.tool === "todowrite" || input.tool === "todo") {
@@ -38,6 +44,17 @@ export const TodoLoop = async () => ({
     }
 
     st.calls += 1;
+
+    if (!st.everListed && !st.editNudged && EDIT_TOOLS.has(input.tool) &&
+        st.nudges < MAX_NUDGES) {
+      st.editNudged = true;
+      st.nudges += 1;
+      output.output +=
+        "\n\n<todo-reminder>You changed a file and this session has no todo list yet. The" +
+        " harness rules ask for the list before editing: write it now with todowrite, with the" +
+        " real steps including verification, and keep its statuses current.</todo-reminder>";
+      return;
+    }
 
     // stale: fires at 6, then at 12 (threshold advances with each nudge). barren: strict
     // equality so the no-list nudge can only ever fire once, not every call past 12.

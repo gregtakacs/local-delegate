@@ -25,6 +25,7 @@ DEFAULT = {
     "calls": 0,          # tool calls since the last todowrite (todo-loop)
     "nudges": 0,         # todo nudges sent this window (todo-loop MAX_NUDGES)
     "ever_listed": False,  # has this session written a todo list yet
+    "edit_nudged": False,  # the first-file-change-without-a-list reminder already fired
     "ui_reminded": [],   # UI files the verify reminder already fired for (once per file)
     "ui_pending": [],    # UI files edited, not yet visually verified (compaction re-injection)
     "done_ids": [],      # tool_use_ids already processed (idempotency across matchers)

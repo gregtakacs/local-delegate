@@ -20,6 +20,13 @@ import hooklib  # noqa: E402
 CALLS_BETWEEN_NUDGES = 8  # todo-loop.js:17
 CALLS_WITHOUT_LIST = 12   # todo-loop.js:18
 MAX_NUDGES = 8            # todo-loop.js:23
+# todo-loop.js EDIT_TOOLS, in Claude Code's names: the first file change made with no list gets one
+# reminder right away (harness-core §5 "before editing"; the 12-call window missed a 6-call task).
+EDIT_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
+EDIT_REMINDER = ("<todo-reminder>You changed a file and there is no task list yet. The harness"
+                 " rules ask for the list before editing: if this session has a todo or task-list"
+                 " tool, write the list now, with the real steps including verification, and keep"
+                 " its statuses current.</todo-reminder>")
 
 
 def reminder(st):
@@ -52,6 +59,11 @@ def handle(event, st):
         return ""
 
     st["calls"] += 1
+    if (not st["ever_listed"] and not st.get("edit_nudged") and tool in EDIT_TOOLS
+            and st["nudges"] < MAX_NUDGES):
+        st["edit_nudged"] = True
+        st["nudges"] += 1
+        return EDIT_REMINDER
     stale = st["ever_listed"] and st["calls"] >= CALLS_BETWEEN_NUDGES * (st["nudges"] + 1)
     barren = (not st["ever_listed"]) and st["calls"] == CALLS_WITHOUT_LIST
     if (not stale and not barren) or st["nudges"] >= MAX_NUDGES:

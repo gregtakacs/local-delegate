@@ -45,7 +45,8 @@ produced markedly more complete and better-checked work:
   Cline's own message. This forces skeleton-then-grow instead
   of one giant write, which is where most of the missing features came from.
 - `opencode/plugins/todo-loop.js`: nudges the model to keep its todo list current (and survives
-  context compaction).
+  context compaction): once at the first file change made with no list, once at 12 calls with no
+  list, and every 8 calls while a list is stale. `claude/hooks/todo-loop.py` is the Claude Code twin.
 - `opencode/plugins/verify-loop.js` + `opencode/rules/verify-ui.md`: any UI change has to be checked
   by **screenshots the model reads back**, via `delegate-shot` (headless chromium in the image),
   across states and viewports.
