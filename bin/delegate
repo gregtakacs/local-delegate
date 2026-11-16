@@ -734,7 +734,7 @@ finalize_round() { # N RD VERIFY RC START END
     for c in $COPIED; do wgit reset -q -- "$c" 2>/dev/null || true; done
     if ! wgit diff --cached --quiet; then
       wgit commit -q --no-verify -m "delegate($SLUG): round $n$([ "$was_aborted" = 1 ] && echo ' (aborted)')" \
-        -m "${status_line:-STATUS: unknown}" -m "model: $MODEL"
+        -m "${status_line:-STATUS: unknown}"
     fi )
   commit=$(wgit rev-parse HEAD)
   fi
