@@ -144,7 +144,7 @@ delegate rm app-add-handles --delete-branch
 | `--github` | let the worker clone private GitHub repos and call the API with `DELEGATE_GITHUB_TOKEN_FILE`. Use a fine-grained **read-only** token |
 | `--egress filtered\|open` | network policy for this task (default `DELEGATE_EGRESS=filtered`, see Security model) |
 | `--service postgres` | a throwaway Postgres just for this task, as `$DATABASE_URL`. Removed by `delegate rm` |
-| `--hard` | use `DELEGATE_MODEL_HARD` (e.g. a high-reasoning-effort variant) |
+| `--hard` | use `DELEGATE_MODEL_HARD` (e.g. a high-reasoning-effort variant); recorded as the task's `EFFORT=hard` in its `meta.env`, and on every round's ledger row |
 | `--timeout S` | wall-clock limit for the round (default `DELEGATE_TIMEOUT`, 90 min) |
 
 `delegate peek ID` prints a compact snapshot of the current round (state, steps, tool calls,
@@ -160,6 +160,136 @@ partial work is still committed, and the round reports as `aborted`.
 `continue --verify CMD` replaces the task's verify from then on (later rounds, `delegate verify`, and a chain's retries), and a chain retry always runs the plan's current verify, so editing a step's verify in the plan and re-running the chain takes effect.
 
 **Flagged rounds are kept.** When a worker's closing message reports planted instructions, a prompt injection or an exfiltration attempt, `delegate rm` (and `prune`, `chain --clean`) copies that round's events, report and prompt to `$DELEGATE_STATE/quarantine/<id>-<time>/` before removing the task, so the source can still be traced. Nothing else is kept.
+
+### The telemetry ledger (`delegate ledger`)
+
+One append-only JSONL file — `$DELEGATE_LEDGER`, default `$DELEGATE_STATE/ledger/events.jsonl` —
+holds one summary row per round, verdict, review and timeline, across every task: the input to
+trend model performance over time (see *Measuring changes*) without walking task directories,
+and without a database. Rows carry identity, times, token and cost totals — **never** prompts,
+tool inputs or outputs — so the ledger is safe to keep after `delegate rm` and to read by hand.
+The lifecycle writes it from host-side code; nothing a worker does touches it.
+
+```bash
+delegate ledger show                          # every accepted row, oldest first
+delegate ledger show --kind round             # one kind only
+delegate ledger append --kind round --task-dir ~/.local/state/delegate/abc123 \
+    --file round.json --fields exit_code=0    # write one row (used by lifecycle, and you)
+```
+
+`append` takes `--kind` (round|verdict|review|timeline) plus the row from `--task-dir DIR`'s
+`meta.env` (identity defaults), `--file F` (a JSON object; `-` reads stdin) and the
+`--status`/`--exit`/`--task`/`--fields k=v,...` scalars, each overriding the one before it.
+`append --kind round --round-from-report R --events E` is the round-row form: it builds the
+row in the design's field order from a finished round's `report.json`, its `meta.env`, and
+the condition flags (`--endpoint`, `--effort`, `--rules-hash`, `--timeout-s`, …), then appends
+the round's `timeline` row from the same single parse of `E` — token sums included. The
+lifecycle does exactly that at every round's end, in `finalize_round`; `DELEGATE_LEDGER=off`
+skips the writes silently. Effort is recorded per task as `EFFORT` in `meta.env` (`--hard`
+writes `hard`; a continue with `--hard` upgrades it; an absent key reads `normal`) and every
+round row takes its effort from that record, not from the command line.
+Writing is never fatal: anything wrong — bad kind, unreadable file, unwritable path — is one
+`warn:` line and exit 0, because telemetry must never cost a round its result. `show` skips
+malformed lines and kinds this build doesn't know, counting them in one warning. The R4
+derivation itself — a round's `events.jsonl` -> the steps, tool times and token totals a
+`timeline` row holds, with no tool payload ever read — is `lib/ledger.py`'s `derive_timeline`,
+and the file protocol that module's own. `lib/ledger.py` is importable; `delegate ledger` is its
+whole command-line surface, and the only writer on the command line.
+
+**Your verdicts: `delegate ledger review`.** When a step lands you record what you decided; the
+ledger stores it as one `review` row, linked to that task's round rows by task id — a verdict is
+data you supply, never something inferred from a review document:
+
+```bash
+delegate ledger review abc123 --verdict fixed --bugs high=1,medium=2 --lines-changed 40 \
+    --note "auth check moved out of the handler"
+delegate ledger review abc123 --verdict accepted --lines-changed 0   # --round: the task's newest
+```
+
+`--verdict` is `accepted` (as-is), `fixed` (accepted after your changes) or `rejected`; a missing
+or other value is refused, because this row *is* the verdict. `--bugs` names only the severities
+you found, so an omitted one is 0, and `--round` defaults to the newest `round` row the ledger
+already holds for that task (empty when it holds none). A review row carries no diff content and
+no file lists — only the note you typed. As everywhere in the ledger, a row that cannot be
+written costs one `warn:` line and exit 0, never the command's result.
+
+**Once, before the history is pruned: `delegate ledger import`.** Task records are kept until
+`delegate prune` reaches them (14 days by default), and the ledger is what outlives them — so run
+this once, by hand:
+
+```bash
+delegate ledger import                      # every task under $DELEGATE_STATE
+delegate ledger import --state /path/to/state
+```
+
+For every round dir that still holds a `report.json` it writes the same pair a live round writes,
+through the same builders, marked `source:"import"`. The record no longer carries what the round
+conditions were — the endpoint URL, delegate version, rules hash, image stamp, timeout, edit cap,
+rounds running beside it — so those fields stay empty rather than guessed: an unrecorded endpoint
+is an empty one. `round_start` comes from the first timeline step, `round_end` from the report's
+own mtime, and effort is *inferred* from the round's model against `DELEGATE_MODEL_HARD`, labelled
+`effort_source:"inferred"` so the provenance travels with the value. It is idempotent: a
+(task id, round) the ledger already has — from this import or from a live round — is skipped, so
+running it twice adds nothing. It prints one line, `imported N, skipped M, tasks K`, and a record
+it cannot read is one `warn:` line plus a skipped count: the command's exit code stays 0. It
+never writes, moves or deletes anything under `$DELEGATE_STATE` except the ledger itself.
+
+### Project totals (`delegate stats`)
+
+```bash
+delegate stats [--chain NAME] [--repo R] [--since YYYY-MM-DD] [--json]
+```
+
+One read over the ledger: per-project totals grouped by `repo/chain`, `model`, `effort`.
+It reads only `round` and `review` rows, filters by the `kind` the writer puts first
+*before* parsing anything, and prints three tables — one per concern — and a total line:
+
+```
+delegate stats — by project (4 of 9 round rows)
+repo/chain        model  effort  rounds          ok%  wall               tok(in/out/r)  cache%  retries  source
+acme/widgets/t-1  m1     hard         5   75% review  17m30s avg 3m30s     1050/105/10     55%        4  -
+...
+```
+
+- **`ok%`** is per task (one step's outcome): a reviewed task counts when its latest verdict is
+  `accepted` or `fixed`, an unreviewed one when its last round ended `done`. The column labels
+  the source: `review` (every task reviewed), `status` (none), `mixed` (some).
+- **`repo`** groups by project: the main checkout, so a chain run from a linked worktree joins
+  its repository's rows.
+- **`retries`** is `sum(max(round) − 1)` over the group's task ids, read off the rows'
+  `round` field and from nowhere else.
+- **`wall`** is the `duration_s` sum with its mean beside it; **`tok(in/out/r)`** sums the
+  row fields; **`cache%`** is `cache_read / (cache_read + input_tokens)` per round, meaned
+  over the rounds that had tokens to ratio.
+- The **findings** table (review rows only) counts verdicts, bugs by severity, and reviewer
+  lines changed; the **failures** table carries `tool_errors`, `errors`, and per-status
+  counts, with `worker-error`, `timeout`, `truncated` and `done-but-verify-failed` always
+  spelled out, at their zero when a run did not use them.
+- Import-sourced rows are labelled: the `source` column reads `N import`, and a group made
+  of import rows takes its `ok%` from statuses, since no review rows exist for an import.
+- `--chain`, `--repo` match a row's own field exactly and `--since` filters on `ts`
+  (date-first, inclusive); they combine, and a filter that keeps nothing prints zeroes.
+- `--json` prints the same facts as one object: `groups`, `findings`, `failures`,
+  `totals`, `counts`, the echoed `filters`, and the line counts `skipped` (lines this
+  build cannot use) and `filtered` (known kinds stats does not read). No warning goes to
+  stderr in that mode; the document carries the count itself.
+
+Stats never writes: not to the ledger, not to the state dir. A ledger that is missing,
+empty, unreadable, or off (`DELEGATE_LEDGER=off`) is empty tables at exit 0 — an owner
+who has not run a round yet has a real answer of zero, not a failure. Lines that are
+malformed, of an unknown kind, or of a schema this build does not know are counted on
+exactly one `warn:` line and dropped; stats prints no prices and no dollar amounts,
+because R6 asked for counts.
+
+### What comes after T
+
+Slice B (benchmarks) will add `benchmark` and `verdict` rows to the same ledger under
+rulings R9–R17: fixed bundles extended from `evals/cases/` (R9), several runs per
+condition with medians and spread (R10), delegate mode and own-harness mode (R11/R13),
+hidden checks never in the sandbox (R12), sandbox-only auto-approval with owner-written
+grants (R14), blind review with verdicts recorded before matching (R15), pluggable and
+benchmarked reviewers (R16), lost history accepted (R17). The `KINDS` registry from T1
+reserves both kind names; slice B defines the fields.
 
 ### Grants: named access beyond the sandbox (`--grant NAME`)
 
@@ -439,6 +569,7 @@ runs them against any revision of the worker rules. See [evals/README.md](../eva
 ```
 bin/delegate                  the CLI (bash)
 lib/report.py                 events.jsonl + git + verify -> report.md / report.json
+lib/ledger.py                 the telemetry ledger: JSONL protocol, R4 timeline derivation
 lib/taskstate.py              one read-only task state -> `top`, `list`, `chain` (and a CLI)
 lib/probe.py                  tool-calling probe used by doctor
 lib/render-opencode-config.py DELEGATE_* env -> opencode.json (one provider, key by file)

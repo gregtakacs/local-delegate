@@ -68,6 +68,7 @@ is the order `lib/ledger.py` writes for the kind.
 | field | source (code read this round) |
 |---|---|
 | `task_id`, `slug`, `repo` | `meta.env` `ID`/`SLUG`/`REPO` (written bin/delegate ~921) |
+| `project` | the main checkout: `meta.env` `GIT_COMMON` minus `/.git` (falls back to `repo`); `stats` groups the repo axis by it, so a chain run from a linked worktree joins its project (added in review) |
 | `chain`, `step` | `meta.env` `CHAIN` (empty for single tasks); `step` = `SLUG` — under a chain the slug is the step name (`lib/chain.py` names tasks `delegate/<chain>/<step>`) |
 | `run_id` | the task id (`meta.env` `ID`). `chain` and `step` already group a chain's rows; slice B gives its benchmark runs their own ids |
 | `round` | `report.json` `round` (lib/report.py) |

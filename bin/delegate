@@ -64,6 +64,9 @@ install_line() {
 : "${DELEGATE_IMAGE_ALLOW_STALE:=0}"    # 1: keep this image whatever the stamp says (deliberate hot-patch)
 : "${DELEGATE_WORKTREES:=$HOME/delegate-worktrees}"
 : "${DELEGATE_STATE:=${XDG_STATE_HOME:-$HOME/.local/state}/delegate}"
+: "${DELEGATE_LEDGER:=}"                 # append-only telemetry ledger (JSONL). Empty = $DELEGATE_STATE/ledger/events.jsonl,
+                                         # beside the task dirs and outside every repo; the environment wins over this file,
+                                         # and a CLI/config override wins over both (lib/ledger.py resolve_ledger).
 : "${DELEGATE_CACHE:=${XDG_CACHE_HOME:-$HOME/.cache}/delegate}"   # caches shared by every task
 : "${DELEGATE_PRUNE_DAYS:=14}"
 : "${DELEGATE_GRANTS_DIR:=${XDG_CONFIG_HOME:-$HOME/.config}/delegate/grants}"   # named access profiles (docs/grants.md)     # `delegate run` removes tasks idle this long (0: never)
@@ -86,6 +89,7 @@ install_line() {
 DELEGATE_API_KEY_FILE=$(expand "$DELEGATE_API_KEY_FILE")
 DELEGATE_WORKTREES=$(expand "$DELEGATE_WORKTREES")
 DELEGATE_STATE=$(expand "$DELEGATE_STATE")
+DELEGATE_LEDGER=$(expand "$DELEGATE_LEDGER")
 DELEGATE_RULES_DIR=$(expand "$DELEGATE_RULES_DIR")
 [ -n "$DELEGATE_GITHUB_TOKEN_FILE" ] && DELEGATE_GITHUB_TOKEN_FILE=$(expand "$DELEGATE_GITHUB_TOKEN_FILE")
 
@@ -766,6 +770,9 @@ finalize_round() { # N RD VERIFY RC START END
     cat "$rd/.report-stdout"
   fi
   rm -f "$rd/.report-stdout"
+  # The ledger rows for this round (t-2): after report.json exists, before anything that ends
+  # the round. ledger_record_round cannot fail us — worst case it is one `warn:` line.
+  ledger_record_round "$n" "$rd" "$rc" "$start" "$end" || true
   rm -f "$TASK_DIR/.abort"
   grant_unlock
   progress_stop "$rd" "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["status"])' "$rd/report.json" 2>/dev/null || echo finished)"
@@ -776,6 +783,7 @@ cmd_run() {
   local spec="" repo="" name="" base="" model="" verify="" service="" secs=$DELEGATE_TIMEOUT
   local copies=() reads=() github=0 egress=$DELEGATE_EGRESS orbfile="" orbflash=0 here=0 raw=0
   local grants=() allows=()
+  local effort=normal          # the row records this, never the CLI (spec t-2 §Effort)
   while [ $# -gt 0 ]; do
     case "$1" in
       --here) here=1; shift ;;
@@ -791,7 +799,7 @@ cmd_run() {
       --name) name=$2; shift 2 ;;
       --base) base=$2; shift 2 ;;
       --model) model=$2; shift 2 ;;
-      --hard) model=$DELEGATE_MODEL_HARD; shift ;;
+      --hard) model=$DELEGATE_MODEL_HARD; effort=hard; shift ;;
       --verify) verify=$2; shift 2 ;;
       --copy) copies+=("$2"); shift 2 ;;
       --service) service=$2; shift 2 ;;
@@ -926,6 +934,7 @@ cmd_run() {
     printf 'ORB_FILE=%q\nORB_LABEL=%q\nORB_BASE_MAC=%q\nORB_SERIAL=%q\nORB_IP=%q\nORB_FLASH=%q\n' \
       "$ORB_FILE" "$ORB_LABEL" "$ORB_BASE_MAC" "$ORB_SERIAL" "$ORB_IP" "${ORB_FLASH:-0}"
     printf 'GRANTS=%q\nALLOW=%q\n' "$GRANTS" "$ALLOW"
+    printf 'EFFORT=%q\n' "$effort"
     # the chain this step belongs to, when `delegate chain` started it (it exports DELEGATE_CHAIN):
     # `delegate top` groups the step under its chain and names the plan that resumes it.
     printf 'CHAIN=%q\n' "${DELEGATE_CHAIN:-}"
@@ -981,7 +990,7 @@ cmd_continue() {
   local id=${1:-}
   [ -n "$id" ] || die "usage: delegate continue ID (FEEDBACK.md | - | -m \"text\"...) [--verify CMD] [--model M | --hard] [--timeout S]"
   shift
-  local fb="" msgs=() verify_set=0 verify="" secs=$DELEGATE_TIMEOUT model="" raw_flag=""
+  local fb="" msgs=() verify_set=0 verify="" secs=$DELEGATE_TIMEOUT model="" raw_flag="" effort=normal
   while [ $# -gt 0 ]; do
     case "$1" in
       --raw) raw_flag=1; shift ;;
@@ -989,7 +998,7 @@ cmd_continue() {
       -m|--message) msgs+=("$2"); shift 2 ;;
       --verify) verify=$2; verify_set=1; shift 2 ;;
       --model) model=$2; shift 2 ;;
-      --hard) model=$DELEGATE_MODEL_HARD; shift ;;
+      --hard) model=$DELEGATE_MODEL_HARD; effort=hard; shift ;;
       --timeout) secs=$2; shift 2 ;;
       -) fb=-; shift ;;
       -*) die "continue: unknown option $1" ;;
@@ -1010,6 +1019,8 @@ cmd_continue() {
     verify=$VERIFY
   fi
   [ -n "$model" ] && MODEL=$model
+  # `--hard` on continue upgrades the recorded effort; without it the record stands (t-2 §Effort).
+  if [ "$effort" = hard ] && [ "${EFFORT:-normal}" != hard ]; then meta_set EFFORT hard; EFFORT=hard; fi
   local n; n=$(( $(last_round) + 1 ))
   BASE_URL=$(pick_base_url) || die "no endpoint answered"
   lock_task
@@ -1764,6 +1775,587 @@ cmd_grant() { # list | show NAME [--allow G]...
   esac
 }
 
+# ---------------------------------------------------------------- ledger -----------
+# The telemetry ledger: one append-only JSONL file of summary rows, outside every repository and
+# outside the task dirs, so `prune`/`rm`/`chain --clean` never reach it (R2, docs/specs/t-design.md
+# §Location). Host-side only — a worker has no ledger. Writing is never fatal: a lifecycle call
+# site follows lib/chain.py's `fire_hook`, so a failed append costs one warn line and changes
+# neither a round's status nor its exit code. The file protocol itself is lib/ledger.py's.
+ledger_warn() { warn "warn: ledger $1: $2"; }              # one line, never fatal
+
+ledger_resolve() { # the ledger file in force, exactly as lib/ledger.py resolves it (creates nothing)
+  python3 - "$DELEGATE_HOME/lib" "$DELEGATE_LEDGER" "$DELEGATE_STATE" <<'PY'
+import os, sys
+sys.path.insert(0, sys.argv[1])
+import ledger
+print(ledger.resolve_ledger({"LEDGER": sys.argv[2], "DELEGATE_STATE": sys.argv[3]}, os.environ))
+PY
+}
+
+ledger_meta_fields() { # DIR -> NUL-separated field=value rows, from that task's meta.env
+  # The identity a row carries when the caller has no live task to load (T2 appends a finished
+  # round from its task dir). Sourced the way load_task sources it, and lowest precedence: a
+  # --file body or a flag still wins over these. EFFORT and MODEL are listed although only T2
+  # writes EFFORT, so a new meta key reaches rows without this file changing again.
+  ( set -a; . "$1/meta.env"; set +a
+    emit() { local v=${2:-}; [ -n "$v" ] && printf '%s=%s\0' "$1" "$v" || :; }
+    emit task_id "${ID:-}"; emit run_id "${ID:-}"; emit slug "${SLUG:-}"; emit step "${SLUG:-}"
+    emit repo "${REPO:-}";  emit chain "${CHAIN:-}"; emit base_ref "${BASE_REF:-}"
+    emit base_sha "${BASE_SHA:-}"; emit verify "${VERIFY:-}"; emit runner "${RUNNER:-}"
+    emit model "${MODEL:-}"; emit effort "${EFFORT:-}"
+    gc=${GIT_COMMON:-}; gc=${gc%/}; [ "${gc##*/}" = .git ] && gc=${gc%/.git}; emit project "$gc" )
+}
+
+ledger_append() { # --kind K [--task T] [--fields k=v[,k=v]...] [--task-dir D] [--status S] [--exit N] [--file F|-]
+  #           [round mode: --round-from-report R --events E --diffstat F --endpoint U --effort E
+  #            --effort-source S --delegate-version V --rules-hash H --image-stamp I --timeout-s N
+  #            --edit-cap N --parallel-rounds N --spec-hash H --round-start S --round-end E --source S]
+  local kind="" task="" status="" exitc="" file="" tdir=""
+  local -a fields=() pyextra=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --kind|--task|--status|--exit|--file|--task-dir)
+        [ $# -ge 2 ] || { ledger_warn append "missing value for $1"; return 0; }
+        case "$1" in
+          --kind) kind=$2 ;;      --task) task=$2 ;;        --status) status=$2 ;;
+          --exit) exitc=$2 ;;     --file) file=$2 ;;        --task-dir) tdir=$2 ;;
+        esac
+        shift 2 ;;
+      --round-from-report|--events|--diffstat|--endpoint|--effort|--effort-source| \
+      --delegate-version|--rules-hash|--image-stamp|--timeout-s|--edit-cap| \
+      --parallel-rounds|--spec-hash|--round-start|--round-end|--source)
+        [ $# -ge 2 ] || { ledger_warn append "missing value for $1"; return 0; }
+        # round-mode conditions; an empty value carries nothing, and the lib stores null.
+        [ -n "$2" ] && pyextra+=("$1" "$2")
+        shift 2 ;;
+      --fields)
+        [ $# -ge 2 ] || { ledger_warn append "missing value for $1"; return 0; }
+        fields+=("$2"); shift 2 ;;
+      *) ledger_warn append "unknown flag $1"; return 0 ;;   # T2 adds flags; an unknown one is a
+    esac                                                     # row we must not guess at
+  done
+  [ -n "$kind" ] || { ledger_warn append "--kind is required"; return 0; }
+  local -a meta=()
+  if [ -n "$tdir" ]; then
+    [ -f "$tdir/meta.env" ] || { ledger_warn append "no meta.env in $tdir"; return 0; }
+    mapfile -d '' -t meta < <(ledger_meta_fields "$tdir")
+  fi
+  local path
+  path=$(ledger_resolve) || { ledger_warn append "no ledger path resolves"; return 0; }
+  local -a pyargs=(--kind "$kind")
+  [ -n "$task" ]   && pyargs+=(--task "$task")
+  [ -n "$status" ] && pyargs+=(--status "$status")
+  [ -n "$exitc" ]  && pyargs+=(--exit "$exitc")
+  [ -n "$file" ]   && pyargs+=(--file "$file")
+  local m f
+  for m in "${meta[@]}";   do pyargs+=(--meta "$m");   done
+  for f in "${fields[@]}"; do pyargs+=(--field "$f"); done
+  pyargs+=(${pyextra[@]+"${pyextra[@]}"})
+
+  # The row is built and written by lib/ledger.py. The script itself arrives on stdin (this
+  # file's python idiom), so the caller's stdin travels on fd 3 for `--file -`.
+  local out="" rc=0
+  out=$(DELEGATE_LIB_DIR=$DELEGATE_HOME/lib python3 - "$path" "${pyargs[@]}" 3<&0 2>&1 <<'PY'
+import json, os, sys
+from datetime import datetime, timezone
+sys.path.insert(0, os.environ["DELEGATE_LIB_DIR"])
+import ledger
+
+
+def fail(msg):
+    print(msg, file=sys.stderr)
+    raise SystemExit(1)
+
+
+def parse_flags(argv):
+    flags = {"kind": "", "task": None, "status": None, "exit": None, "file": None,
+             "round-from-report": None, "events": None, "diffstat": None,
+             "endpoint": None, "effort": None, "effort-source": None,
+             "delegate-version": None, "rules-hash": None, "image-stamp": None,
+             "timeout-s": None, "edit-cap": None, "parallel-rounds": None,
+             "spec-hash": None, "round-start": None, "round-end": None,
+             "source": None}
+    meta, fields = [], []
+    while argv:
+        flag = argv.pop(0)
+        if not argv:
+            fail(f"{flag} needs a value")
+        value = argv.pop(0)
+        if flag in ("--meta", "--field"):
+            if flag == "--meta": meta.append(value)
+            else:                fields.append(value)
+            continue
+        key = flag[2:] if flag.startswith("--") else flag
+        if key not in flags:
+            fail(f"unknown flag {flag}")
+        flags[key] = value
+    return flags, meta, fields
+
+
+def parse_fields(specs):
+    """--fields k=v[,k=v]. A comma ends one value and starts the next pair, so every piece a key
+    collects is rejoined before it is typed: `todos=3,5` and `todos=3,todos=5` both read as the
+    comma-joined value "3,5", while a rejoin that is valid JSON keeps its JSON type (`n=3` an
+    int, `ids=[1,2]` a list) instead of degrading to a string."""
+    order, pieces, last = [], {}, None
+    for spec in specs:
+        for token in spec.split(","):
+            if not token:
+                continue
+            if "=" in token:
+                key, _, value = token.partition("=")
+                if not key:
+                    fail(f"--fields entry without a key: {token!r}")
+                last = key
+                if key not in pieces:
+                    pieces[key], order = [], order + [key]
+                pieces[key].append(value)
+            elif last is None:
+                fail(f"--fields entry with no key to continue: {token!r}")
+            else:
+                pieces[last].append(token)
+    out = {}
+    for key in order:
+        raw = ",".join(pieces[key])
+        try:
+            out[key] = json.loads(raw)
+        except ValueError:
+            out[key] = raw
+    return out
+
+
+def parse_body(src):
+    """The row body: a JSON object read from a file, or from the caller's stdin when src is '-'
+    (fd 3: the script itself is on stdin)."""
+    if not src:
+        return {}
+    try:
+        text = (os.fdopen(os.dup(3), "r", encoding="utf-8").read() if src == "-"
+                else open(src, encoding="utf-8").read())
+    except OSError as exc:
+        fail(f"cannot read --file {src}: {exc.strerror or exc}")
+    try:
+        body = json.loads(text)
+    except ValueError as exc:
+        fail(f"--file {src} is not JSON: {exc}")
+    if not isinstance(body, dict):
+        fail(f"--file {src} holds a JSON {type(body).__name__}, not an object")
+    return body
+
+
+def round_extra(flags, meta):
+    """The `extra` for one round row: meta.env identity first, then the condition flags
+    (a flag always outranks the record, matching the scalar mode's precedence). Values
+    arrive as strings; the builder types what it can. `diff_lines` is the one value read
+    from a file rather than a flag: the round's captured `git diff --stat` output."""
+    extra = {}
+    for item in meta:
+        key, sep, value = item.partition("=")
+        if sep and key:
+            extra[key] = value
+    for flag in ("endpoint", "effort", "diffstat", "events", "source"):
+        if flags.get(flag) is not None:
+            extra[flag.replace("-", "_")] = flags[flag]
+    for flag, field in (("effort-source", "effort_source"),
+                        ("delegate-version", "delegate_version"),
+                        ("rules-hash", "rules_hash"), ("image-stamp", "image_stamp"),
+                        ("timeout-s", "timeout_s"), ("edit-cap", "edit_cap"),
+                        ("parallel-rounds", "parallel_rounds"),
+                        ("spec-hash", "spec_hash"), ("round-start", "round_start"),
+                        ("round-end", "round_end"), ("task", "task_id"),
+                        ("status", "status"), ("exit", "exit")):
+        if flags.get(flag) is not None:
+            extra[field] = flags[flag]
+    if extra.get("diffstat"):
+        try:
+            with open(extra["diffstat"], encoding="utf-8") as f:
+                extra["diff_lines"] = ledger.parse_diffstat(f.read())
+        except OSError:
+            extra["diff_lines"] = None
+        extra.pop("diffstat")
+    return extra
+
+
+def main(argv):
+    path, argv = argv[0], argv[1:]
+    flags, meta, fields = parse_flags(argv)
+    kind = flags["kind"]
+    if not kind:
+        fail("--kind is required")
+    if kind not in ledger.KINDS:
+        fail(f"unknown kind {kind!r} (this build writes: {', '.join(sorted(ledger.KINDS))})")
+    if flags["round-from-report"] is not None:          # round mode: report.json drives both
+        if kind != "round":                             # rows, so it belongs to that kind alone
+            fail("--round-from-report writes a round row; use --kind round")
+        if not hasattr(ledger, "append_round_and_timeline"):
+            fail("this build of lib/ledger.py cannot build round rows")
+        count = ledger.append_round_and_timeline(
+            path, flags["round-from-report"], flags["events"] or "",
+            round_extra(flags, meta))
+        if count < 2:
+            print("timeline row skipped: no readable events file", file=sys.stderr)
+        return
+    row = {}
+    for item in meta:                                    # precedence: task-dir defaults first,
+        key, sep, value = item.partition("=")            # then the --file body, then the
+        if sep and key:                                  # scalars, then --fields
+            row[key] = value
+    row.update(parse_body(flags["file"]))
+    if flags["task"] is not None:
+        row["task_id"] = flags["task"]
+    if flags["status"] is not None:
+        row["status"] = flags["status"]
+    if flags["exit"] is not None:
+        try:
+            row["exit"] = int(flags["exit"], 10)
+        except ValueError:
+            fail(f"--exit is not an integer: {flags['exit']!r}")
+    row.update(parse_fields(fields))
+    row["kind"] = kind
+    row["schema"] = ledger.KINDS[kind]
+    row.setdefault("ts", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    try:
+        ledger.append(path, row)
+    except (ValueError, OSError) as exc:
+        fail(f"could not append the {kind} row: {exc}")
+
+
+try:
+    main(sys.argv[1:])
+except SystemExit:
+    raise
+except Exception as exc:                                 # one reason line, never a traceback
+    fail(f"{type(exc).__name__}: {exc}")
+PY
+) || rc=$?
+  [ "$rc" = 0 ] || ledger_warn append "$(printf '%s\n' "$out" | tail -n 1)"
+  return 0
+}
+
+ledger_rules_hash() { # sha256 over the worker rules the round used — the context_stamp
+  # construction (docs/specs/t-design.md §Row schemas) over the rules tree itself: the sorted
+  # contents of $DELEGATE_RULES_DIR. Best-effort: no tree, no hash, and the row carries null.
+  ( cd "$DELEGATE_RULES_DIR" 2>/dev/null || return 1
+    { find rules plugins delegate-rules.md -type f -print0 2>/dev/null |
+        LC_ALL=C sort -z | xargs -0 -r sha256sum; } | sha256sum | cut -c1-64 )
+}
+
+ledger_parallel_rounds() { # running sibling tasks: state dirs holding a live lock, minus ours
+  local n=0 d
+  for d in "$DELEGATE_STATE"/*/lock; do
+    [ -d "$d" ] || continue
+    [ "$d" = "$TASK_DIR/lock" ] && continue
+    n=$((n + 1))
+  done
+  echo "$n"
+}
+
+ledger_record_round() { # N RD RC START END — the round and timeline rows for a finished round.
+  # Never fatal and never loud when disabled (t-2 §3, the fire_hook pattern): a disabled or
+  # unresolvable ledger writes nothing at all; any other failure is the one `warn:` line
+  # `ledger_append` already prints. Either way the round's outcome and this function's return
+  # are exactly what a ledger-less run produced.
+  local n=$1 rd=$2 rc=$3 start=$4 end=$5
+  case "${DELEGATE_LEDGER,,}" in off|none|false) return 0 ;; esac
+  local path; path=$(ledger_resolve 2>/dev/null) || return 0
+  [ -n "$path" ] || return 0
+  local hash=""
+  hash=$(ledger_rules_hash || true)
+  local img=""
+  # the image label only exists, and only means something, on the docker runner (t-2 §4)
+  [ "${RUNNER:-$DELEGATE_RUNNER}" = docker ] && img=$(image_stamp "$DELEGATE_IMAGE" 2>/dev/null || true)
+  local shaverspec=""
+  [ -f "$TASK_DIR/spec.md" ] && shaverspec=$(sha256sum "$TASK_DIR/spec.md" | cut -c1-64)
+  ledger_append --kind round --task-dir "$TASK_DIR" \
+    --round-from-report "$rd/report.json" --events "$rd/events.jsonl" \
+    --diffstat "$rd/diffstat" --endpoint "$BASE_URL" --effort-source cli \
+    --spec-hash "$shaverspec" --rules-hash "$hash" --image-stamp "$img" \
+    --timeout-s "${secs:-$DELEGATE_TIMEOUT}" --edit-cap "$DELEGATE_CHUNK_CAP" \
+    --parallel-rounds "$(ledger_parallel_rounds)" --delegate-version "$VERSION" \
+    --round-start "$start" --round-end "$end" --exit "$rc" || true
+}
+
+ledger_show() { # [--kind K]
+  local kind=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --kind) [ $# -ge 2 ] || die "usage: delegate ledger show [--kind K]"
+              kind=$2; shift 2 ;;
+      *) die "usage: delegate ledger show [--kind K]" ;;
+    esac
+  done
+  local path
+  path=$(ledger_resolve) || { ledger_warn show "no ledger path resolves"; return 0; }
+  # Accepted rows only, oldest first, byte for byte as stored. A missing or unreadable ledger is
+  # an empty listing; what could not be accepted is counted on one line, not treated as a failure.
+  DELEGATE_LIB_DIR=$DELEGATE_HOME/lib python3 - "$path" "$kind" <<'PY' || ledger_warn show "the ledger reader failed"
+import os, sys
+sys.path.insert(0, os.environ["DELEGATE_LIB_DIR"])
+import ledger
+
+path, want = sys.argv[1], sys.argv[2]
+if want and want not in ledger.KINDS:
+    print(f"delegate: warn: ledger show: unknown kind {want!r} "
+          f"(this build reads: {', '.join(sorted(ledger.KINDS))})", file=sys.stderr)
+    raise SystemExit(0)
+skipped = 0
+for _lineno, raw, row in ledger.read_rows(path):
+    if row is None:
+        skipped += 1
+        continue
+    if want and row["kind"] != want:
+        continue
+    print(raw)
+if skipped:
+    print(f"delegate: warn: ledger show: skipped {skipped} line(s) (malformed or unknown kind)",
+          file=sys.stderr)
+PY
+}
+
+ledger_review() { # TASK_ID --verdict V --bugs high=N,medium=N,low=N --lines-changed N [--round N] [--note TEXT]
+  # R5: one review row, from flags the orchestrator typed. Bad input is fatal here on purpose —
+  # this row IS the caller's judgement, so a missing verdict or an unknown one means the command
+  # was not given a verdict; a row that cannot be written is the usual one warn line and exit 0.
+  local usage="usage: delegate ledger review TASK_ID --verdict accepted|fixed|rejected --bugs high=N,medium=N,low=N --lines-changed N [--round N] [--note TEXT]"
+  [ $# -ge 1 ] || die "$usage"
+  case "$1" in -*) die "$usage (a task id comes first)" ;; esac
+  local task=$1; shift
+  local round="" verdict="" bugs="" lines="" note=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --round|--verdict|--bugs|--lines-changed|--note)
+        [ $# -ge 2 ] || die "ledger review: $1 needs a value"
+        case "$1" in
+          --round) round=$2 ;;  --verdict) verdict=$2 ;;  --bugs) bugs=$2 ;;
+          --lines-changed) lines=$2 ;;  --note) note=$2 ;;
+        esac
+        shift 2 ;;
+      *) die "ledger review: unknown flag $1" ;;
+    esac
+  done
+  case "$verdict" in accepted|fixed|rejected) ;;
+    *) die "ledger review: --verdict must be accepted, fixed or rejected${verdict:+, not $verdict}" ;;
+  esac
+  case "$round" in *[!0-9]*) die "ledger review: --round takes a whole number, not $round" ;; esac
+  case "$lines" in *[!0-9]*) die "ledger review: --lines-changed takes a whole number, not $lines" ;; esac
+  case "${DELEGATE_LEDGER,,}" in off|none|false)
+      ledger_warn review "the ledger is off (DELEGATE_LEDGER=$DELEGATE_LEDGER): the row was not written"
+      return 0 ;;
+  esac
+  local path; path=$(ledger_resolve) || { ledger_warn review "no ledger path resolves"; return 0; }
+  local out="" rc=0
+  out=$(DELEGATE_LIB_DIR=$DELEGATE_HOME/lib python3 - "$path" "$task" "$round" "$verdict" \
+          "$bugs" "$lines" "$note" <<'PY' 2>&1
+import os, sys
+sys.path.insert(0, os.environ["DELEGATE_LIB_DIR"])
+import ledger
+
+path, task_id, round_s, verdict, bugs, lines, note = sys.argv[1:8]
+row = {"task_id": task_id, "verdict": verdict, "bugs": bugs,
+       "lines_changed": lines, "note": note}
+try:
+    # --round defaults to the task's newest round row; no such row leaves the link empty.
+    row["round"] = int(round_s) if round_s else ledger.latest_round(path, task_id)
+    row = ledger.build_review_row(row)
+except (ValueError, TypeError) as exc:
+    print(f"{exc}", file=sys.stderr)
+    raise SystemExit(1)                                  # 1: the input, not the file, is wrong
+try:
+    ledger.append(path, {"kind": "review", "schema": ledger.KINDS["review"], **row})
+except (ValueError, OSError) as exc:
+    print(f"{exc}", file=sys.stderr)
+    raise SystemExit(2)                                  # 2: bad input the writer refused
+PY
+) || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    1) die "ledger review: $(printf '%s\n' "$out" | tail -n 1)" ;;
+    *) ledger_warn review "$(printf '%s\n' "$out" | tail -n 1)"; return 0 ;;
+  esac
+}
+
+ledger_import() { # [--state DIR] — R8: the records that still exist become rows, once
+  local state=$DELEGATE_STATE usage="usage: delegate ledger import [--state DIR]"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --state) [ $# -ge 2 ] || die "$usage (--state takes a directory)"
+               state=$(expand "$2"); shift 2 ;;
+      *) die "$usage" ;;
+    esac
+  done
+  case "${DELEGATE_LEDGER,,}" in off|none|false)
+      ledger_warn import "the ledger is off (DELEGATE_LEDGER=$DELEGATE_LEDGER): nothing imported"
+      return 0 ;;
+  esac
+  local path; path=$(ledger_resolve) || { ledger_warn import "no ledger path resolves"; return 0; }
+  # Read-only over the records: this writes to the ledger file and nothing else. A task it could
+  # not read is one warn line and a skipped count — the command itself never fails on a record.
+  local out="" rc=0
+  out=$(DELEGATE_LIB_DIR=$DELEGATE_HOME/lib python3 - "$path" "$state" \
+          "${DELEGATE_MODEL:-}" "${DELEGATE_MODEL_HARD:-}" <<'PY' 2>&1
+import os, sys
+sys.path.insert(0, os.environ["DELEGATE_LIB_DIR"])
+import ledger
+
+path, state_dir, model, model_hard = sys.argv[1:5]
+try:
+    r = ledger.import_state(path, state_dir, model, model_hard)
+except Exception as exc:                                    # noqa: BLE001 - one line, never a trace
+    print(f"fatal\t{type(exc).__name__}: {exc}")
+    raise SystemExit(0)
+for w in r["warnings"]:
+    print(f"warn\t{w}")
+print(f"summary\timported {r['imported']}, skipped {r['skipped']}, tasks {r['tasks']}")
+PY
+) || rc=$?
+  local tag msg
+  while IFS=$'\t' read -r tag msg; do
+    case "$tag" in
+      warn)    ledger_warn import "$msg" ;;
+      summary) printf '%s\n' "$msg" ;;
+      fatal)   ledger_warn import "$msg" ;;
+      *)       [ -z "$tag" ] || printf '%s\n' "$tag" ;;
+    esac
+  done <<< "$out"
+  [ "$rc" = 0 ] || ledger_warn import "the import stopped after its warnings (exit $rc)"
+  return 0
+}
+
+cmd_ledger() { # append | show | review | import — the ledger's write side, and its raw read side
+  local sub=${1:-}; shift || true
+  case "$sub" in
+    append) ledger_append "$@" ;;
+    show)   ledger_show "$@" ;;
+    review) ledger_review "$@" ;;
+    import) ledger_import "$@" ;;
+    *) die "usage: delegate ledger append --kind K [--task T] [--fields k=v[,k=v]...] [--task-dir DIR] [--status S] [--exit N] [--file F|-] [--round-from-report R --events E ...]   or: delegate ledger show [--kind K]   or: delegate ledger review TASK_ID --verdict V --bugs high=N,medium=N,low=N --lines-changed N [--round N] [--note TEXT]   or: delegate ledger import [--state DIR]" ;;
+  esac
+}
+
+# ------------------------------------------------------------------- stats -----------
+# R6: the ledger's only consumer, and a pure reader. `delegate stats` opens the ledger to read
+# it and writes nothing anywhere: no lock, no state dir, no task dir. It reads `round` and
+# `review` rows only — timeline lines are dropped at the line level before they are parsed —
+# and every figure comes off those rows, never from chain state (`chain --clean` removes that)
+# nor from a task dir (prune does). Counts only: stats knows no prices and prints no dollars.
+STATS_USAGE="usage: delegate stats [--chain NAME] [--repo R] [--since YYYY-MM-DD] [--json]"
+cmd_stats() {
+  local chain="" repo="" since="" mode="text"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --chain|--repo|--since)
+        [ $# -ge 2 ] || die "$STATS_USAGE ($1 needs a value)"
+        case "$1" in
+          --chain) chain=$2 ;;  --repo) repo=$2 ;;  --since) since=$2 ;;
+        esac
+        shift 2 ;;
+      --json) mode="json"; shift ;;
+      -h|--help) echo "$STATS_USAGE"; return 0 ;;
+      *) die "$STATS_USAGE" ;;
+    esac
+  done
+  case "$since" in
+    ""|????-??-??) ;;
+    *) die "delegate stats: --since takes a date as YYYY-MM-DD, not $since" ;;
+  esac
+  local path=""
+  case "${DELEGATE_LEDGER,,}" in
+    off|none|false)
+      # Off is not an error for a reader: the tables print, and they are empty.
+      ledger_warn stats "the ledger is off (DELEGATE_LEDGER=$DELEGATE_LEDGER): empty tables" ;;
+    *) path=$(ledger_resolve 2>/dev/null) || path="" ;;
+  esac
+  # One warning line for the lines this build cannot use at all, then the tables: what the
+  # ledger holds is reported, what it does not is not invented. Exit code stays 0 throughout.
+  DELEGATE_LIB_DIR=$DELEGATE_HOME/lib STATS_MODE=$mode python3 - "$path" "$chain" "$repo" "$since" <<'PY' || \
+    ledger_warn stats "the ledger reader failed"
+import json, os, sys
+sys.path.insert(0, os.environ["DELEGATE_LIB_DIR"])
+import ledger
+
+path, chain, repo, since = sys.argv[1:5]
+data = ledger.stats(path, chain=chain, repo=repo, since=since)
+
+if os.environ.get("STATS_MODE") == "json":
+    print(json.dumps(data))
+    raise SystemExit(0)
+if data["skipped"]:
+    print(f"delegate: warn: ledger stats: skipped {data['skipped']} line(s) "
+          f"(malformed or unknown kind)", file=sys.stderr)
+
+
+def dur(value):
+    """Seconds as the shortest honest duration: 47s, 12m30s, 2h05m."""
+    n = int(round(value))
+    if n < 60:
+        return f"{n}s"
+    if n < 3600:
+        return f"{n // 60}m{n % 60:02d}s"
+    return f"{n // 3600}h{(n % 3600) // 60:02d}m"
+
+
+def pc(value):
+    return "-" if value is None else (f"{value:.1f}%".replace(".0%", "%"))
+
+
+def table(title, headers, rows, numeric):
+    """One aligned table: `numeric` columns right-aligned, the rest left, widths from content."""
+    print(title)
+    widths = [max(len(str(h)), *(len(str(r[i])) for r in rows)) if rows else len(str(h))
+              for i, h in enumerate(headers)]
+    def line(cells):
+        return "  ".join(str(c).ljust(w) if i not in numeric else str(c).rjust(w)
+                         for i, (c, w) in enumerate(zip(cells, widths))).rstrip()
+    print(line(headers))
+    for r in rows:
+        print(line(r))
+
+
+groups, findings, failures = data["groups"], data["findings"], data["failures"]
+rows = [[g["repo"] or "-" if not g["chain"] else f'{g["repo"] or "-"}/{g["chain"]}',
+         g["model"] or "-", g["effort"] or "-", g["rounds"], pc(g["ok_pct"]) + " " + g["ok_source"],
+         "-" if not g["wall_n"] else dur(g["wall_s"]) + " avg " + dur(g["wall_mean_s"]),
+         f'{g["tokens"]["input_tokens"]}/{g["tokens"]["output_tokens"]}/{g["tokens"]["reasoning_tokens"]}',
+         pc(g["cache_pct"]), g["retries"],
+         "-" if not g["import_rounds"] else f'{g["import_rounds"]} import']
+        for g in groups]
+table(f"delegate stats — by project ({len(groups)} of {data['counts']['round_rows']} "
+      f"round rows)",
+      ["repo/chain", "model", "effort", "rounds", "ok%", "wall", "tok(in/out/r)", "cache%",
+       "retries", "source"],
+      rows, {3, 4, 6, 7, 8})
+
+t = data["totals"]
+tok = t["tokens"]
+print("\ntotal")
+print(f"  rounds {t['rounds']}  ok {pc(t['ok_pct'])} ({t['ok_source']})  "
+      f"wall {dur(t['wall_s'])} avg {dur(t['wall_mean_s']) if t['wall_n'] else '-'}  "
+      f"tok(in/out/r) {tok['input_tokens']}/{tok['output_tokens']}/{tok['reasoning_tokens']}  "
+      f"cache {pc(t['cache_pct'])}  retries {t['retries']}"
+      + (f"  import {t['import_rounds']}" if t["import_rounds"] else ""))
+
+table("\nfindings (review rows)",
+      ["repo/chain", "model", "effort", "reviews", "accepted", "fixed", "rejected",
+       "bugs h/m/l", "lines"],
+      [[f["axes"], f["model"] or "-", f["effort"] or "-", f["rows"], f["accepted"], f["fixed"],
+        f["rejected"], f'{f["bugs_high"]}/{f["bugs_medium"]}/{f["bugs_low"]}', f["lines_changed"]]
+       for f in findings], {3, 4, 5, 6, 7, 8})
+
+def statuses(f):
+    names = list(ledger.FAILURE_STATUSES) + [k for k in f["statuses"] if k not in ledger.FAILURE_STATUSES]
+    return " ".join(f"{n}={f['statuses'][n]}" for n in dict.fromkeys(names))
+
+table("\nfailures (round rows)",
+      ["repo/chain", "model", "effort", "tool_errors", "errors", "statuses"],
+      [[f["axes"], f["model"] or "-", f["effort"] or "-", f["tool_errors"], f["errors"],
+        statuses(f)] for f in failures], {3, 4})
+
+c = data["counts"]
+print(f"\n  {c['round_rows']} round rows, {c['review_rows']} review rows, "
+      f"{c['groups']} groups; {data['filtered']} timeline/other-kind lines skipped unread")
+PY
+}
+
 usage() {
   cat <<'EOF'
 delegate — hand implementation work to a self-hosted coding model, then review it.
@@ -1808,6 +2400,50 @@ delegate — hand implementation work to a self-hosted coding model, then review
   delegate exec ID -- CMD...       run any command in the worker environment (node, db, ...)
   delegate list                    tasks, rounds, last status
   delegate rm ID [--delete-branch] remove worktree, sidecar and state (branch kept by default)
+  delegate ledger append --kind K [--task T] [--fields k=v[,k=v]...] [--task-dir DIR]
+                         [--status S] [--exit N] [--file F|-]
+                                   append one summary row to the telemetry ledger (host-side, and
+                                   never fatal: a ledger that cannot be written costs a row, not a
+                                   round). --file - reads the row body from stdin; --task-dir reads
+                                   the per-task identity from a task's meta.env without a live task
+  delegate ledger append --kind round --round-from-report R [--events E] [--diffstat F] ...
+                                   the round-row form: build the row in schema order from a finished
+                                   round's report.json, its --task-dir meta.env and condition flags
+                                   (--endpoint, --effort, --rules-hash, --timeout-s, --edit-cap,
+                                   --parallel-rounds, --spec-hash, --round-start, --round-end, ...),
+                                   then append its timeline row from one parse of --events E
+  delegate ledger show [--kind K]  the ledger's accepted rows, oldest first, one JSON object per line
+                                   (unknown kinds and malformed lines are skipped, counted on stderr)
+  delegate ledger review TASK_ID --verdict accepted|fixed|rejected \
+                         --bugs high=N,medium=N,low=N --lines-changed N [--round N] [--note TEXT]
+                                   record the orchestrator's verdict on a landed step (R5): one
+                                   review row, linked to that task's round rows by task id. --round
+                                   defaults to the task's newest round row; a severity --bugs omits
+                                   is 0. A missing or unknown verdict is refused — this row IS the
+                                   verdict — while a ledger that cannot be written is one warn line
+  delegate ledger import [--state DIR]
+                                   import every task record that still exists (R8): one round +
+                                   timeline pair per stored round, through the same code path a live
+                                   round uses, marked source:"import". What the record no longer
+                                   carries stays empty; effort is inferred from the round's model
+                                   and labelled effort_source:"inferred". Idempotent: a (task id,
+                                   round) the ledger already holds is skipped. Prints
+                                   "imported N, skipped M, tasks K"; an unreadable task costs a warn
+                                   line and a skipped count, never the exit code
+  delegate stats [--chain NAME] [--repo R] [--since YYYY-MM-DD] [--json]
+                                   per-project totals from the ledger's rows (R6), read-only: rounds,
+                                   the accepted-or-fixed rate (from review rows where a group has
+                                   them, from round statuses where it does not — labelled either
+                                   way), total and mean wall time, input/output/reasoning tokens,
+                                   cache hit rate and retries, grouped by repo / chain / model /
+                                   effort; then the review findings and the failures (tool errors,
+                                   errors, and status counts including worker-error, timeout,
+                                   truncated and done-but-verify-failed). Import-sourced rows are
+                                   labelled. Retries come from the rows (`sum(max(round)-1)` per
+                                   task), never from chain state, which `chain --clean` removes.
+                                   Counts only: stats has no prices and prints no dollars. An empty
+                                   or unreadable ledger prints empty tables and exits 0; --since
+                                   filters on ts, --chain and --repo match a row's own field exactly
   delegate build                   build the worker image (docker runner)
   delegate update [--to TAG] [--repo URL] [--from DIR]
                                    move a release install to TAG by flipping `current` (install.sh
@@ -1853,6 +2489,8 @@ main() {
     list|ls) cmd_list "$@" ;;
     rm) cmd_rm "$@" ;;
     grant) cmd_grant "$@" ;;
+    ledger) cmd_ledger "$@" ;;
+    stats) cmd_stats "$@" ;;
     build) cmd_build "$@" ;;
     update) cmd_update "$@" ;;
     doctor) cmd_doctor "$@" ;;
