@@ -67,4 +67,8 @@ printf '{"permission":{"external_directory":{"*":"ask","%s/**":"allow"}}}\n' "$T
 args >/dev/null
 check "merge skips a covered dir" "python3 -c \"import json;e=json.load(open('\$cfg'))['permission']['external_directory'];assert '\$T/skills/delegate/**' not in e\""
 check "merge adds an uncovered dir" "python3 -c \"import json;e=json.load(open('\$cfg'))['permission']['external_directory'];assert e['$here/claude/skills/delegate/**']=='allow'\""
+# The default --config path, XDG_CONFIG_HOME unset (a container): ~/.config/opencode, never ~/opencode.
+DH="$T/defhome"; mkdir -p "$DH"
+env -u XDG_CONFIG_HOME HOME="$DH" python3 "$M" --skill-dir "$T/skills/delegate" --real-dir "$here/claude/skills/delegate" >/dev/null 2>&1
+check "default config path is ~/.config/opencode/opencode.json" "[ -f '$DH/.config/opencode/opencode.json' ] && [ ! -e '$DH/opencode' ]"
 exit $fail

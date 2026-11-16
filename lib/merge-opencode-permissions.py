@@ -37,7 +37,7 @@ CLINERULES_ENTRY = ".clinerules/*.md"   # spike S5 PASS: the relative glob resol
 
 
 def config_path():
-    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~")
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
     return os.path.join(base, "opencode", "opencode.json")
 
 

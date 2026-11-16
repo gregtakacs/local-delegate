@@ -191,7 +191,7 @@ check "--version's second line is the installed line, regex exact" \
   "printf %s \"\$ver\" | grep -qE '^install: release v0[.]1[.]1 \\(current -> $root/v0[.]1[.]1\\)\$'"
 vout=$(run_env "$H/bin/delegate" --version 2>/dev/null); vrc=$?
 check "--version exits 0 with the version token alone on stdout" \
-  "[ \$vrc -eq 0 ] && [ \"\$vout\" = 0.1.0 ]"
+  "[ \$vrc -eq 0 ] && [ \"\$vout\" = \"$(sed -n "s/^VERSION=//p" "$here/bin/delegate")\" ]"
 docout=$(run_env "$H/bin/delegate" doctor --quick 2>&1 || true)
 iline=$(printf %s "$docout" | grep -m1 '^install: ')
 vline=$(printf %s "$ver" | grep -m1 '^install: ')
