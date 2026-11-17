@@ -38,7 +38,8 @@ printf '# fixture spec\nthe task is to write a row\n' > "$TD/spec.md"
   printf 'SERVICE=\nCOPIED=\nSESSION=\nCREATED=%q\nWT_GITDIR=\n' 2026-01-01T00:00:00+00:00
   printf 'READS=\nGITHUB=0\nEGRESS=%q\nHERE=0\nRUNNER=native\nRAW=0\n' filtered
   printf 'ORB_FILE=\nORB_LABEL=\nORB_BASE_MAC=\nORB_SERIAL=\nORB_IP=\nORB_FLASH=0\n'
-  printf 'GRANTS=\nALLOW=\nCHAIN=\nEFFORT=hard\n'; } > "$TD/meta.env"
+  printf 'GRANTS=\nALLOW=\nCHAIN=\nEFFORT=hard\n'
+  printf 'ORCH=claude-code\nORCH_SESSION=1e061308-50b0\n'; } > "$TD/meta.env"
 # the round's raw events, in the shape opencode streams them. Every SECRET/hush marker
 # below sits in a payload (input/output/title/meta/text) and must never reach the ledger.
 RD=$TD/rounds/1
@@ -182,6 +183,10 @@ cases = [
     (round_row["rules_hash"] == rules_hash, "rules_hash matches the context_stamp construction"),
     (round_row["image_stamp"] == "", "image_stamp empty on the native runner, with docker absent"),
     (round_row["runner"] == "native", "runner from meta.env"),
+    (round_row["orchestrator"] == "claude-code"
+     and round_row["orchestrator_session"] == "1e061308-50b0",
+     "the delegating session from meta.env (round:2)"),
+    (round_row["schema"] == 2, "a round row with the orchestrator fields is schema 2"),
     (round_row["timeout_s"] == 5400 and round_row["edit_cap"] == 8000,
      "timeout and edit cap in force"),
     (round_row["parallel_rounds"] == 1,
@@ -234,8 +239,8 @@ PY
 chk=$(EXPECT_VERSION=$VERSION EXPECT_START=$START EXPECT_END=$END \
      python3 "$T/check.py" "$RD/report.json" 2>&1)
 printf '%s\n' "$chk" | grep '^MISMATCH' || true
-check "every field of both rows matches the design's fixture values (32 checks)" \
-  'printf "%s\n" "$chk" | grep -qE "^checked=32 bad=0$"'
+check "every field of both rows matches the design's fixture values (34 checks)" \
+  'printf "%s\n" "$chk" | grep -qE "^checked=34 bad=0$"'
 check "R4/R7: no payload text, call id or key material reached the ledger" \
   '! grep -qE "SECRETINPUT|SECRETOUTPUT|SECRET-TITLE|SECRET-META|SECRETTEXT|SECRET-KEY-VALUE|foobarbaz|hush|call_a1|call_b2|never-read" "$L"'
 check "R7: the key file path is not recorded anywhere in the rows" \

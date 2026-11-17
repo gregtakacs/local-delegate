@@ -40,7 +40,9 @@ from typing import Any, Iterator, Mapping
 # `review` are slice T's; `benchmark` and `verdict` are registered for slice B so a reader of
 # this build already skips their rows cleanly instead of meeting an unknown kind for the first
 # time. A kind is valid iff listed here; a row's schema iff 1 <= schema <= KINDS[kind].
-KINDS: dict[str, int] = {"round": 1, "timeline": 1, "review": 1, "benchmark": 1, "verdict": 1}
+# round:2 adds `orchestrator`/`orchestrator_session` (the delegating session); a v1 round
+# row reads the same with both null.
+KINDS: dict[str, int] = {"round": 2, "timeline": 1, "review": 1, "benchmark": 1, "verdict": 1}
 
 LEDGER_FILENAME = "events.jsonl"          # the ledger's own file, beside — never inside — task dirs
 
@@ -324,7 +326,8 @@ ROUND_KEYS = (
     "task_id", "slug", "repo", "project", "chain", "step", "run_id", "round", "spec_hash",
     "base_ref", "base_sha", "verify", "endpoint", "model", "effort",
     "effort_source", "delegate_version", "rules_hash", "image_stamp", "runner",
-    "timeout_s", "edit_cap", "parallel_rounds", "status", "worker_status",
+    "orchestrator", "orchestrator_session", "timeout_s", "edit_cap", "parallel_rounds",
+    "status", "worker_status",
     "exit", "verify_rc", "nudges", "tool_calls", "tool_errors", "errors",
     "todos_done", "todos_total", "retries", "round_start", "round_end",
     "duration_s", "steps", "input_tokens", "output_tokens", "reasoning_tokens",
@@ -492,6 +495,10 @@ def build_round_row(report: Mapping[str, Any], extra: Mapping[str, Any] | None =
         # docker image carries no label — image_stamp() itself prints "" in both cases.
         "image_stamp": pick("image_stamp") or "",
         "runner": pick("runner"),
+        # the session that delegated the task (meta.env ORCH/ORCH_SESSION), null when
+        # it was started from a plain shell or before round:2
+        "orchestrator": pick("orchestrator") or None,
+        "orchestrator_session": pick("orchestrator_session") or None,
         "timeout_s": _num(extra.get("timeout_s")), "edit_cap": _num(extra.get("edit_cap")),
         "parallel_rounds": _num(extra.get("parallel_rounds")),
         "status": pick("status"), "worker_status": pick("worker_status"),
@@ -724,6 +731,8 @@ def _import_round(ledger_path: str, task_dir: str, round_no: int, task_id: str,
         "chain": meta.get("CHAIN") or None,
         "base_ref": meta.get("BASE_REF") or None, "base_sha": meta.get("BASE_SHA") or None,
         "verify": meta.get("VERIFY") or None, "runner": meta.get("RUNNER") or None,
+        "orchestrator": meta.get("ORCH") or None,
+        "orchestrator_session": meta.get("ORCH_SESSION") or None,
         "effort": _inferred_effort(report_model, model, model_hard),
         "effort_source": "inferred",
         "spec_hash": spec_hash, "diff_lines": diff_lines,

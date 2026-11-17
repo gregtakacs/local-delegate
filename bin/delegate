@@ -172,6 +172,19 @@ load_task() {
   return 0
 }
 
+orchestrator_of() { # -> "HARNESS SESSION_ID" of the session that delegates, or nothing
+  # The harness exports its own session id to the commands it runs: Claude Code as
+  # CLAUDE_CODE_SESSION_ID (its transcript's file name), OpenCode 2 as OPENCODE_SESSION_ID.
+  # Claude Code wins when both are set: it is then the inner, direct caller (a claude run
+  # inside an OpenCode terminal). An id outside a plain token shape is not recorded.
+  local h id
+  if [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then h=claude-code; id=$CLAUDE_CODE_SESSION_ID
+  elif [ -n "${OPENCODE_SESSION_ID:-}" ]; then h=opencode; id=$OPENCODE_SESSION_ID
+  else return 0; fi
+  [[ "$id" =~ ^[A-Za-z0-9_.-]{1,128}$ ]] || return 0
+  printf '%s %s' "$h" "$id"
+}
+
 meta_set() { # key value  (rewrites meta.env atomically)
   local f="$TASK_DIR/meta.env" k=$1 v=$2
   { grep -v "^$k=" "$f" 2>/dev/null || true; printf '%s=%q\n' "$k" "$v"; } > "$f.tmp" && mv "$f.tmp" "$f"
@@ -938,6 +951,10 @@ cmd_run() {
     # the chain this step belongs to, when `delegate chain` started it (it exports DELEGATE_CHAIN):
     # `delegate top` groups the step under its chain and names the plan that resumes it.
     printf 'CHAIN=%q\n' "${DELEGATE_CHAIN:-}"
+    # the session that delegated this task (a chain's steps inherit the chain's): the
+    # work view groups delegated work under the orchestrating session by these two.
+    local orch; orch=$(orchestrator_of)
+    printf 'ORCH=%q\nORCH_SESSION=%q\n' "${orch%% *}" "${orch#* }"
   } > "$TASK_DIR/meta.env"
   mv "$gtmp" "$(grants_file)"
   lock_task
@@ -1803,6 +1820,7 @@ ledger_meta_fields() { # DIR -> NUL-separated field=value rows, from that task's
     emit repo "${REPO:-}";  emit chain "${CHAIN:-}"; emit base_ref "${BASE_REF:-}"
     emit base_sha "${BASE_SHA:-}"; emit verify "${VERIFY:-}"; emit runner "${RUNNER:-}"
     emit model "${MODEL:-}"; emit effort "${EFFORT:-}"
+    emit orchestrator "${ORCH:-}"; emit orchestrator_session "${ORCH_SESSION:-}"
     gc=${GIT_COMMON:-}; gc=${gc%/}; [ "${gc##*/}" = .git ] && gc=${gc%/.git}; emit project "$gc" )
 }
 
