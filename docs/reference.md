@@ -122,6 +122,21 @@ committing each accepted step on your current branch (see [docs/levels.md](level
 
 ## Use it by hand
 
+### Where the worktrees live: one folder per project
+
+New tasks are filed under their project: `<DELEGATE_WORKTREES>/<project>/<slug>`. The folder name
+is the **main checkout's** — a task started from a linked worktree `~/w/codehub-lead` of `codehub`
+lands at `<W>/codehub/lead-x`, beside that project's other tasks (its id is still `codehub-lead-x`).
+A2's per-project container bind-mounts exactly that folder, at the same host path, so a host-side
+broker can run delegate for one project and see one project's work. Two rules keep old work usable:
+**a task keeps the path written in its `meta.env`** — nothing recomputes a worktree path from a task
+id, so tasks created in the old flat `<DELEGATE_WORKTREES>/<id>` layout keep working for `report`,
+`diff`, `rm`, `continue`, `verify`, `exec`, `peek` and `chain`, and are never migrated — and
+**`delegate rm` never removes the project folder**, not even when its last task goes: that folder is
+a live bind mount, and dropping it under the container would break the mount. A task is refused
+before anything is created if `<W>/<project>` is already a checkout or a file (an old flat-layout
+worktree named like a project, say): move it, or set `DELEGATE_WORKTREES` elsewhere.
+
 ```bash
 delegate run spec.md --repo ~/src/app --name add-handles \
     --verify "npm ci && npm run typecheck && npm test" --service postgres --copy .env
@@ -269,6 +284,10 @@ acme/widgets/t-1  m1     hard         5   75% review  17m30s avg 3m30s     1050/
   of import rows takes its `ok%` from statuses, since no review rows exist for an import.
 - `--chain`, `--repo` match a row's own field exactly and `--since` filters on `ts`
   (date-first, inclusive); they combine, and a filter that keeps nothing prints zeroes.
+  `--repo R` also matches a row whose repo axis is the **same directory under another
+  spelling** — when both `R` and that axis are absolute paths and their `realpath`s are equal,
+  a symlink to the checkout and a trailing slash name the same project — so one project's
+  totals do not split in two because a round was recorded through a link.
 - `--json` prints the same facts as one object: `groups`, `findings`, `failures`,
   `totals`, `counts`, the echoed `filters`, and the line counts `skipped` (lines this
   build cannot use) and `filtered` (known kinds stats does not read). No warning goes to
@@ -409,6 +428,15 @@ slice once, runs the chain, and checks the result once.
 piping it to a log works); `--all` includes tasks finished more than 24 h ago; `--color` forces
 colour onto a pipe, and `NO_COLOR` turns it off wherever `--color` does the opposite.
 `delegate top ID` shows that one task: `delegate peek` plus its state, chain and lead.
+`--repo PATH` narrows the view to one project, and `delegate list [--repo PATH]` filters the same
+way (both are `lib/taskstate.py`'s one rule): a task matches when the directory `PATH` names is its
+project — its main checkout — or the repo it was run in, compared through `realpath`, so a symlink
+to the checkout, a trailing slash, or a path relative to the cwd all match, and a path that does not
+exist matches nothing it would not have anyway. With `--repo`, the "N task(s)" count and the hidden
+count speak for that project alone and **the Claude leads are not shown at all**: a lead is a
+session, not a project, and its name and its other children would leak the very work the filter
+exists to keep out. `delegate top ID --repo PATH` for another project's task prints the same
+`no such task` line an unknown id gets, without confirming that the task exists.
 
 The states come from `lib/taskstate.py`, which `delegate list`, `delegate chain` and `top` all
 read: **running** (a round's lock exists and it has no report yet), **verifying** (its `verify.log`

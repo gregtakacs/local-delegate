@@ -158,6 +158,37 @@ slugify() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9._-' '
 # ---------------------------------------------------------------- task state -------
 task_dir() { printf '%s/%s' "$DELEGATE_STATE" "$1"; }
 
+# New tasks are filed per repo: <DELEGATE_WORKTREES>/<project>/<leaf>. A2's per-project container
+# bind-mounts only that project's folder, so a host-side broker can show one project's tasks and
+# nothing else. The project dir name is lib/ledger.py's project_of: the main checkout — the
+# folder above a `<main>/.git` common dir — or, for a bare common dir (or none at all), the
+# repo's own basename. The leaf is the task id with its project's `P-` prefix removed, so tasks
+# run from a linked worktree `~/w/codehub-lead` of codehub land beside the rest of codehub's:
+# <W>/codehub/lead-x. Only NEW tasks: every existing command reads WORKTREE from meta.env, so a
+# task made in the old flat layout keeps its path for ever.
+task_worktree_path() { # GIT_COMMON REPO ID -> prints the worktree path for a new task
+  local gc=${1%/} repo=${2%/} id=$3 p l
+  case "$gc" in
+    */.git) p=${gc%/.git} ;;   # the main checkout's own folder
+    *) p=$repo ;;             # a bare common dir, or no common dir: the repo's folder
+  esac
+  p=${p##*/}
+  [ -n "$p" ] || p=_           # a checkout at "/" has no name to file it under
+  l=$id
+  case "$id" in "$p"-*) l=${id#"$p"-} ;; esac
+  printf '%s/%s/%s\n' "$DELEGATE_WORKTREES" "$p" "$l"
+}
+
+# <W>/<project> holds that project's task worktrees and nothing else, so it must not already BE
+# one: an old flat-layout worktree named like the project, or somebody's clone dropped there,
+# would end up nested inside another git working tree. Refuse before a branch, a task dir or a
+# folder is created.
+worktree_folder_check() { # PATH -> die unless that per-repo folder can hold worktrees
+  [ -e "$1" ] || return 0
+  { [ -d "$1" ] && [ ! -e "$1/.git" ]; } || \
+    die "$1 is not a per-repo worktree folder (it is a checkout or a file); move it or set DELEGATE_WORKTREES"
+}
+
 load_task() {
   local id=$1 d
   d=$(task_dir "$id")
@@ -932,6 +963,8 @@ cmd_run() {
   [ ! -e "$TASK_DIR" ] || die "task $ID already exists — use 'delegate continue $ID FEEDBACK', or 'delegate rm $ID' first"
 
   HERE=$here
+  WORKTREE_PARENT=""                 # <DELEGATE_WORKTREES>/<project>, set on the worktree branch below
+  GIT_COMMON=$(cd "$repo" && cd "$(git rev-parse --git-common-dir)" && pwd)
   if [ "$here" = 1 ]; then
     local d
     for d in "$DELEGATE_STATE"/*/; do   # one in-place worker per checkout at a time
@@ -943,9 +976,11 @@ cmd_run() {
     BASE_REF="$BRANCH (working tree)"
   else
   BRANCH="delegate/$SLUG"
-  WORKTREE="$DELEGATE_WORKTREES/$ID"
+  WORKTREE=$(task_worktree_path "$GIT_COMMON" "$repo" "$ID")
+  WORKTREE_PARENT=$(dirname "$WORKTREE")
   git -C "$repo" show-ref --verify --quiet "refs/heads/$BRANCH" && die "branch $BRANCH already exists in $repo"
   [ ! -e "$WORKTREE" ] || die "worktree path already exists: $WORKTREE"
+  worktree_folder_check "$WORKTREE_PARENT"
   BASE_REF=${base:-$(git -C "$repo" rev-parse --abbrev-ref HEAD)}
   BASE_SHA=$(git -C "$repo" rev-parse --verify "$BASE_REF^{commit}") || die "bad --base: $BASE_REF"
   [ -z "$(git -C "$repo" status --porcelain --untracked-files=no)" ] || \
@@ -954,7 +989,6 @@ cmd_run() {
 
   BASE_URL=$(pick_base_url) || die "no endpoint in DELEGATE_BASE_URLS answered /models with this key"
   MODEL=${model:-$DELEGATE_MODEL}
-  GIT_COMMON=$(cd "$repo" && cd "$(git rev-parse --git-common-dir)" && pwd)
 
   # The worker needs the file in its worktree; copy it if git doesn't carry it. In place (--here)
   # the worktree IS the checkout that holds it, and a copy onto itself stopped the round.
@@ -962,7 +996,9 @@ cmd_run() {
     local orel; orel=$(realpath --relative-to="$repo" "$ORB_FILE" 2>/dev/null || true)
     case "$orel" in ""|../*) ;; *) git -C "$repo" ls-files --error-unmatch -- "$orel" >/dev/null 2>&1 || copies+=("$orel") ;; esac
   fi
-  mkdir -p "$TASK_DIR/rounds" "$DELEGATE_WORKTREES"
+  # A --here task has no WORKTREE_PARENT and so creates no worktree folder, as before; every
+  # other task creates its project's folder with it, beside the tasks already filed there.
+  mkdir -p "$TASK_DIR/rounds" "${WORKTREE_PARENT:-$DELEGATE_WORKTREES}"
   if [ "$here" = 1 ]; then
     WT_GITDIR=$(git -C "$repo" rev-parse --absolute-git-dir)
     BASE_SHA=$(snapshot base)     # your checkout as it was, uncommitted changes included
@@ -1331,8 +1367,23 @@ cmd_diff() {
 cmd_list() {
   # The states are lib/taskstate.py's, the single definition: `interrupted` (a round whose harness
   # died before its report) and `verifying` show here too, not just on `delegate top`.
+  # --repo PATH keeps only that project's tasks: the same match rule `top --repo` uses, so a
+  # symlinked or trailing-slash spelling of the checkout's path is still that project.
+  local repo="" filt=() seen=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --repo) [ $# -ge 2 ] || { echo "usage: delegate list [--repo PATH]" >&2; exit 2; }
+              repo=$2; seen=1; shift 2 ;;
+      *) echo "usage: delegate list [--repo PATH]" >&2; exit 2 ;;
+    esac
+  done
+  if [ "$seen" = 1 ]; then
+    # an empty value filters nothing, which is not what a caller who typed --repo asked for
+    [ -n "$repo" ] || { echo "usage: delegate list [--repo PATH]" >&2; exit 2; }
+    filt=(--repo "$repo")
+  fi
   local out id rounds st worktree
-  out=$(python3 "$DELEGATE_HOME/lib/taskstate.py" statuses --state "$DELEGATE_STATE")
+  out=$(python3 "$DELEGATE_HOME/lib/taskstate.py" statuses --state "$DELEGATE_STATE" "${filt[@]}")
   [ -n "$out" ] || { echo "(no tasks)"; return 0; }
   printf '%-40s %-6s %-24s %s\n' TASK ROUNDS STATUS WORKTREE
   while IFS=$'\t' read -r id rounds st worktree; do
@@ -1369,6 +1420,9 @@ cmd_rm() {
   if [ "$HERE" = 1 ]; then   # your checkout and branch are yours: only the snapshot refs go
     git -C "$REPO" for-each-ref --format='%(refname)' "refs/delegate/$SLUG/" | while read -r r; do git -C "$REPO" update-ref -d "$r"; done
   else
+  # Only the task's own worktree goes. The per-repo folder above it stays even when this was its
+  # last task: a container bind-mounts <DELEGATE_WORKTREES>/<project>, and removing the folder
+  # under a live bind mount breaks it. Nothing here prunes an empty project folder.
   if [ -d "$WORKTREE" ]; then git -C "$REPO" worktree remove --force "$WORKTREE"; fi
   git -C "$REPO" worktree prune
   if [ "$delbranch" = 1 ]; then git -C "$REPO" branch -D "$BRANCH"; else note "kept branch $BRANCH (pass --delete-branch to drop it)"; fi
@@ -2306,7 +2360,9 @@ cmd_ledger() { # append | show | review | import — the ledger's write side, an
 # `review` rows only — timeline lines are dropped at the line level before they are parsed —
 # and every figure comes off those rows, never from chain state (`chain --clean` removes that)
 # nor from a task dir (prune does). Counts only: stats knows no prices and prints no dollars.
-STATS_USAGE="usage: delegate stats [--chain NAME] [--repo R] [--since YYYY-MM-DD] [--json]"
+STATS_USAGE="usage: delegate stats [--chain NAME] [--repo R] [--since YYYY-MM-DD] [--json]
+       R is a project path: rows match it exactly, or when their repo axis is the same
+       directory under another spelling (a symlink, a trailing slash)"
 cmd_stats() {
   local chain="" repo="" since="" mode="text"
   while [ $# -gt 0 ]; do
@@ -2457,8 +2513,9 @@ delegate — hand implementation work to a self-hosted coding model, then review
                        [--copy PATH]... [--read PATH]... [--github] [--service postgres] [--grant NAME]... [--allow GUARD]...
                        [--orb .orb-target [--orb-flash]]
                        [--egress filtered|open] [--model M | --hard] [--timeout S]
-      New worktree + branch delegate/SLUG from REF (default: current branch), run the worker
-      on the spec, commit its work, run CMD, print the report. ('-' reads the spec from stdin.)
+      New worktree + branch delegate/SLUG from REF (default: current branch), the worktree filed
+      under its project at <DELEGATE_WORKTREES>/<project>/<slug>; run the worker on the spec,
+      commit its work, run CMD, print the report. ('-' reads the spec from stdin.)
       --here: supervised, in place — the worker edits your checkout directly, natively and
       unsandboxed (no worktree, branch, container, proxy or commits); rounds are snapshots
       under refs/delegate/SLUG/, so diff/report/continue work as usual. For when you watch it.
@@ -2474,10 +2531,12 @@ delegate — hand implementation work to a self-hosted coding model, then review
                                    remove tasks idle N days (default DELEGATE_PRUNE_DAYS=14; `run`
                                    does this by itself), and with --caches the shared caches
   delegate peek ID                 compact snapshot of the current round (a few hundred tokens)
-  delegate top [ID] [--once] [--interval S] [--all]
+  delegate top [ID] [--once] [--interval S] [--all] [--repo PATH]
                                    live view of every round, refreshed every 2 s in your own terminal
                                    (no dashboard needed): state, elapsed, steps, tokens, current item,
-                                   last action; --once prints one frame and exits (scripts, SSH)
+                                   last action; --once prints one frame and exits (scripts, SSH);
+                                   --repo PATH: one project's tasks only, and no leads (they are not
+                                   per project, and their names would leak other work)
   delegate chain PLAN.json [--status | --clean | --wait] [--on-done CMD] [--on-step CMD]
   delegate wait PLAN.json [--timeout S]   block this process until the chain stops (run it in the background)
                                   run a planned slice unattended: each step on the previous step's
@@ -2491,7 +2550,7 @@ delegate — hand implementation work to a self-hosted coding model, then review
   delegate verify ID [CMD]         re-run the verify command in the worker environment
   delegate accept ID -m "why" [--run]  close a failed round as delegator-verified (reason required; --run re-verifies first; the report keeps the failure)
   delegate exec ID -- CMD...       run any command in the worker environment (node, db, ...)
-  delegate list                    tasks, rounds, last status
+  delegate list [--repo PATH]      tasks, rounds, last status (--repo: one project's tasks only)
   delegate rm ID [--delete-branch] remove worktree, sidecar and state (branch kept by default)
   delegate ledger append --kind K [--task T] [--fields k=v[,k=v]...] [--task-dir DIR]
                          [--status S] [--exit N] [--file F|-]
