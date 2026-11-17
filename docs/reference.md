@@ -164,7 +164,8 @@ partial work is still committed, and the round reports as `aborted`.
 ### The telemetry ledger (`delegate ledger`)
 
 One append-only JSONL file — `$DELEGATE_LEDGER`, default `$DELEGATE_STATE/ledger/events.jsonl` —
-holds one summary row per round, verdict, review and timeline, across every task: the input to
+holds one summary row per round, verdict, review, timeline and chain run, across every task:
+the input to
 trend model performance over time (see *Measuring changes*) without walking task directories,
 and without a database. Rows carry identity, times, token and cost totals — **never** prompts,
 tool inputs or outputs — so the ledger is safe to keep after `delegate rm` and to read by hand.
@@ -177,7 +178,7 @@ delegate ledger append --kind round --task-dir ~/.local/state/delegate/abc123 \
     --file round.json --fields exit_code=0    # write one row (used by lifecycle, and you)
 ```
 
-`append` takes `--kind` (round|verdict|review|timeline) plus the row from `--task-dir DIR`'s
+`append` takes `--kind` (round|chain|verdict|review|timeline) plus the row from `--task-dir DIR`'s
 `meta.env` (identity defaults), `--file F` (a JSON object; `-` reads stdin) and the
 `--status`/`--exit`/`--task`/`--fields k=v,...` scalars, each overriding the one before it.
 `append --kind round --round-from-report R --events E` is the round-row form: it builds the
@@ -195,6 +196,21 @@ derivation itself — a round's `events.jsonl` -> the steps, tool times and toke
 `timeline` row holds, with no tool payload ever read — is `lib/ledger.py`'s `derive_timeline`,
 and the file protocol that module's own. `lib/ledger.py` is importable; `delegate ledger` is its
 whole command-line surface, and the only writer on the command line.
+
+**Forensics (T2-F): round rows at schema 3, and the chain row.** A round row now also keeps
+what its record loses to `delegate prune`: `todos` (the plan's items from the round's final
+todo write — at most 50, each text cut to 200 characters) and `worker_report` (the worker's
+closing block parsed: the claimed status plus the *not verified*, *deviations*, *decisions*,
+*omissions*, *suggestions* and *questions* lists, at most 20 items of 300 characters each;
+`FILES`, `VERIFIED` and `EVIDENCE` name paths and command lines and are never kept). Both are
+derived by `lib/report.py` into `report.json`, so an import rebuilds them. And every
+`delegate chain` run ends — when it stops for any reason, SIGINT/SIGTERM included — with one
+`kind:"chain"` row that `lib/chain.py` writes: the plan's name, its absolute repo and project,
+the sha256 of the plan file's bytes, start and end, the outcome
+(`done`, `blocked`, `partial`, `failed`, `interrupted`), the run's exit code, one entry per
+step with its status and round/retry counts, and the orchestrator session. `--status`,
+`--wait` and `--clean` write no row. `stats` ignores chain rows — a chain is not a round.
+Like every other write, neither field nor row is ever fatal: one `warn:` line, same result.
 
 **Your verdicts: `delegate ledger review`.** When a step lands you record what you decided; the
 ledger stores it as one `review` row, linked to that task's round rows by task id — a verdict is

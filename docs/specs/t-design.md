@@ -53,7 +53,9 @@ raw log is pruned after 14 days, R2), which `delegate prune`/`delegate rm`
   version in `lib/ledger.py`'s `KINDS`). T1 ships `round:1`, `timeline:1`, `review:1` and
   registers `benchmark`/`verdict` (slice B's; see §Slice B) so readers tolerate them
   before they exist. Later revisions: `round:2` adds the orchestrator fields; `timeline:2`
-  (T3) adds `ctx` to each step and the `events` array. Readers accept any schema of a
+  (T3) adds `ctx` to each step and the `events` array; `round:3` (T2-F) adds `todos` and
+  `worker_report`, and T2-F registers `chain:1` (one row per `delegate chain` run, written
+  by lib/chain.py). Readers accept any schema of a
   known kind at or below the registered version, so v1 timeline rows still import, still
   show, and simply have no positions. Fields a source cannot give stay empty — never
   guessed.
@@ -96,6 +98,8 @@ is the order `lib/ledger.py` writes for the kind.
 | `nudges` | `report.json` `nudges` |
 | `tool_calls`, `tool_errors`, `errors` | `report.json` (lib/report.py `summarize`) |
 | `todos_done`, `todos_total` | from `report.json` `todos` (~137): entries with `status == "completed"` / all entries (~219 counts open ones the same way); empty when no list |
+| `todos` | T2-F, round:3 — the round's final todo write as `[{"text", "status"}]` (`report.json` `todo_items`; item `content` becomes `text`), at most 50 items, each text cut to 200 characters; null when the round made no todo write |
+| `worker_report` | T2-F, round:3 — the worker's §13 closing block parsed by `lib/report.py`: `{status, not_verified, deviations, decisions, omissions, suggestions, questions}`, at most 20 items per list, each cut to 300 characters, `none` read as empty; `FILES`, `VERIFIED` and `EVIDENCE` are never kept (paths and command lines); null when the final message has no `STATUS:` line |
 | `retries` | this round's retry count = `round - 1` (round dirs are 1-based); stats-level retries are derived from the rows, never from chain state, which `--clean` removes (§Stats) |
 | `round_start`, `round_end` | `finalize_round`'s `start`/`end` epoch-seconds arguments (~715) |
 | `duration_s` | `report.json` `duration_s` |
@@ -179,6 +183,30 @@ review documents, no verdict inferred from anything.
 | `note` | `--note TEXT`, free text the orchestrator typed; empty unless given |
 | `ts` | append time |
 
+### `kind: "chain"` — one row per `delegate chain` run, written when the run stops (T2-F)
+
+Task records get pruned; chain state gets `--clean`ed; this row is what a later reader has
+of a finished slice: how it ended, on which step, with what exit code. Steps, statuses and
+counts only — no step text, no commands, no diffs (R4). Written once per run by
+`lib/chain.py` when `run(plan)` stops for any reason, SIGINT/SIGTERM included (the handler
+writes the row, restores the default disposition and re-raises, so the run still dies by
+the signal); `--status`, `--wait` and `--clean` write none. Writing it follows `fire_hook`:
+one warning line on failure, never an outcome or exit-code change.
+
+| field | source |
+|---|---|
+| `kind`, `schema` | `chain`, `1` |
+| `chain` | the plan's `name` |
+| `repo` | the plan's repo, absolute (as `load_plan` resolves it) |
+| `project` | `project_of` over the repo's git common dir — the main checkout for a linked worktree (same rule as the round row) |
+| `plan_hash` | sha256 (hex) of the plan file's bytes: the exact plan this run executed |
+| `started_at`, `ended_at` | the run's clock, ISO-8601 UTC seconds |
+| `outcome` | `done` when every step is done; else the first step that is not done (`blocked`, `partial`, `failed` for anything else); `interrupted` when a signal stopped the run |
+| `exit` | the run's exit code (`0`, `2`, `3`, or `128 + signum` after a caught signal) |
+| `steps` | one entry per plan step, in plan order: `{step, task_id, status, rounds, retries, hard}` — `status` as `status(plan)` reports it; a step that never ran has null counts, not zero |
+| `orchestrator`, `orchestrator_session` | the environment the chain runs in, same source and token rule as `meta.env`'s `ORCH`/`ORCH_SESSION`; null when unknown |
+| `ts` | append time |
+
 ## Write points
 
 | moment | code | writer |
@@ -186,6 +214,7 @@ review documents, no verdict inferred from anything.
 | round ends | `finalize_round` (bin/delegate: after `lib/report.py report` writes `$rd/report.json`, before the wake hook ~765) appends the `round` row then the `timeline` row | host |
 | effort recorded | `cmd_run`/`cmd_continue` meta.env write block (~921): `EFFORT` | host |
 | review lands | `delegate ledger review ...` | orchestrator |
+| chain run ends | `lib/chain.py` appends the `chain` row (T2-F): in `main()`'s finally, and from the SIGINT/SIGTERM handler before re-raising | host |
 | import, once | `delegate ledger import` (§Import) | host |
 
 `fire_hook` (lib/chain.py) stays the failure pattern for every one of them: one warning

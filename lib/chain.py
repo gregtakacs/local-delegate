@@ -75,9 +75,11 @@ A failing step's changes stay uncommitted in the checkout; re-running resumes it
 
 Nothing here reviews code. That is the orchestrator's job, once, at the end of the slice.
 """
+import hashlib
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -85,6 +87,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import taskstate                                                      # the task states top/list use
+import ledger                                                         # the chain row (T2-F)
 
 ME = Path(__file__).resolve()
 DELEGATE = os.environ.get("DELEGATE_CHAIN_BIN") or str(ME.parent.parent / "bin" / "delegate")   # override: tests
@@ -478,6 +481,103 @@ def fire_on_step(plan, i, s, total, cmd):
                                      "DELEGATE_CHAIN_STEP_STATUS": "done"})
 
 
+# ------------------------------------------------------------------------ chain row ----
+# T2-F: one ledger row per `delegate chain` RUN, written when run(plan) stops for any reason,
+# including SIGINT/SIGTERM. It is best-effort exactly like the --on-* hooks above: any failure
+# is one warning line on stderr and never changes the chain's outcome or exit code. --status,
+# --wait and --clean write nothing: only a run that ran (or was running) steps ends in a row.
+
+def chain_orchestrator(env):
+    """The harness and session that started this run, read the way bin/delegate's
+    `orchestrator_of` reads them: Claude Code wins when both ids are set (it is then the inner,
+    direct caller), and an id outside the plain token shape is not recorded."""
+    if env.get("CLAUDE_CODE_SESSION_ID"):
+        harness, session = "claude-code", env["CLAUDE_CODE_SESSION_ID"]
+    elif env.get("OPENCODE_SESSION_ID"):
+        harness, session = "opencode", env["OPENCODE_SESSION_ID"]
+    else:
+        return None, None
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", session or ""):
+        return None, None
+    return harness, session
+
+
+def chain_git_common(repo):
+    """The repo's git common dir as an absolute path (the project name for a linked worktree),
+    or None when git will not say — `project_of` then falls back to the repo."""
+    r = git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    gc = r.stdout.strip() if r.returncode == 0 else ""
+    if gc and not os.path.isabs(gc):                       # git < 2.31 prints it relative to cwd
+        gc = str(Path(repo) / gc)
+    return gc or None
+
+
+def chain_step_records(plan):
+    """One record per plan step, in plan order, from `status(plan)` — the same reading
+    `delegate chain --status` prints, taken at the moment the run stopped. A step that never
+    started has no round count, which is not the same as zero."""
+    records = []
+    for s, (_, _, step_status, n) in zip(plan["steps"], status(plan)):
+        ran = step_status != "not started"
+        records.append({"step": s["name"], "task_id": task_id(plan["repo"], s),
+                        "status": step_status, "rounds": n if ran else None,
+                        "retries": (n - 1) if ran and n else None,
+                        "hard": bool(s.get("hard"))})
+    return records
+
+
+def chain_outcome(rc, plan):
+    """`done` when the run ended green with every step done; else the first step that is not
+    done decides the outcome: `blocked` and `partial` as such, `failed` for anything else a
+    step ends in (retries spent, a run that died before the first report)."""
+    rows = status(plan)
+    if rc == 0 and all(st == "done" for _, _, st, _ in rows):
+        return "done"
+    for _, _, st, _ in rows:
+        if st != "done":
+            return st if st in ("blocked", "partial") else "failed"
+    return "failed"
+
+
+def record_chain_row(mark, plan, outcome, exit_code):
+    """Append the chain row, once per run (`mark` guards the write vs. the signal handler).
+    `outcome` names how the run stopped, or None to derive it from the exit code and the step
+    statuses. Everything here is best-effort by contract: an error — unreadable plan,
+    unwritable ledger — is one `delegate chain:` warning, and the run keeps the outcome and
+    exit code it had."""
+    if mark["written"]:
+        return
+    mark["written"] = True
+    try:
+        flag = os.environ.get("DELEGATE_LEDGER", "").strip()
+        if flag.lower() in ("off", "none", "false"):
+            note(f"chain row: the ledger is off (DELEGATE_LEDGER={flag}): the row was not written")
+            return
+        harness, session = chain_orchestrator(os.environ)
+        ledger.append_chain_row(ledger.resolve_ledger({}, os.environ), {
+            "chain": plan["name"], "repo": plan["repo"],
+            "project": ledger.project_of(chain_git_common(plan["repo"]), plan["repo"]),
+            "plan_hash": hashlib.sha256(Path(plan["_path"]).read_bytes()).hexdigest(),
+            "started_at": mark["started"], "ended_at": time.time(),
+            "outcome": outcome or chain_outcome(exit_code, plan), "exit": exit_code,
+            "steps": chain_step_records(plan),
+            "orchestrator": harness, "orchestrator_session": session})
+    except Exception as e:                                # noqa: BLE001 — by contract, as with hooks
+        note(f"chain row: {e} (the chain's result stands)")
+
+
+def install_chain_signals(mark, plan):
+    """SIGINT/SIGTERM: write the chain row, then die by the signal exactly as an unhandled
+    chain does today — the default disposition restored and the signal re-raised at our own
+    pid, so the exit stays 130/143 and --on-done still does not fire."""
+    def handler(signum, frame):                            # noqa: ARG001 — signature
+        record_chain_row(mark, plan, "interrupted", 128 + signum)
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, handler)
+
+
 def main():
     args = sys.argv[1:]
     if not args or args[0] in ("-h", "--help"):
@@ -493,13 +593,19 @@ def main():
     else:
         plan["_on_step"] = _str_opt(args, "--on-step") or os.environ.get("DELEGATE_ON_STEP", "")
         hook = _str_opt(args, "--on-done") or os.environ.get("DELEGATE_ON_DONE", "")
+        mark = {"written": False, "started": time.time()}
+        install_chain_signals(mark, plan)
         rc = 0
         try:
             run(plan)
         except SystemExit as e:
             rc = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
             raise
+        except BaseException:
+            rc = 1                                        # a crash still ends the run: row first
+            raise
         finally:
+            record_chain_row(mark, plan, None, rc)
             if hook:
                 fire_on_done(plan, rc, hook)
 

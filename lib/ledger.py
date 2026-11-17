@@ -36,16 +36,21 @@ import re
 from pathlib import Path
 from typing import Any, Iterator, Mapping
 
-# The kinds this build knows, and the highest schema version of each. `round`, `timeline` and
-# `review` are slice T's; `benchmark` and `verdict` are registered for slice B so a reader of
-# this build already skips their rows cleanly instead of meeting an unknown kind for the first
-# time. A kind is valid iff listed here; a row's schema iff 1 <= schema <= KINDS[kind].
+# The kinds this build knows, and the highest schema version of each. `round`, `timeline`,
+# `review` and `chain` are slice T's; `benchmark` and `verdict` are registered for slice B so a
+# reader of this build already skips their rows cleanly instead of meeting an unknown kind for
+# the first time. A kind is valid iff listed here; a row's schema iff 1 <= schema <= KINDS[kind].
 # round:2 adds `orchestrator`/`orchestrator_session` (the delegating session); a v1 round
-# row reads the same with both null.
+# row reads the same with both null. round:3 (T2-F) adds `todos` (the plan's items and their
+# status) and `worker_report` (the worker's §13 closing block, parsed); a v1 or v2 round row
+# reads the same with both null.
 # timeline:2 adds `ctx` to every step and the `events` list — the reliability positions
 # (nudges, tool errors, verify-fails, each with step and context size); a v1 timeline row
 # reads the same with steps' ctx null and no events.
-KINDS: dict[str, int] = {"round": 2, "timeline": 2, "review": 1, "benchmark": 1, "verdict": 1}
+# chain:1 (T2-F) is one row per `delegate chain` run, written when that run stops: how the chain
+# ended, at which step, with which exit code. It is not a round, so `stats` does not read it.
+KINDS: dict[str, int] = {"round": 3, "timeline": 2, "review": 1, "chain": 1,
+                         "benchmark": 1, "verdict": 1}
 
 LEDGER_FILENAME = "events.jsonl"          # the ledger's own file, beside — never inside — task dirs
 
@@ -159,6 +164,91 @@ def append(ledger_path: str, row: Mapping) -> None:
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
+
+
+# --------------------------------------------------------------------- chain row -------
+# T2-F, one row per `delegate chain` run, written by lib/chain.py when that run stops. Chain
+# state is what `--clean` removes and task records are what `prune` takes, so this row is what a
+# later reader has of a finished slice: how it ended, on which step, with what exit code. Steps,
+# statuses and counts only — no step text, no commands, no diffs (R4).
+CHAIN_KEYS = ("chain", "repo", "project", "plan_hash", "started_at", "ended_at",
+              "outcome", "exit", "steps", "orchestrator", "orchestrator_session", "ts")
+
+CHAIN_OUTCOMES = ("done", "blocked", "partial", "failed", "interrupted")
+
+CHAIN_STEP_KEYS = ("step", "task_id", "status", "rounds", "retries", "hard")
+
+
+def _step_int(value: Any) -> int | None:
+    """A step's round or retry count: a whole number, or null for anything else (a step that
+    never ran has no count, which is not the same as zero rounds)."""
+    n = _num(value)
+    return None if n is None else int(n)
+
+
+def clip_chain_steps(value: Any) -> list:
+    """The chain row's `steps`: one entry per plan step, in plan order, as the caller collected
+    it. Names and counts only; a value that is not a step record is left out, never guessed at."""
+    out = []
+    for item in value if isinstance(value, list) else []:
+        if not isinstance(item, Mapping):
+            continue
+        name = item.get("step") if item.get("step") is not None else item.get("name")
+        task_id = item.get("task_id")
+        out.append({
+            "step": _item(name, 60) if name is not None else "",
+            "task_id": _item(task_id, 120) if isinstance(task_id, str) and task_id else None,
+            "status": _item(item.get("status") or "", 40),
+            "rounds": _step_int(item.get("rounds")),
+            "retries": _step_int(item.get("retries")),
+            "hard": bool(item.get("hard")),
+        })
+    return out
+
+
+def build_chain_row(values: Mapping[str, Any]) -> dict:
+    """The chain row, in CHAIN_KEYS order, from what the run knew at its end: the plan's `name`,
+    its absolute `repo` and the project that repo belongs to (pass `git_common`, the repo's git
+    common dir, and `project` is `project_of`'s answer; pass `project` and it stands), the
+    `plan_hash` of the plan file's bytes, the run's `started_at`/`ended_at` (an epoch number is
+    stored as ISO-8601 UTC, as a round row stores its times), the `outcome` — one of
+    CHAIN_OUTCOMES, `failed` when the caller could not name one — the run's `exit` code, its
+    `steps`, and the `orchestrator`/`orchestrator_session` of the session that started it (null
+    when the environment does not say). Nothing here is inferred from anything but the run."""
+    values = values if isinstance(values, Mapping) else {}
+    repo = values.get("repo")
+    repo = _item(repo, 500) if isinstance(repo, str) and repo else None
+    row: dict[str, Any] = {
+        "chain": _item(values.get("chain"), 60) if values.get("chain") is not None else None,
+        "repo": repo,
+        "project": values.get("project") or project_of(values.get("git_common"), repo),
+        "plan_hash": (_item(values.get("plan_hash"), 64).lower() or None
+                          if isinstance(values.get("plan_hash"), str) else None),
+        "started_at": _iso(values.get("started_at")) if not isinstance(values.get("started_at"),
+                                                                      str) else values.get("started_at"),
+        "ended_at": _iso(values.get("ended_at")) if not isinstance(values.get("ended_at"), str)
+                      else values.get("ended_at"),
+        "outcome": values.get("outcome") if values.get("outcome") in CHAIN_OUTCOMES else "failed",
+        "exit": _step_int(values.get("exit")),
+        "steps": clip_chain_steps(values.get("steps")),
+        "orchestrator": (_item(values.get("orchestrator"), 60) or None
+                         if isinstance(values.get("orchestrator"), str) else None),
+        "orchestrator_session": (_item(values.get("orchestrator_session"), 128) or None
+                                 if isinstance(values.get("orchestrator_session"), str) else None),
+        "ts": values.get("ts"),
+    }
+    if row["ts"] is None:
+        row["ts"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return {k: row[k] for k in CHAIN_KEYS}
+
+
+def append_chain_row(ledger_path: str, values: Mapping[str, Any]) -> dict:
+    """Build the chain row and append it as `kind:"chain"`, schema `KINDS["chain"]`. Raises what
+    the caller turns into its one warning line: writing a chain row never changes the chain's
+    outcome or exit code."""
+    row = build_chain_row(values)
+    append(ledger_path, {"kind": "chain", "schema": KINDS["chain"], **row})
+    return row
 
 
 # ------------------------------------------------------------------- reading ----------
@@ -366,7 +456,7 @@ ROUND_KEYS = (
     "orchestrator", "orchestrator_session", "timeout_s", "edit_cap", "parallel_rounds",
     "status", "worker_status",
     "exit", "verify_rc", "nudges", "tool_calls", "tool_errors", "errors",
-    "todos_done", "todos_total", "retries", "round_start", "round_end",
+    "todos_done", "todos_total", "todos", "worker_report", "retries", "round_start", "round_end",
     "duration_s", "steps", "input_tokens", "output_tokens", "reasoning_tokens",
     "cache_read", "cache_write", "final_context_tokens", "diff_lines",
     "source", "ts",
@@ -421,6 +511,65 @@ def _count_of(value: Any) -> int | None:
     if isinstance(value, list):
         return len(value)
     return _num(value)
+
+
+# The two forensic fields a round row gained in schema 3 (docs/specs/t2-forensics.md): what the
+# plan's items said and what the worker's closing block said. Both are derived by lib/report.py
+# and stored in the round's `report.json`; the limits below are the row's own, applied here so a
+# row's size is bounded by the schema and not by what a worker typed.
+TODO_ITEMS_MAX = 50           # plan items on one row
+TODO_TEXT_MAX = 200           # characters per item
+REPORT_ITEMS_MAX = 20         # lines per closing-block section
+REPORT_TEXT_MAX = 300         # characters per line
+REPORT_SECTIONS = ("not_verified", "deviations", "decisions", "omissions",
+                   "suggestions", "questions")
+
+
+def _item(value: Any, limit: int) -> str:
+    """One stored line of free text: a string, stripped, cut to the schema's limit."""
+    return str(value).strip()[:limit]
+
+
+def clip_row_todos(value: Any) -> list | None:
+    """The round row's `todos`: `[{"text": str, "status": str}]` from the round's final todo
+    write — at most TODO_ITEMS_MAX items, each text cut to TODO_TEXT_MAX characters. Accepts the
+    shape `lib/report.py` writes (`text`) and the raw list an older `report.json` holds
+    (`content`), so an import of a round predating schema 3 rebuilds the same field. None when
+    the round made no todo write: a list of nothing is `[]`, the absence of a list is null."""
+    if not isinstance(value, list):
+        return None
+    out = []
+    for todo in value[:TODO_ITEMS_MAX]:
+        if not isinstance(todo, Mapping):
+            continue
+        text = todo.get("text")
+        if not isinstance(text, str):
+            text = todo.get("content")
+        status = todo.get("status")
+        out.append({"text": _item("" if text is None else text, TODO_TEXT_MAX),
+                    "status": _item("" if status is None else status, 40)})
+    return out
+
+
+def clip_worker_report(value: Any) -> dict | None:
+    """The round row's `worker_report`: the §13 closing block `lib/report.py` parsed, at the
+    schema's limits — REPORT_ITEMS_MAX lines per section, each cut to REPORT_TEXT_MAX characters,
+    a line reading `none` (any case) dropped. None when there is nothing to carry: no closing
+    block, or a `report.json` from before the field existed. The six lists are always present,
+    empty where the worker left the section empty; `FILES`, `VERIFIED` and `EVIDENCE` were never
+    parsed, because they name paths and command lines."""
+    if not isinstance(value, Mapping):
+        return None
+    status = value.get("status")
+    status = _item(status, 40).lower() if isinstance(status, str) else ""
+    out: dict[str, Any] = {"status": status or None}
+    for section in REPORT_SECTIONS:
+        lines = value.get(section)
+        lines = lines if isinstance(lines, list) else []
+        items = [_item(line, REPORT_TEXT_MAX) for line in lines]
+        out[section] = [line for line in items
+                        if line and line.strip(".*:;-— \t").lower() != "none"][:REPORT_ITEMS_MAX]
+    return out
 
 
 # The reliability records a timeline row's `events` list holds (schema 2): who interrupted
@@ -603,6 +752,15 @@ def build_round_row(report: Mapping[str, Any], extra: Mapping[str, Any] | None =
     nudges = report.get("nudges")
     todos = report.get("todos") or []
     done = sum(1 for t in todos if isinstance(t, Mapping) and t.get("status") == "completed")
+    # the schema 3 pair: what lib/report.py derived for this round (todo_items is the row-shaped
+    # list; an older report.json has only the raw `todos`, which clip_row_todos maps the same way)
+    todo_items = extra.get("todos")
+    if todo_items is None:
+        todo_items = report.get("todo_items") if report.get("todo_items") is not None \
+            else report.get("todos")
+    worker_report = extra.get("worker_report")
+    if worker_report is None:
+        worker_report = report.get("worker_report")
     rnd = _num(report.get("round"))
     row: dict[str, Any] = {
         "task_id": pick("task_id"), "slug": pick("slug"), "repo": pick("repo"),
@@ -633,6 +791,9 @@ def build_round_row(report: Mapping[str, Any], extra: Mapping[str, Any] | None =
         "tool_errors": _count_of(pick("tool_errors")),
         "errors": _count_of(pick("errors")),
         "todos_done": done, "todos_total": len(todos),
+        # round:3 — the plan's items as the worker last wrote them, and its closing block
+        "todos": clip_row_todos(todo_items),
+        "worker_report": clip_worker_report(worker_report),
         "retries": (rnd - 1) if rnd is not None and rnd >= 1 else 0,
         "round_start": _iso(pick("round_start")), "round_end": _iso(pick("round_end")),
         "duration_s": _num(report.get("duration_s")),

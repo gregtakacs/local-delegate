@@ -138,6 +138,87 @@ def summarize(events):
     }
 
 
+# The closing block every worker ends with (opencode/delegate-rules.md §13) is what a later
+# reader has left once `delegate prune` removes the task record, so the ledger keeps it: the
+# status the worker claimed, and the six sections that say what it could not verify, what it
+# decided, what it skipped, what it suggests and what it is asking. FILES, VERIFIED and EVIDENCE
+# name paths and command lines and are parsed past, never stored.
+REPORT_SECTIONS = (("NOT VERIFIED", "not_verified"), ("DEVIATIONS", "deviations"),
+                   ("DECISIONS", "decisions"), ("OMISSIONS", "omissions"),
+                   ("SUGGESTIONS", "suggestions"), ("QUESTIONS", "questions"))
+STATUS_LINE = re.compile(r"^\s*STATUS:\s*([a-z]+)", re.M | re.I)
+# A heading is a line that is the section's own name and a colon: `DEVIATIONS:` or
+# `NOT VERIFIED: nothing`. Any heading ends the section before it, tracked or not — that is what
+# keeps a `VERIFIED:` list of command lines out of the stored block.
+BLOCK_HEADING = re.compile(r"^[ \t]*([A-Z][A-Z _-]{0,30})[ \t]*:[ \t]*(.*)$")
+BLOCK_ITEM = re.compile(r"^[ \t]*- (.*)$")
+NONE_WORD = "none"
+
+
+def _is_none_item(text):
+    """§13 spells an empty section `none`; the word alone, in any case and with or without the
+    punctuation a worker leaves on it, is no item."""
+    return text.strip().strip(".*:;-— \t").lower() == NONE_WORD
+
+
+def parse_worker_report(text):
+    """The §13 block as the ledger stores it: `{"status": ..., "not_verified": [...], ...}`, the
+    six lists in the design's order. None when the message carries no `STATUS:` line at all — a
+    worker that ended without the block has nothing to report.
+
+    The block starts at the first `STATUS:` line (the same line `cmd_report` reads for
+    `worker_status`, so the two agree). One section's items are its `- ` lines, the bullet
+    stripped; a heading with text on its own line (`DEVIATIONS: one clause`) is that one item,
+    and a bare heading followed by plain lines takes those. An item reading `none` is no item.
+    The row's own caps (20 items, 300 characters) are lib/ledger.py's, applied at write time.
+    """
+    if not text:
+        return None
+    m = STATUS_LINE.search(text)
+    if not m:
+        return None
+    words = {key: [] for _heading, key in REPORT_SECTIONS}
+    plain = {key: [] for _heading, key in REPORT_SECTIONS}
+    current = None
+    for line in text[m.start():].splitlines():
+        head = BLOCK_HEADING.match(line)
+        if head:
+            name = head.group(1).strip()
+            current = next((k for h, k in REPORT_SECTIONS if h == name), None)
+            inline = head.group(2).strip()
+            if current and inline and not _is_none_item(inline):
+                words[current].append(inline)
+            continue
+        if current is None or not line.strip():
+            continue
+        item = BLOCK_ITEM.match(line)
+        if item:
+            words[current].append(item.group(1).strip())
+        elif not line.lstrip().startswith(("```", "~~~")):
+            plain[current].append(line.strip())
+    out = {"status": m.group(1).lower() if m.group(1) else None}
+    for _heading, key in REPORT_SECTIONS:
+        out[key] = list(words[key] or plain[key])
+    return out
+
+
+def row_todos(todos):
+    """The round's todo list as the ledger's `todos` field wants it: `{"text", "status"}` per
+    item, the text from the item's `content`. None when the round never wrote a list; the caps
+    (50 items, 200 characters) are lib/ledger.py's, applied at write time."""
+    if not isinstance(todos, list):
+        return None
+    out = []
+    for t in todos:
+        if not isinstance(t, dict):
+            continue
+        text = t.get("text") if isinstance(t.get("text"), str) else t.get("content")
+        status = t.get("status")
+        out.append({"text": "" if text is None else str(text),
+                    "status": "" if status is None else str(status)})
+    return out
+
+
 def steps_ctxs(events_path):
     """Per-step context size (input + cache.read + cache.write tokens), in stream order.
 
@@ -302,6 +383,10 @@ def cmd_report(a):
                    "worker_status": worker_status, "exit": exit_code,
                    "duration_s": int(a.duration), "verify_rc": verify_rc,
                    "commit": a.commit, "model": a.model,
+                   # what the round row's `todos` and `worker_report` are built from, kept here so
+                   # `delegate ledger import` rebuilds the same two fields from a stored round
+                   "todo_items": row_todos(s["todos"]),
+                   "worker_report": parse_worker_report(text),
                    "nudges": dict(Counter(re.findall(r"^nudge: (\S+)", read_text(a.stderr), re.M)))},
                   f, indent=2)
     sys.stdout.write(md)

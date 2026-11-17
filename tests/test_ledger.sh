@@ -49,8 +49,8 @@ print("creates=" + (",".join(sorted(os.listdir(sandbox))) or "nothing"))
 PY
 mkdir -p $T/sandbox
 ROUT=$(pylib $T/resolve.py $T/sandbox); RV() { printf '%s\n' "$ROUT" | sed -n "s/^$1=//p"; }
-check "KINDS: slice T's three kinds, and slice B's two registered so they skip cleanly" \
-  '[ "$(RV kinds)" = "benchmark:1,review:1,round:2,timeline:2,verdict:1" ]'
+check "KINDS: slice T's three kinds, slice B's two, and the chain kind, registered so readers skip cleanly" \
+  '[ "$(RV kinds)" = "benchmark:1,chain:1,review:1,round:3,timeline:2,verdict:1" ]'
 check "resolve_ledger: a CLI/config override wins over DELEGATE_LEDGER" \
   '[ "$(RV override)" = /o/led.jsonl ]'
 check "resolve_ledger: DELEGATE_LEDGER is used when no override is given" \
@@ -80,7 +80,7 @@ import ledger
 
 path = sys.argv[1]
 rows = {"unknown-kind": {"kind": "telemetry-x", "schema": 1},
-        "schema-high": {"kind": "round", "schema": 3},
+        "schema-high": {"kind": "round", "schema": 4},
         "schema-zero": {"kind": "round", "schema": 0},
         "schema-missing": {"kind": "round"},
         "schema-string": {"kind": "round", "schema": "1"},
@@ -139,7 +139,7 @@ check "show: --kind filters without touching the file" \
 
 # ----------------------------------------- rows this build must not hand out ----------
 { printf '{"kind":"telemetry","schema":1,"note":"a future build"}\n'      # a kind not in KINDS
-  printf '{"kind":"round","schema":3,"note":"a newer schema"}\n'          # above the registered one
+  printf '{"kind":"round","schema":4,"note":"a newer schema"}\n'          # above the registered one
   printf 'not json at all\n'                                              # malformed
   printf '{"kind":"review","schema":1,"task_id":"trunc' ; } >> "$L"        # killed mid-write: no newline
 before=$(awk 'END{print NR}' "$L")          # the partial tail is a line too, unlike wc -l
@@ -204,7 +204,7 @@ check "append --file: a body field nothing overrides is kept" '[ "$(F $M keep)" 
 check "append --file: a body field the body cannot name is kept too" '[ "$(F $M round)" = "round=2" ]'
 check "merge: a scalar wins over the file body" '[ "$(F $M task_id)" = "task_id=\"from-cli\"" ]'
 check "merge: --fields wins over the scalar" '[ "$(F $M status)" = "status=\"fielded\"" ]'
-check "merge: kind is always the flag, and schema comes from KINDS" '[ "$(F $M kind,schema)" = "$(printf %s\\n "kind=\"round\"" "schema=2")" ]'
+check "merge: kind is always the flag, and schema comes from KINDS" '[ "$(F $M kind,schema)" = "$(printf %s\\n "kind=\"round\"" "schema=3")" ]'
 check "--fields: a JSON value keeps its type" '[ "$(F $M ids)" = "ids=[1, 2]" ]'
 check "--fields: an int keeps its type, not a string" '[ "$(F $M n)" = "n=7" ]'
 check "--fields: one key, several values, comma-joined" '[ "$(F $M todos)" = "todos=\"1,2\"" ]'
@@ -272,7 +272,7 @@ seen, torn = set(), 0
 for line in open(sys.argv[1], encoding="utf-8"):
     try:
         row = json.loads(line)
-        assert row["kind"] == "round" and row["schema"] == 2 and isinstance(row["task_id"], str)
+        assert row["kind"] == "round" and row["schema"] == 3 and isinstance(row["task_id"], str)
         seen.add(row["task_id"])
     except Exception:
         torn += 1
