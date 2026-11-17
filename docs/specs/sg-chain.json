@@ -1,0 +1,13 @@
+{
+  "name": "sg",
+  "base": "sg",
+  "repo": "../..",
+  "steps": [
+    {"name": "sg-1-python-isolation", "spec": "docs/specs/sg-1-python-isolation.md", "hard": true, "retries": 2,
+     "verify": "bash -n bin/delegate && python3 -m py_compile lib/*.py && for t in tests/test_*.sh; do bash \"$t\" || exit 1; done && git diff --exit-code sg -- lib/sandbox-git.sh lib/safepath.py lib/chain.py"},
+    {"name": "sg-2-chain-untrusted", "spec": "docs/specs/sg-2-chain-untrusted.md", "hard": true, "retries": 2,
+     "verify": "bash -n bin/delegate && python3 -m py_compile lib/*.py && for t in tests/test_*.sh; do bash \"$t\" || exit 1; done && git diff --exit-code delegate/sg-1-python-isolation -- bin/delegate lib/sandbox-git.sh lib/safepath.py"},
+    {"name": "sg-3-docs-refusals", "spec": "docs/specs/sg-3-docs-refusals.md", "hard": true, "retries": 2,
+     "verify": "bash -n bin/delegate && python3 -m py_compile lib/*.py && for t in tests/test_*.sh; do bash \"$t\" || exit 1; done && bash tests/test_untrusted_repo.sh && git diff --exit-code delegate/sg-2-chain-untrusted -- bin/delegate lib/sandbox-git.sh lib/safepath.py lib/chain.py"}
+  ]
+}
