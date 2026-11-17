@@ -7,6 +7,9 @@
 # system message breaks the SGLang chat template). Runs node from PATH, else a local node image with
 # no network; skips cleanly when neither exists.
 set -u
+# The notes-loop case needs no DELEGATE_EVIDENCE_DIR: inside a delegate round it is set, and the
+# worker's own NOTES.md there would make "no notes file" false.
+unset DELEGATE_EVIDENCE_DIR
 here=$(cd "$(dirname "$0")/.." && pwd)
 driver=$(mktemp -d); trap 'rm -rf "$driver"' EXIT
 cat > "$driver/drive.mjs" <<'JS'
