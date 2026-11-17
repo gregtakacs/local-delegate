@@ -2,10 +2,10 @@
 """One definition of a delegate task's state, computed read-only from its state dir.
 
   taskstate.py status   ID            the state as one word (running, verifying, interrupted, done, ...)
-  taskstate.py statuses              id / rounds / state / worktree, one tab-separated line per task
+  taskstate.py statuses [--repo P]   id / rounds / state / worktree, one tab-separated line per task
   taskstate.py json     ID           the whole state dict (scripts, tests)
   taskstate.py leads                 the Claude leads' live rows, tab-separated (used by top)
-  taskstate.py top      [ID] [--once] [--interval S] [--all] [--state D] [--cache D] [--color]
+  taskstate.py top      [ID] [--once] [--interval S] [--all] [--repo P] [--state D] [--cache D] [--color]
                                    the live view, as `delegate top` shows it
 
 `state()` never takes a lock and never writes: it is what `delegate top`, `delegate list` and
@@ -28,6 +28,7 @@ from unicodedata import combining, east_asian_width
 LIB = Path(os.path.realpath(__file__)).parent
 sys.path.insert(0, str(LIB))
 import progress                                                # noqa: E402  (event parsing, shared)
+import ledger                                                  # noqa: E402  (project_of: one definition of a project)
 
 DAY = 86400
 FULL_PARSE_MAX = 8 * 1024 * 1024                              # bigger rounds: report + tail only
@@ -98,6 +99,31 @@ def meta_env(task_dir):
             v = v.replace("\\ ", " ")
         out[k] = v
     return out
+
+
+# --------------------------------------------------------------------- the project ----
+def task_project(meta) -> str:
+    """The main checkout a task's work belongs to, in the one way the ledger defines it
+    (lib/ledger.py's `project_of`): the folder above a `<main>/.git` common dir, else the repo it
+    was run in (a bare common dir is its own name). "" when its meta.env names neither."""
+    return ledger.project_of(meta.get("GIT_COMMON") or "", meta.get("REPO") or "") or ""
+
+
+def matches_repo(t_or_meta, repo_filter: str) -> bool:
+    """Does this task belong to the project at PATH? `t_or_meta` is a state() dict or a raw
+    meta_env dict; an empty filter matches every task (no filter given). Both sides go through
+    realpath, so a symlinked, trailing-slash or relative spelling of one directory is one
+    project — and neither path has to exist: realpath of a missing path is still a string.
+    A task also matches its own REPO, not only its project, so a task run from a linked worktree
+    is findable by that worktree's path as well as by the main checkout's."""
+    if not repo_filter:
+        return True
+    want = os.path.realpath(repo_filter)
+    for path in (t_or_meta.get("project") or task_project(t_or_meta),
+                 t_or_meta.get("repo") or t_or_meta.get("REPO") or ""):
+        if path and os.path.realpath(path) == want:
+            return True
+    return False
 
 
 def round_dirs(task_dir):
@@ -332,6 +358,7 @@ def state(task_dir, now=None, state_dir=None):
         "id": tid, "dir": str(d), "round": n, "status": status, "substate": sub, "state": sub or status,
         "running": status == "running", "interrupted": status == "interrupted",
         "worktree": worktree, "branch": meta.get("BRANCH") or "", "repo": meta.get("REPO") or "",
+        "project": task_project(meta), "git_common": meta.get("GIT_COMMON") or "",
         "model": meta.get("MODEL") or "", "verify": meta.get("VERIFY") or "",
         "elapsed": elapsed, "steps": steps, "tool_calls": tools, "tool_errors": failed,
         "output_tokens": out_t, "input_tokens": in_t,
@@ -629,7 +656,11 @@ def frame(tasks, lead_rows, args, width, now, hidden, hidden_leads=0):
 
 
 def visible_tasks(args, now):
+    """The tasks `top` shows plus how many it hid by age. With --repo both counts speak for that
+    one project: a filtered-out task is not "hidden", it is simply not part of this view."""
     ts = all_states(args.state, now)
+    if getattr(args, "repo", ""):
+        ts = [t for t in ts if matches_repo(t, args.repo)]
     if args.all_:
         return ts, 0
     keep = [t for t in ts if t["status"] in ("running", "interrupted", "new")
@@ -653,6 +684,11 @@ def watch_one(args):
     if not (d / "meta.env").exists():
         print(f"delegate top: no such task: {args.id} (see: delegate list)", file=sys.stderr)
         return 1
+    if args.repo and not matches_repo(state(str(d), state_dir=args.state), args.repo):
+        # another project's task: the same answer as for an id that does not exist at all, so one
+        # project's view cannot be used to probe whether another one holds a task of that name
+        print(f"delegate top: no such task: {args.id} (see: delegate list)", file=sys.stderr)
+        return 1
     try:
         while True:
             now = time.time()
@@ -666,7 +702,7 @@ def watch_one(args):
                     + (f", chain {t['chain']}" if t["chain"] else "")]
             if t["interrupted"]:
                 tail.append(f"this round's harness died before writing its report: {t['resume']}")
-            for r in leads(now, [t], args.cache):
+            for r in ([] if args.repo else leads(now, [t], args.cache)):
                 if r["tasks"]:
                     tail.append(f"started by Claude agent {r['name']} ({r['phase']}, "
                                 f"{fmt_elapsed(r['elapsed'])}, {fmt_tokens(r['out'])} out)")
@@ -693,8 +729,13 @@ def cmd_top(argv):
                     help="include tasks finished more than 24 h ago, and leads finished over an hour ago")
     ap.add_argument("--state", default="", help="task state dir (default $DELEGATE_STATE)")
     ap.add_argument("--cache", default="", help="Claude agent state dir (default $XDG_CACHE_HOME/claude-agent-progress)")
+    ap.add_argument("--repo", default="",
+                    help="only this project's tasks (its checkout's path); shows no Claude leads")
     ap.add_argument("--color", action="store_true", help="force ANSI colours even when piped")
     a = ap.parse_args(argv)
+    if "--repo" in argv and not a.repo:      # as `delegate list`: an empty --repo filters nothing
+        print("delegate top: --repo needs a path", file=sys.stderr)
+        return 2
     try:
         a.interval = float(a.interval)
     except ValueError:
@@ -714,7 +755,10 @@ def cmd_top(argv):
         while True:
             now = time.time()
             tasks, hidden = visible_tasks(a, now)
-            rows = leads(now, tasks, a.cache)
+            # With --repo, no leads at all: a lead is a session, not a project, so it is not what
+            # this filter selects, and its name and its other children would leak the work the
+            # caller filtered out. The header says `0 lead(s)`; the section is simply not there.
+            rows = [] if a.repo else leads(now, tasks, a.cache)
             shown = rows if a.all_ else [r for r in rows if not r["hidden"]]
             a.width = shutil.get_terminal_size((120, 40)).columns
             lines = frame(tasks, shown, a, a.width, now, hidden, len(rows) - len(shown))
@@ -760,7 +804,13 @@ def main(argv=None):
             print(t["state"])
         return 0
     if cmd == "statuses":
+        repo = _pick(rest, "--repo", "")
+        if "--repo" in rest and not repo:
+            print("taskstate: --repo needs a path", file=sys.stderr)
+            return 2
         for t in all_states(state_dir):
+            if not matches_repo(t, repo):
+                continue
             print("\t".join([t["id"], str(t["round"]), t["state"], t["worktree"]]))
         return 0
     if cmd == "leads":

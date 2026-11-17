@@ -119,8 +119,24 @@ made with a throwaway index: your index and branch are never touched), so `repor
 `delegate rm` deletes only those refs. One in-place task per checkout; not with `--service`,
 `--copy`, `--base` or `--github`. A chain plan with `"here": true` runs a whole slice this way,
 committing each accepted step on your current branch (see [docs/levels.md](levels.md), level 3h).
+`DELEGATE_UNTRUSTED_REPO=1` refuses all of this (see [Untrusted repositories](#untrusted-repositories)).
 
 ## Use it by hand
+
+### Where the worktrees live: one folder per project
+
+New tasks are filed under their project: `<DELEGATE_WORKTREES>/<project>/<slug>`. The folder name
+is the **main checkout's** — a task started from a linked worktree `~/w/codehub-lead` of `codehub`
+lands at `<W>/codehub/lead-x`, beside that project's other tasks (its id is still `codehub-lead-x`).
+A2's per-project container bind-mounts exactly that folder, at the same host path, so a host-side
+broker can run delegate for one project and see one project's work. Two rules keep old work usable:
+**a task keeps the path written in its `meta.env`** — nothing recomputes a worktree path from a task
+id, so tasks created in the old flat `<DELEGATE_WORKTREES>/<id>` layout keep working for `report`,
+`diff`, `rm`, `continue`, `verify`, `exec`, `peek` and `chain`, and are never migrated — and
+**`delegate rm` never removes the project folder**, not even when its last task goes: that folder is
+a live bind mount, and dropping it under the container would break the mount. A task is refused
+before anything is created if `<W>/<project>` is already a checkout or a file (an old flat-layout
+worktree named like a project, say): move it, or set `DELEGATE_WORKTREES` elsewhere.
 
 ```bash
 delegate run spec.md --repo ~/src/app --name add-handles \
@@ -140,7 +156,7 @@ delegate rm app-add-handles --delete-branch
 | `--base REF` | branch the worktree from REF (default: the repo's current branch). Chain dependent steps by basing on the previous task's `delegate/<slug>` |
 | `--verify CMD` | run after every round in the worker environment. The exit code and log tail go into the report, and the worker is told to run it first |
 | `--copy PATH` | copy an untracked file (e.g. `.env`) from the main checkout. It is never committed |
-| `--read PATH` | mount another checkout read-only, for reference (e.g. code to port). Secret-looking files in it (`.env*`, `*.pem`, `*.key`, `credentials*`, `*token*`, `secrets/`, `.ssh/`...) are blanked |
+| `--read PATH` | mount another checkout read-only, for reference (e.g. code to port). Secret-looking files in it (`.env*`, `*.pem`, `*.key`, `credentials*`, `*token*`, `secrets/`, `.ssh/`...) are blanked. Refused inside the repository under `DELEGATE_UNTRUSTED_REPO=1` (see [Untrusted repositories](#untrusted-repositories)) |
 | `--github` | let the worker clone private GitHub repos and call the API with `DELEGATE_GITHUB_TOKEN_FILE`. Use a fine-grained **read-only** token |
 | `--egress filtered\|open` | network policy for this task (default `DELEGATE_EGRESS=filtered`, see Security model) |
 | `--service postgres` | a throwaway Postgres just for this task, as `$DATABASE_URL`. Removed by `delegate rm` |
@@ -285,6 +301,10 @@ acme/widgets/t-1  m1     hard         5   75% review  17m30s avg 3m30s     1050/
   of import rows takes its `ok%` from statuses, since no review rows exist for an import.
 - `--chain`, `--repo` match a row's own field exactly and `--since` filters on `ts`
   (date-first, inclusive); they combine, and a filter that keeps nothing prints zeroes.
+  `--repo R` also matches a row whose repo axis is the **same directory under another
+  spelling** — when both `R` and that axis are absolute paths and their `realpath`s are equal,
+  a symlink to the checkout and a trailing slash name the same project — so one project's
+  totals do not split in two because a round was recorded through a link.
 - `--json` prints the same facts as one object: `groups`, `findings`, `failures`,
   `totals`, `counts`, the echoed `filters`, and the line counts `skipped` (lines this
   build cannot use) and `filtered` (known kinds stats does not read). No warning goes to
@@ -361,7 +381,8 @@ note = "Removing printers is blocked."
 `--orb FILE` (or `"orb"` in a chain plan) is the built-in grant for an orb on USB serial and the
 LAN. A grant file can name it too, with `kind = "orb"` and `target = "/abs/path/.orb-target"`, so a
 chain plan can say `"grants": ["orb-desk"]`. It **parses** the `.orb-target` (`ORB_LABEL`,
-`ORB_BASE_MAC`, `ORB_SERIAL`, `ORB_IP`) and never executes it. For that task:
+`ORB_BASE_MAC`, `ORB_SERIAL`, `ORB_IP`) and never executes it. Refused under
+`DELEGATE_UNTRUSTED_REPO=1`: the file is read from the repository on the host. For that task:
 
 - **Network:** `host`, so HTTP to the orb, mDNS and `ip neigh` (re-proving the IP against the MAC)
   work. The egress filter doesn't apply.
@@ -425,6 +446,15 @@ slice once, runs the chain, and checks the result once.
 piping it to a log works); `--all` includes tasks finished more than 24 h ago; `--color` forces
 colour onto a pipe, and `NO_COLOR` turns it off wherever `--color` does the opposite.
 `delegate top ID` shows that one task: `delegate peek` plus its state, chain and lead.
+`--repo PATH` narrows the view to one project, and `delegate list [--repo PATH]` filters the same
+way (both are `lib/taskstate.py`'s one rule): a task matches when the directory `PATH` names is its
+project — its main checkout — or the repo it was run in, compared through `realpath`, so a symlink
+to the checkout, a trailing slash, or a path relative to the cwd all match, and a path that does not
+exist matches nothing it would not have anyway. With `--repo`, the "N task(s)" count and the hidden
+count speak for that project alone and **the Claude leads are not shown at all**: a lead is a
+session, not a project, and its name and its other children would leak the very work the filter
+exists to keep out. `delegate top ID --repo PATH` for another project's task prints the same
+`no such task` line an unknown id gets, without confirming that the task exists.
 
 The states come from `lib/taskstate.py`, which `delegate list`, `delegate chain` and `top` all
 read: **running** (a round's lock exists and it has no report yet), **verifying** (its `verify.log`
@@ -535,6 +565,71 @@ delegate prune --days 0 --delete-branch --caches   # everything not running, the
 
 Native and `--here` tasks share one cache directory (`~/.cache/delegate/native`), so a Go or
 npm cache is built once, not once per task.
+
+## Untrusted repositories
+
+`DELEGATE_UNTRUSTED_REPO=1` (env or `config.env`; default `0`) says: someone other than you can
+write this repository — its `.git`, its working tree and its task worktrees under
+`<DELEGATE_WORKTREES>/<project>/`. With `0` delegate behaves exactly as before. With `1`, every
+host-side step that would read or run the repository through git instead runs inside a throwaway
+container, and any command that cannot be made safe this way **refuses** rather than half-works.
+It is one setting for a whole run; whoever starts delegate for such a repository sets it, and
+nothing names or trusts a particular caller. A task created with the setting on records
+`UNTRUSTED=1` in its (host-owned) `meta.env`, so `diff`, `verify`, `continue` and `rm` keep
+obeying the mode later even when the env is not set again.
+
+**What runs sandboxed, and its limits.** Every git call about the repository, and every path
+step that could follow a planted symlink (`check_gitlink`, `--copy`, the round commit, diffstats)
+goes through one container: `docker run --rm` with `--network none`, `--cap-drop ALL`,
+`no-new-privileges`, a read-only root and a tmpfs `/tmp`, as your uid, binding **only** `REPO`
+and `<DELEGATE_WORKTREES>/<project>` — no secrets, no Docker socket, no other repository. The
+repository's `core.fsmonitor`, hooks, external diff and commit signing are switched off inside
+it with `-c` overrides; clean/smudge filters and textconv do run, but they can reach only those
+two mounts. The scheme assumes the other party can write *inside* those two directories but
+cannot replace the directories themselves or anything above them; where both are bind mounts
+that is exactly the shape you get. It costs a container start (a few seconds) spread over
+rounds that take minutes.
+
+**The inode check.** Before a path is handed to docker as a mount source, `lib/safepath.py`
+walks it from `/` one component at a time with `O_NOFOLLOW` (a symlink at any component, or a
+non-normal path, exits 3 with `SECURITY: …`) and records the `DEV:INO` of the directory it
+opened; sources are mounted with `--mount`, so a missing source fails instead of being created
+as root. Inside the container an entrypoint wrapper (`lib/sandbox-git.sh`) re-opens each mount,
+compares its `DEV:INO` with the host's answer, and only then execs the image's own entrypoint —
+a path swapped for a symlink between the two checks stops the start before any worker code
+runs. Worker mounts get the same check.
+
+**What refuses with `DELEGATE_UNTRUSTED_REPO=1`** (message prefix `delegate:
+DELEGATE_UNTRUSTED_REPO=1:`, exit 1, nothing touched):
+
+- any command when the variable is not exactly `0` or `1` (`must be 0 or 1`);
+- `run --here`, and any task on the native runner — those run the worker on the host, where no
+  sandbox exists (`--here` also refuses a chain plan with `"here": true`, exit 2, before any
+  step starts);
+- `run --orb FILE` — the target file is read from the repository on the host;
+- a `--repo` that is not the top of a main checkout: a subdirectory, a linked worktree or
+  gitfile, a symlinked `.git`, or a `.git` with a `commondir` file (it borrows another
+  repository); delegate never asks git where the repo is — the path is realpath'd once and
+  checked as a string;
+- a repository or worktree path containing a comma, tab or newline (they ride through the mount
+  parsing), a (re)solved mount source that safepath finds to be or run through a symlink, and
+  `DELEGATE_WORKTREES` inside the repository itself;
+- `--read PATH` for anything inside the repository or its worktrees — it is re-mounted (and
+  re-resolved) every round, so the repo could point it anywhere;
+- any command on an existing task except `rm`, when the task is in-place or on the native
+  runner, predates the per-repo worktree layout, or has a worktree git dir that is not under
+  `<REPO>/.git/worktrees/`, or a `GIT_COMMON` that is not the string `<REPO>/.git`. `rm` such
+  tasks: it only runs git, sandboxed.
+
+**Behaviour that differs with the setting on:** repository hooks do not run on `worktree add`;
+a clean/smudge filter that needs network, or a binary missing from the sandbox image (git-lfs),
+fails; commits are never signed; `delegate diff` output is never coloured.
+
+Companion settings: `DELEGATE_SANDBOX_IMAGE` — the image these containers use (default
+`DELEGATE_IMAGE`; it needs bash, git ≥ 2.42 and coreutils) — and `DELEGATE_SANDBOX_TIMEOUT` —
+seconds one sandboxed git step may take before it is killed (default `600`). Refusals and the
+mount checks are covered by `tests/test_untrusted_repo.sh`, which needs neither docker nor
+network.
 
 ## Security model
 

@@ -85,6 +85,11 @@ install_line() {
                                      # only turn it on for an endpoint you run yourself.
 : "${DELEGATE_PROGRESS_URL:=}"       # default: the endpoint in use, minus /v1
 : "${DELEGATE_PROGRESS_KEY_FILE:=}"  # default: DELEGATE_API_KEY_FILE
+: "${DELEGATE_UNTRUSTED_REPO:=0}"     # 1: someone else can write the repository (its .git, working tree and task
+                                     # worktrees): delegate's host-side git and path handling for it run in a
+                                     # throwaway container (docs/reference.md "Untrusted repositories"). 0: as always.
+: "${DELEGATE_SANDBOX_IMAGE:=}"      # the image those containers use (it needs bash, git, coreutils); empty = DELEGATE_IMAGE
+: "${DELEGATE_SANDBOX_TIMEOUT:=600}" # seconds one sandboxed git step may take
 
 DELEGATE_API_KEY_FILE=$(expand "$DELEGATE_API_KEY_FILE")
 DELEGATE_WORKTREES=$(expand "$DELEGATE_WORKTREES")
@@ -92,6 +97,8 @@ DELEGATE_STATE=$(expand "$DELEGATE_STATE")
 DELEGATE_LEDGER=$(expand "$DELEGATE_LEDGER")
 DELEGATE_RULES_DIR=$(expand "$DELEGATE_RULES_DIR")
 [ -n "$DELEGATE_GITHUB_TOKEN_FILE" ] && DELEGATE_GITHUB_TOKEN_FILE=$(expand "$DELEGATE_GITHUB_TOKEN_FILE")
+case "$DELEGATE_UNTRUSTED_REPO" in 0|1) ;; *) die "DELEGATE_UNTRUSTED_REPO must be 0 or 1, not '$DELEGATE_UNTRUSTED_REPO'" ;; esac
+[ -n "$DELEGATE_SANDBOX_IMAGE" ] || DELEGATE_SANDBOX_IMAGE=$DELEGATE_IMAGE
 
 need_config() {
   [ -n "$DELEGATE_BASE_URLS" ] || die "DELEGATE_BASE_URLS is not set (edit $CONFIG_FILE, or run install.sh)"
@@ -122,19 +129,151 @@ pick_base_url() {
 # rewrite the worktree's `.git` pointer file to aim at a gitdir it planted, with hooks), and
 # hooks/fsmonitor forced off. WT_GITDIR comes from meta.env, recorded before the worker ran.
 wgit() {
-  git --git-dir="$WT_GITDIR" --work-tree="$WORKTREE" \
-      -c core.hooksPath=/dev/null -c core.fsmonitor=false -c diff.external= "$@"
+  if untrusted; then sbx wt-git "$WT_GITDIR" "$WORKTREE" "$GIT_COMMON" -- "$@"; return; fi
+  # GIT_COMMON_DIR pins the repository's own administration: the worktree's git dir is the
+  # worker's to write, and its `commondir` file would otherwise choose whose config, hooks and
+  # filters this host-side git loads.
+  # No `-c diff.external=`: git 2.53 runs an empty value as a command and every diff fails;
+  # delegate's own diffs pass --no-ext-diff instead.
+  GIT_COMMON_DIR="$GIT_COMMON" git --git-dir="$WT_GITDIR" --work-tree="$WORKTREE" \
+      -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"
+}
+# Host-side git on the task's main checkout ($REPO): plain host git, or the sandbox's.
+hgit() {
+  if untrusted; then sbx repo-git "$REPO" -- "$@"; return; fi
+  git -C "$REPO" "$@"
+}
+
+# ------------------------------------------------- untrusted repository (DELEGATE_UNTRUSTED_REPO=1)
+# For a repository someone else can write — its .git (config, hooks, attributes), its working tree
+# and the task worktrees under <DELEGATE_WORKTREES>/<project> — plain host git would run that
+# party's fsmonitor, hooks, filters and textconv on the host, follow its core.worktree and gitfile
+# redirects, and act on paths it can swap for symlinks. With the setting on (or recorded on the
+# task: UNTRUSTED=1 in meta.env), every git call and every path step delegate takes for that repo
+# runs in a throwaway container (lib/sandbox-git.sh) that mounts only the repo and its worktrees
+# folder: no network, no secret, no Docker socket. What the repo makes git do there reaches only
+# what it already owns. The worker's own container gets its mounts checked by inode first.
+# docs/specs/sg-design.md has the threat list.
+untrusted() { [ "$DELEGATE_UNTRUSTED_REPO" = 1 ] || [ "${UNTRUSTED:-0}" = 1 ]; }
+safepath() { python3 -I "$DELEGATE_HOME/lib/safepath.py" "$@"; }   # "PATH<TAB>DEV:INO" per PATH, or exit 3
+SBX_ENV=()
+SBX_WTROOT=""
+
+# A repository delegate is told is untrusted is named by its top folder, exactly: no asking git
+# where the repo is (core.worktree and a gitfile would answer for another one). Its .git must be
+# a real directory that borrows nothing (no commondir), with no symlink anywhere on either path.
+untrusted_repo_check() { # REPO
+  local r=$1
+  case "$r" in *,*|*$'\n'*|*$'\t'*) die "DELEGATE_UNTRUSTED_REPO=1: a repository path with a comma, tab or newline is not supported: $r" ;; esac
+  { [ -d "$r/.git" ] && [ ! -L "$r/.git" ]; } || \
+    die "DELEGATE_UNTRUSTED_REPO=1: $r is not the top of a main checkout ($r/.git must be a directory; a subdirectory, a linked worktree or a gitfile is refused)"
+  [ ! -e "$r/.git/commondir" ] || die "DELEGATE_UNTRUSTED_REPO=1: $r/.git has a commondir file (it borrows another repository); refused"
+  safepath "$r" "$r/.git" >/dev/null || die "DELEGATE_UNTRUSTED_REPO=1: refusing $r (see the SECURITY line above)"
+}
+
+# What an existing task must look like before delegate touches its git or mounts its paths:
+# in the per-repo layout, from a main checkout, docker runner. `rm` may also remove in-place
+# and native tasks (it only runs git); nothing else may, as those run on the host.
+untrusted_task_check() { # [rm]
+  local why=${1:-}
+  untrusted_repo_check "$REPO"
+  [ "$GIT_COMMON" = "$REPO/.git" ] || die "DELEGATE_UNTRUSTED_REPO=1: task $ID's git dir is $GIT_COMMON, not $REPO/.git; refused"
+  if [ "${HERE:-0}" = 1 ]; then
+    [ "$why" = rm ] || die "DELEGATE_UNTRUSTED_REPO=1: $ID is an in-place (--here) task, which runs on the host; only 'delegate rm' is available for it"
+    SBX_WTROOT=""
+    return 0
+  fi
+  [ "$why" = rm ] || [ "$DELEGATE_RUNNER" = docker ] || die "DELEGATE_UNTRUSTED_REPO=1: $ID uses the native runner, which runs the worker on the host; refused"
+  case "$WORKTREE" in *,*|*$'\n'*|*$'\t'*) die "DELEGATE_UNTRUSTED_REPO=1: a worktree path with a comma, tab or newline is not supported: $WORKTREE" ;; esac
+  local parent; parent=$(dirname "$WORKTREE")
+  [ "$(basename "$parent")" = "$(basename "$REPO")" ] || \
+    die "DELEGATE_UNTRUSTED_REPO=1: $ID's worktree $WORKTREE is not in the per-repo layout (<worktrees>/$(basename "$REPO")/...); refused"
+  [[ "$WT_GITDIR" =~ ^"$GIT_COMMON"/worktrees/[A-Za-z0-9._-]+$ ]] || \
+    die "DELEGATE_UNTRUSTED_REPO=1: $ID's worktree git dir is $WT_GITDIR, not one under $GIT_COMMON/worktrees/; refused"
+  SBX_WTROOT=$parent
+}
+
+# The host user's git identity for this repo, as git resolves it (global config and its
+# includeIf, the repo's own user.*), for the sandboxed round commit: the container has no global
+# config. `git config --get` reads config and runs nothing; cwd `/` and a time limit bound it.
+sbx_identity() {
+  local k v
+  SBX_ENV=()
+  for k in name email; do
+    v=$(cd / && GIT_DIR=$GIT_COMMON timeout 10 git config --includes --get "user.$k" 2>/dev/null) || v=""
+    [ -n "$v" ] || continue
+    if [ "$k" = name ]; then SBX_ENV+=(-e "GIT_AUTHOR_NAME=$v" -e "GIT_COMMITTER_NAME=$v")
+    else SBX_ENV+=(-e "GIT_AUTHOR_EMAIL=$v" -e "GIT_COMMITTER_EMAIL=$v"); fi
+  done
+}
+
+# sbx [-i] OP ARGS... — one lib/sandbox-git.sh op in a throwaway container that mounts only $REPO
+# and, when set and present, $SBX_WTROOT (the task's <DELEGATE_WORKTREES>/<project>). Each mount
+# is checked here (no symlink on the path) and again inside, by device and inode, after docker
+# mounted it. stdout is the op's; stderr passes through.
+sbx() {
+  local stdin=() in=/dev/null; [ "${1:-}" = -i ] && { stdin=(-i); in=/dev/stdin; shift; }
+  local mounts=("$REPO") m exp args=() name rc=0
+  [ -n "$SBX_WTROOT" ] && [ -d "$SBX_WTROOT" ] && mounts+=("$SBX_WTROOT")
+  exp=$(safepath "${mounts[@]}") || die "DELEGATE_UNTRUSTED_REPO=1: refusing to mount a path that is or runs through a symlink (see the SECURITY line above)"
+  for m in "${mounts[@]}"; do args+=(--mount "type=bind,source=$m,target=$m"); done
+  name="delegate-sbx-$$-$RANDOM$RANDOM"
+  timeout -k 10 "$DELEGATE_SANDBOX_TIMEOUT" docker run --rm --init --pull never "${stdin[@]}" \
+    --name "$name" --label delegate.sandbox=1 --network none --cap-drop ALL \
+    --security-opt no-new-privileges --read-only --tmpfs /tmp:rw,nosuid,nodev,size=64m \
+    --pids-limit 256 --user "$(id -u):$(id -g)" --entrypoint /opt/delegate/sandbox-git.sh \
+    --mount "type=bind,source=$DELEGATE_HOME/lib/sandbox-git.sh,target=/opt/delegate/sandbox-git.sh,readonly" \
+    "${args[@]}" -e HOME=/tmp -e GIT_CONFIG_NOSYSTEM=1 -e GIT_TERMINAL_PROMPT=0 \
+    -e "DELEGATE_SBX_EXPECT=$exp" "${SBX_ENV[@]}" -w / "$DELEGATE_SANDBOX_IMAGE" "$@" < "$in" || rc=$?
+  if [ "$rc" = 124 ] || [ "$rc" = 137 ]; then
+    docker rm -f "$name" >/dev/null 2>&1 || true
+    warn "sandboxed git step '$1' did not finish in ${DELEGATE_SANDBOX_TIMEOUT}s (DELEGATE_SANDBOX_TIMEOUT)"
+  fi
+  return "$rc"
 }
 
 # Restore the worktree's `.git` pointer if a round changed it, and say so loudly.
 check_gitlink() {
   [ "${HERE:-0}" = 1 ] && return 0
+  if untrusted; then
+    local r; r=$(sbx gitlink "$WT_GITDIR" "$WORKTREE") || die "could not check $WORKTREE/.git in the sandbox"
+    case "$r" in
+      restored$'\t'*)
+        warn "SECURITY: $WORKTREE/.git was modified by the worker (was: ${r#restored$'\t'}); restored"
+        echo "SECURITY: worktree .git pointer was tampered with and restored" >> "${1:-/dev/null}" ;;
+    esac
+    return 0
+  fi
   local want="gitdir: $WT_GITDIR" have
   have=$(cat "$WORKTREE/.git" 2>/dev/null || true)
   if [ "$have" != "$want" ]; then
     warn "SECURITY: $WORKTREE/.git was modified by the worker (was: ${have:0:120}); restored"
     rm -rf "$WORKTREE/.git"; printf '%s\n' "$want" > "$WORKTREE/.git"
     echo "SECURITY: worktree .git pointer was tampered with and restored" >> "${1:-/dev/null}"
+  fi
+  # The worktree's git dir is mounted into the worker. Two files there would steer host-side git:
+  # `commondir` (whose repository wgit treats as the common one; wgit pins it anyway) and
+  # `config.worktree` (per-worktree config git reads when the repo enables worktreeConfig).
+  # Neither is delegate's to change: a commondir that does not lead back to $GIT_COMMON is
+  # restored, and a config.worktree the worker wrote is moved aside, both said out loud.
+  [ -n "$WT_GITDIR" ] && [ -d "$WT_GITDIR" ] && [ ! -L "$WT_GITDIR" ] || return 0
+  local cd_file=$WT_GITDIR/commondir cd_now="" cd_real=""
+  if [ -L "$cd_file" ] || [ ! -f "$cd_file" ]; then cd_now="(missing or not a file)"
+  else
+    cd_now=$(head -c 4096 "$cd_file" 2>/dev/null | head -1)
+    case "$cd_now" in /*) cd_real=$(realpath -e -- "$cd_now" 2>/dev/null) ;;
+                      *) cd_real=$(cd "$WT_GITDIR" 2>/dev/null && realpath -e -- "$cd_now" 2>/dev/null) ;; esac
+  fi
+  if [ "$cd_real" != "$(realpath -e -- "$GIT_COMMON" 2>/dev/null)" ]; then
+    warn "SECURITY: $cd_file was modified by the worker (was: ${cd_now:0:120}); restored"
+    rm -rf "$cd_file"; printf '../..\n' > "$cd_file"
+    echo "SECURITY: worktree commondir was tampered with and restored" >> "${1:-/dev/null}"
+  fi
+  if [ -e "$WT_GITDIR/config.worktree" ] || [ -L "$WT_GITDIR/config.worktree" ]; then
+    local aside; aside="$WT_GITDIR/config.worktree.delegate-quarantined.$(date +%s)"
+    mv -f -- "$WT_GITDIR/config.worktree" "$aside"
+    warn "SECURITY: the worker wrote $WT_GITDIR/config.worktree; moved aside to $aside"
+    echo "SECURITY: worktree config.worktree written by the worker, moved aside" >> "${1:-/dev/null}"
   fi
 }
 
@@ -157,6 +296,37 @@ slugify() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9._-' '
 
 # ---------------------------------------------------------------- task state -------
 task_dir() { printf '%s/%s' "$DELEGATE_STATE" "$1"; }
+
+# New tasks are filed per repo: <DELEGATE_WORKTREES>/<project>/<leaf>. A2's per-project container
+# bind-mounts only that project's folder, so a host-side broker can show one project's tasks and
+# nothing else. The project dir name is lib/ledger.py's project_of: the main checkout — the
+# folder above a `<main>/.git` common dir — or, for a bare common dir (or none at all), the
+# repo's own basename. The leaf is the task id with its project's `P-` prefix removed, so tasks
+# run from a linked worktree `~/w/codehub-lead` of codehub land beside the rest of codehub's:
+# <W>/codehub/lead-x. Only NEW tasks: every existing command reads WORKTREE from meta.env, so a
+# task made in the old flat layout keeps its path for ever.
+task_worktree_path() { # GIT_COMMON REPO ID -> prints the worktree path for a new task
+  local gc=${1%/} repo=${2%/} id=$3 p l
+  case "$gc" in
+    */.git) p=${gc%/.git} ;;   # the main checkout's own folder
+    *) p=$repo ;;             # a bare common dir, or no common dir: the repo's folder
+  esac
+  p=${p##*/}
+  [ -n "$p" ] || p=_           # a checkout at "/" has no name to file it under
+  l=$id
+  case "$id" in "$p"-*) l=${id#"$p"-} ;; esac
+  printf '%s/%s/%s\n' "$DELEGATE_WORKTREES" "$p" "$l"
+}
+
+# <W>/<project> holds that project's task worktrees and nothing else, so it must not already BE
+# one: an old flat-layout worktree named like the project, or somebody's clone dropped there,
+# would end up nested inside another git working tree. Refuse before a branch, a task dir or a
+# folder is created.
+worktree_folder_check() { # PATH -> die unless that per-repo folder can hold worktrees
+  [ -e "$1" ] || return 0
+  { [ -d "$1" ] && [ ! -e "$1/.git" ]; } || \
+    die "$1 is not a per-repo worktree folder (it is a checkout or a file); move it or set DELEGATE_WORKTREES"
+}
 
 load_task() {
   local id=$1 d
@@ -254,7 +424,7 @@ make_guard_shims() { # HOME EVIDENCE -> prints the shim dir, or nothing when no 
   local gl; gl=$(grants_py guards "$(grants_file)")
   [ -n "$gl" ] || return 0
   mkdir -p "$dir"
-  DELEGATE_GUARDS="$gl" python3 - "$dir" "$evidence" "$ID" <<'PY'
+  DELEGATE_GUARDS="$gl" python3 -I - "$dir" "$evidence" "$ID" <<'PY'
 import json, os, sys
 d, evidence, task = sys.argv[1], sys.argv[2], sys.argv[3]
 for line in os.environ["DELEGATE_GUARDS"].splitlines():
@@ -556,9 +726,26 @@ run_worker_docker() {
   fi
   # shellcheck disable=SC2206
   local extra=($DELEGATE_DOCKER_ARGS)
+  # The three repo paths. An untrusted repo's party can swap any of them for a symlink, and docker
+  # follows a symlinked source: so each is checked here (no symlink anywhere on it, its inode
+  # taken from the directory opened), mounted with --mount (a missing source fails instead of
+  # being created), and checked again inside by lib/sandbox-git.sh before the image's own
+  # entrypoint runs — a swap between the two checks mounts another inode and stops the start.
+  local wm=(-v "$WORKTREE:$WORKTREE" -v "$GIT_COMMON:$GIT_COMMON:ro" -v "$wt_gitdir:$wt_gitdir")
+  if untrusted; then
+    local exp next
+    exp=$(safepath "$WORKTREE" "$GIT_COMMON" "$wt_gitdir") || die "DELEGATE_UNTRUSTED_REPO=1: refusing to mount the task's paths (see the SECURITY line above)"
+    next=$(docker image inspect -f '{{range .Config.Entrypoint}}{{println .}}{{end}}' "$DELEGATE_IMAGE") || die "image $DELEGATE_IMAGE not present"
+    wm=(--mount "type=bind,source=$WORKTREE,target=$WORKTREE"
+        --mount "type=bind,source=$GIT_COMMON,target=$GIT_COMMON,readonly"
+        --mount "type=bind,source=$wt_gitdir,target=$wt_gitdir"
+        --mount "type=bind,source=$DELEGATE_HOME/lib/sandbox-git.sh,target=/opt/delegate/sandbox-git.sh,readonly"
+        --entrypoint /opt/delegate/sandbox-git.sh -e "DELEGATE_SBX_EXPECT=$exp" -e "DELEGATE_SBX_NEXT=$next")
+    set -- exec-next "$@"
+  fi
   docker run --rm --init ${RL_STDIN:+-i} --name "$name" --label delegate.task="$ID" \
     --user "$(id -u):$(id -g)" \
-    -v "$WORKTREE:$WORKTREE" -v "$GIT_COMMON:$GIT_COMMON:ro" -v "$wt_gitdir:$wt_gitdir" \
+    "${wm[@]}" \
     -v "$home:/home/worker" -v delegate-cache:/home/worker/.cache -v delegate-npm:/home/worker/.npm \
     -v "$evidence:$evidence" -v "$DELEGATE_API_KEY_FILE:/run/secrets/delegate_key:ro" \
     -v "$DELEGATE_RULES_DIR:/opt/delegate/opencode:ro" \
@@ -718,7 +905,7 @@ do_round() {
   reap_leftovers "round $n" "$rd/stderr.log"
 
   if [ -z "${SESSION:-}" ]; then
-    SESSION=$(python3 -c 'import json,sys
+    SESSION=$(python3 -I -c 'import json,sys
 for l in open(sys.argv[1]):
     try: s=json.loads(l).get("sessionID")
     except Exception: continue
@@ -786,11 +973,20 @@ finalize_round() { # N RD VERIFY RC START END
   check_gitlink "$rd/stderr.log"
   if [ "${HERE:-0}" = 1 ]; then
     commit=$(snapshot "r$n")
+  elif untrusted; then
+    # one sandboxed step for add -A, the --copy resets, the commit and the new HEAD
+    sbx_identity
+    # shellcheck disable=SC2086
+    commit=$(sbx commit-round "$WT_GITDIR" "$WORKTREE" "$GIT_COMMON" \
+      "delegate($SLUG): round $n$([ "$was_aborted" = 1 ] && echo ' (aborted)')" "${status_line:-STATUS: unknown}" $COPIED) \
+      || die "round $n: the round commit failed in the sandbox"
+    SBX_ENV=()
+    [[ "$commit" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || die "SECURITY: round $n: unexpected commit id from the sandbox: ${commit:0:80}"
   else
   ( cd "$WORKTREE"
     wgit add -A
     for c in $COPIED; do wgit reset -q -- "$c" 2>/dev/null || true; done
-    if ! wgit diff --cached --quiet; then
+    if ! wgit diff --no-ext-diff --cached --quiet; then
       wgit commit -q --no-verify -m "delegate($SLUG): round $n$([ "$was_aborted" = 1 ] && echo ' (aborted)')" \
         -m "${status_line:-STATUS: unknown}"
     fi )
@@ -807,7 +1003,7 @@ finalize_round() { # N RD VERIFY RC START END
     vrc=${vrc:-0}
   fi
 
-  wgit diff --stat=120 "$BASE_SHA" "$commit" > "$rd/diffstat" || true
+  wgit diff --no-ext-diff --stat=120 "$BASE_SHA" "$commit" > "$rd/diffstat" || true
   python3 "$DELEGATE_HOME/lib/report.py" report \
     --id "$ID" --round "$n" --events "$rd/events.jsonl" --stderr "$rd/stderr.log" \
     --exit "$rc" --duration "$((end - start))" --model "$MODEL" \
@@ -819,7 +1015,7 @@ finalize_round() { # N RD VERIFY RC START END
   if [ "${RAW:-0}" = 1 ]; then
     # raw: the worker's own last message, verbatim, is the output; the report stays on disk
     python3 "$DELEGATE_HOME/lib/report.py" final-text "$rd/events.jsonl"
-    note "raw round $n of $ID: $(python3 -c 'import json,sys;r=json.load(open(sys.argv[1]));print(r["status"], "·", r.get("duration_s", "?"), "s")' "$rd/report.json" 2>/dev/null || echo done) · report: delegate report $ID · follow up: delegate continue $ID --raw -"
+    note "raw round $n of $ID: $(python3 -I -c 'import json,sys;r=json.load(open(sys.argv[1]));print(r["status"], "·", r.get("duration_s", "?"), "s")' "$rd/report.json" 2>/dev/null || echo done) · report: delegate report $ID · follow up: delegate continue $ID --raw -"
   else
     cat "$rd/.report-stdout"
   fi
@@ -829,7 +1025,7 @@ finalize_round() { # N RD VERIFY RC START END
   ledger_record_round "$n" "$rd" "$rc" "$start" "$end" || true
   rm -f "$TASK_DIR/.abort"
   grant_unlock
-  progress_stop "$rd" "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["status"])' "$rd/report.json" 2>/dev/null || echo finished)"
+  progress_stop "$rd" "$(python3 -I -c 'import json,sys;print(json.load(open(sys.argv[1]))["status"])' "$rd/report.json" 2>/dev/null || echo finished)"
 }
 
 # ---------------------------------------------------------------- commands ---------
@@ -879,6 +1075,13 @@ cmd_run() {
   fi
   [ -z "$service" ] || [ "$DELEGATE_RUNNER" = docker ] || die "--service needs DELEGATE_RUNNER=docker"
   case "$egress" in filtered|open) ;; *) die "--egress must be filtered or open" ;; esac
+  if untrusted; then
+    # each of these runs worker or harness code on the host, or reads a host path from the repo
+    [ "$here" = 0 ] || die "DELEGATE_UNTRUSTED_REPO=1: --here runs the worker natively in the checkout; refused for an untrusted repository"
+    [ "$DELEGATE_RUNNER" = docker ] || die "DELEGATE_UNTRUSTED_REPO=1: the native runner runs the worker on the host; set DELEGATE_RUNNER=docker"
+    [ -z "$orbfile" ] || die "DELEGATE_UNTRUSTED_REPO=1: --orb reads its target file from the repository on the host; refused"
+    DELEGATE_WORKTREES=$(realpath -m -- "$DELEGATE_WORKTREES")
+  fi
   need_config
   check_image_fresh
   # old tasks go by themselves: anything idle DELEGATE_PRUNE_DAYS days (0 turns it off)
@@ -916,7 +1119,12 @@ cmd_run() {
   local gmode; gmode=$(grants_py net "$gtmp" | cut -f1)
   [ "$gmode" != host ] || [ -z "$service" ] || die "a grant puts this task on the host network; it cannot be combined with --service"
 
+  if untrusted; then
+    repo=$(realpath -e -- "${repo:-.}" 2>/dev/null) || die "not a git repository: ${repo:-.}"
+    untrusted_repo_check "$repo"
+  else
   repo=$(git -C "${repo:-.}" rev-parse --show-toplevel 2>/dev/null) || die "not a git repository: ${repo:-.}"
+  fi
   REPO=$repo
   local reponame; reponame=$(basename "$repo")
   [ -n "$name" ] || name=$(head -n 20 "$spec" | grep -m1 -E '^#' | sed 's/^#* *//')
@@ -932,6 +1140,11 @@ cmd_run() {
   [ ! -e "$TASK_DIR" ] || die "task $ID already exists — use 'delegate continue $ID FEEDBACK', or 'delegate rm $ID' first"
 
   HERE=$here
+  WORKTREE_PARENT=""                 # <DELEGATE_WORKTREES>/<project>, set on the worktree branch below
+  if untrusted; then GIT_COMMON=$repo/.git
+  else
+  GIT_COMMON=$(cd "$repo" && cd "$(git rev-parse --git-common-dir)" && pwd)
+  fi
   if [ "$here" = 1 ]; then
     local d
     for d in "$DELEGATE_STATE"/*/; do   # one in-place worker per checkout at a time
@@ -943,18 +1156,44 @@ cmd_run() {
     BASE_REF="$BRANCH (working tree)"
   else
   BRANCH="delegate/$SLUG"
-  WORKTREE="$DELEGATE_WORKTREES/$ID"
+  WORKTREE=$(task_worktree_path "$GIT_COMMON" "$repo" "$ID")
+  WORKTREE_PARENT=$(dirname "$WORKTREE")
+  if untrusted; then
+    local r
+    for r in $READS; do   # a --read path inside the repo or its worktrees is re-mounted every round: swappable
+      case "$r/" in "$repo/"*|"$WORKTREE_PARENT/"*) die "DELEGATE_UNTRUSTED_REPO=1: --read $r is inside the untrusted repository or its worktrees; refused" ;; esac
+    done
+    case "$WORKTREE_PARENT/" in "$repo/"*) die "DELEGATE_UNTRUSTED_REPO=1: DELEGATE_WORKTREES is inside the repository; refused" ;; esac
+    case "$repo/" in "$WORKTREE_PARENT/"*) die "DELEGATE_UNTRUSTED_REPO=1: the repository is inside its worktrees folder; refused" ;; esac
+    case "$WORKTREE" in *,*|*$'\n'*|*$'\t'*) die "DELEGATE_UNTRUSTED_REPO=1: a worktree path with a comma, tab or newline is not supported: $WORKTREE" ;; esac
+    # one sandboxed look at the repo for what the plain-git lines below ask it
+    local probe pk pv bexists=0 bref="" bsha="" bdirty=0
+    probe=$(SBX_WTROOT="" sbx probe "$repo" "$BRANCH" "$base") || die "could not read $repo in the sandbox"
+    while IFS=$'\t' read -r pk pv; do
+      case "$pk" in branch_exists) bexists=$pv ;; base_ref) bref=$pv ;; base_sha) bsha=$pv ;; dirty) bdirty=$pv ;; esac
+    done <<< "$probe"
+    [ "$bexists" = 0 ] || die "branch $BRANCH already exists in $repo"
+    { [ ! -e "$WORKTREE" ] && [ ! -L "$WORKTREE" ]; } || die "worktree path already exists: $WORKTREE"
+  else
   git -C "$repo" show-ref --verify --quiet "refs/heads/$BRANCH" && die "branch $BRANCH already exists in $repo"
   [ ! -e "$WORKTREE" ] || die "worktree path already exists: $WORKTREE"
+  fi
+  worktree_folder_check "$WORKTREE_PARENT"
+  if untrusted; then
+    BASE_REF=$bref
+    [[ "$bsha" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || die "bad --base: $BASE_REF"
+    BASE_SHA=$bsha
+    [ "$bdirty" = 0 ] || warn "$repo has uncommitted changes; the worker starts from $BASE_REF ($BASE_SHA), without them"
+  else
   BASE_REF=${base:-$(git -C "$repo" rev-parse --abbrev-ref HEAD)}
   BASE_SHA=$(git -C "$repo" rev-parse --verify "$BASE_REF^{commit}") || die "bad --base: $BASE_REF"
   [ -z "$(git -C "$repo" status --porcelain --untracked-files=no)" ] || \
     warn "$repo has uncommitted changes; the worker starts from $BASE_REF ($BASE_SHA), without them"
   fi
+  fi
 
   BASE_URL=$(pick_base_url) || die "no endpoint in DELEGATE_BASE_URLS answered /models with this key"
   MODEL=${model:-$DELEGATE_MODEL}
-  GIT_COMMON=$(cd "$repo" && cd "$(git rev-parse --git-common-dir)" && pwd)
 
   # The worker needs the file in its worktree; copy it if git doesn't carry it. In place (--here)
   # the worktree IS the checkout that holds it, and a copy onto itself stopped the round.
@@ -962,10 +1201,19 @@ cmd_run() {
     local orel; orel=$(realpath --relative-to="$repo" "$ORB_FILE" 2>/dev/null || true)
     case "$orel" in ""|../*) ;; *) git -C "$repo" ls-files --error-unmatch -- "$orel" >/dev/null 2>&1 || copies+=("$orel") ;; esac
   fi
-  mkdir -p "$TASK_DIR/rounds" "$DELEGATE_WORKTREES"
+  # A --here task has no WORKTREE_PARENT and so creates no worktree folder, as before; every
+  # other task creates its project's folder with it, beside the tasks already filed there.
+  mkdir -p "$TASK_DIR/rounds" "${WORKTREE_PARENT:-$DELEGATE_WORKTREES}"
   if [ "$here" = 1 ]; then
     WT_GITDIR=$(git -C "$repo" rev-parse --absolute-git-dir)
     BASE_SHA=$(snapshot base)     # your checkout as it was, uncommitted changes included
+  elif untrusted; then
+    # worktree add and every --copy in the sandbox: a copied path, its folders and the new
+    # worktree's own (checked-out, so repo-chosen) symlinks are all inside the mounts there
+    SBX_WTROOT=$WORKTREE_PARENT
+    local added; added=$(sbx add "$repo" "$WORKTREE" "$BRANCH" "$BASE_SHA" "${copies[@]}") || die "could not create the worktree $WORKTREE in the sandbox"
+    WT_GITDIR=$(printf '%s\n' "$added" | sed -n 's/^gitdir\t//p' | head -1)
+    [[ "$WT_GITDIR" =~ ^"$GIT_COMMON"/worktrees/[A-Za-z0-9._-]+$ ]] || die "SECURITY: unexpected worktree git dir from the sandbox: $WT_GITDIR"
   else
   git -C "$repo" worktree add -q -b "$BRANCH" "$WORKTREE" "$BASE_SHA"
   WT_GITDIR=$(git -C "$WORKTREE" rev-parse --absolute-git-dir)
@@ -973,6 +1221,7 @@ cmd_run() {
   COPIED=""
   local c
   for c in "${copies[@]}"; do
+    if untrusted; then COPIED="$COPIED $c"; continue; fi   # copied in the sandbox, above
     [ -e "$repo/$c" ] || die "--copy: $repo/$c does not exist"
     mkdir -p "$(dirname "$WORKTREE/$c")"
     cp -a "$repo/$c" "$WORKTREE/$c"
@@ -988,6 +1237,7 @@ cmd_run() {
     printf 'ORB_FILE=%q\nORB_LABEL=%q\nORB_BASE_MAC=%q\nORB_SERIAL=%q\nORB_IP=%q\nORB_FLASH=%q\n' \
       "$ORB_FILE" "$ORB_LABEL" "$ORB_BASE_MAC" "$ORB_SERIAL" "$ORB_IP" "${ORB_FLASH:-0}"
     printf 'GRANTS=%q\nALLOW=%q\n' "$GRANTS" "$ALLOW"
+    if untrusted; then printf 'UNTRUSTED=1\n'; fi   # sticky: every later command treats this task so
     printf 'EFFORT=%q\n' "$effort"
     # the chain this step belongs to, when `delegate chain` started it (it exports DELEGATE_CHAIN):
     # `delegate top` groups the step under its chain and names the plan that resumes it.
@@ -1068,6 +1318,7 @@ cmd_continue() {
   need_config
   check_image_fresh
   load_task "$id"
+  if untrusted; then untrusted_task_check; fi
   [ -d "$WORKTREE" ] || die "worktree $WORKTREE is gone"
   if [ "$verify_set" = 1 ]; then
     # a new --verify is the task's verify from now on: later rounds, `delegate verify` and a
@@ -1161,6 +1412,7 @@ cmd_finish() {
   local id=${1:-}; [ -n "$id" ] || die "usage: delegate finish ID"
   need_config
   load_task "$id"
+  if untrusted; then untrusted_task_check; fi
   local n; n=$(last_round)
   [ "$n" -gt 0 ] || die "task $id has no rounds"
   local rd="$TASK_DIR/rounds/$n"
@@ -1221,6 +1473,7 @@ cmd_stop() {
 cmd_verify() {
   local id=${1:-}; [ -n "$id" ] || die "usage: delegate verify ID [CMD]"; shift
   load_task "$id"
+  if untrusted; then untrusted_task_check; fi
   local cmd=${1:-$VERIFY}; [ -n "$cmd" ] || die "no verify command recorded for $id; pass one"
   BASE_URL=${DELEGATE_BASE_URLS%% *}; MODEL=${MODEL:-$DELEGATE_MODEL}
   lock_task; ensure_service
@@ -1251,7 +1504,7 @@ cmd_accept() {
   local n st rc_rerun=null
   n=$(cd "$TASK_DIR/rounds" 2>/dev/null && ls -1 2>/dev/null | grep -E '^[0-9]+$' | sort -n | tail -1)
   [ -n "$n" ] || die "accept: $id has no rounds to accept"
-  st=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("status","no-status"))' "$TASK_DIR/rounds/$n/report.json" 2>/dev/null) \
+  st=$(python3 -I -c 'import json,sys;print(json.load(open(sys.argv[1])).get("status","no-status"))' "$TASK_DIR/rounds/$n/report.json" 2>/dev/null) \
     || die "accept: round $n of $id has no report (still running?) — nothing to accept"
   case "$st" in
     done) die "round $n is $st — nothing to override; accepted is for failed outcomes" ;;
@@ -1262,7 +1515,7 @@ cmd_accept() {
     rc_rerun=0
   fi
   DELEGATE_TASK_DIR=$TASK_DIR DELEGATE_N=$n DELEGATE_ST=$st DELEGATE_NOTE=$note DELEGATE_RERUN=$rc_rerun \
-  python3 - <<'PY'
+  python3 -I - <<'PY'
 import json, os, datetime
 d = os.environ["DELEGATE_TASK_DIR"]
 json.dump({"at": datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds"),
@@ -1288,6 +1541,7 @@ cmd_exec() {
   [ "${1:-}" = -- ] && shift
   [ $# -gt 0 ] || die "usage: delegate exec ID -- CMD..."
   load_task "$id"
+  if untrusted; then untrusted_task_check; fi
   BASE_URL=${DELEGATE_BASE_URLS%% *}; MODEL=${MODEL:-$DELEGATE_MODEL}
   ensure_service
   local tag="x$$"
@@ -1305,6 +1559,7 @@ cmd_report() {
 cmd_diff() {
   local id=${1:-}; [ -n "$id" ] || die "usage: delegate diff ID [--round N] [--full] [-- PATHS]"; shift
   load_task "$id"
+  if untrusted; then untrusted_task_check; fi
   local round="" full=0 paths=()
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -1322,17 +1577,47 @@ cmd_diff() {
     if [ "$round" -gt 1 ]; then from=$(cat "$TASK_DIR/rounds/$((round - 1))/commit"); fi
   fi
   if [ "$full" = 1 ] || [ ${#paths[@]} -gt 0 ]; then
-    wgit --no-pager diff "$from" "$to" -- "${paths[@]}"
+    wgit --no-pager diff --no-ext-diff "$from" "$to" -- "${paths[@]}"
   else
-    wgit --no-pager diff --stat=120 "$from" "$to"
+    wgit --no-pager diff --no-ext-diff --stat=120 "$from" "$to"
+  fi
+}
+
+# Internal (lib/chain.py): `delegate _repo-git REPO -- GIT-ARGS...` — git on a main checkout, in the
+# sandbox when DELEGATE_UNTRUSTED_REPO=1, plain `git -C REPO` otherwise. Not for interactive use.
+cmd_repo_git() {
+  local r=${1:-}; [ -n "$r" ] && [ "${2:-}" = -- ] || die "usage: delegate _repo-git REPO -- GIT-ARGS..."
+  shift 2
+  if untrusted; then
+    REPO=$(realpath -e -- "$r" 2>/dev/null) || die "not a git repository: $r"
+    untrusted_repo_check "$REPO"
+    SBX_WTROOT=""
+    sbx repo-git "$REPO" -- "$@"
+  else
+    exec git -C "$r" "$@"
   fi
 }
 
 cmd_list() {
   # The states are lib/taskstate.py's, the single definition: `interrupted` (a round whose harness
   # died before its report) and `verifying` show here too, not just on `delegate top`.
+  # --repo PATH keeps only that project's tasks: the same match rule `top --repo` uses, so a
+  # symlinked or trailing-slash spelling of the checkout's path is still that project.
+  local repo="" filt=() seen=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --repo) [ $# -ge 2 ] || { echo "usage: delegate list [--repo PATH]" >&2; exit 2; }
+              repo=$2; seen=1; shift 2 ;;
+      *) echo "usage: delegate list [--repo PATH]" >&2; exit 2 ;;
+    esac
+  done
+  if [ "$seen" = 1 ]; then
+    # an empty value filters nothing, which is not what a caller who typed --repo asked for
+    [ -n "$repo" ] || { echo "usage: delegate list [--repo PATH]" >&2; exit 2; }
+    filt=(--repo "$repo")
+  fi
   local out id rounds st worktree
-  out=$(python3 "$DELEGATE_HOME/lib/taskstate.py" statuses --state "$DELEGATE_STATE")
+  out=$(python3 "$DELEGATE_HOME/lib/taskstate.py" statuses --state "$DELEGATE_STATE" "${filt[@]}")
   [ -n "$out" ] || { echo "(no tasks)"; return 0; }
   printf '%-40s %-6s %-24s %s\n' TASK ROUNDS STATUS WORKTREE
   while IFS=$'\t' read -r id rounds st worktree; do
@@ -1366,12 +1651,16 @@ cmd_rm() {
   local delbranch=0; [ "${1:-}" = --delete-branch ] && delbranch=1
   load_task "$id"
   [ ! -d "$TASK_DIR/lock" ] || die "task $id is running"
+  if untrusted; then untrusted_task_check rm; fi
   if [ "$HERE" = 1 ]; then   # your checkout and branch are yours: only the snapshot refs go
-    git -C "$REPO" for-each-ref --format='%(refname)' "refs/delegate/$SLUG/" | while read -r r; do git -C "$REPO" update-ref -d "$r"; done
+    hgit for-each-ref --format='%(refname)' "refs/delegate/$SLUG/" | while read -r r; do hgit update-ref -d "$r"; done
   else
-  if [ -d "$WORKTREE" ]; then git -C "$REPO" worktree remove --force "$WORKTREE"; fi
-  git -C "$REPO" worktree prune
-  if [ "$delbranch" = 1 ]; then git -C "$REPO" branch -D "$BRANCH"; else note "kept branch $BRANCH (pass --delete-branch to drop it)"; fi
+  # Only the task's own worktree goes. The per-repo folder above it stays even when this was its
+  # last task: a container bind-mounts <DELEGATE_WORKTREES>/<project>, and removing the folder
+  # under a live bind mount breaks it. Nothing here prunes an empty project folder.
+  if [ -d "$WORKTREE" ]; then hgit worktree remove --force "$WORKTREE"; fi
+  hgit worktree prune
+  if [ "$delbranch" = 1 ]; then hgit branch -D "$BRANCH"; else note "kept branch $BRANCH (pass --delete-branch to drop it)"; fi
   fi
   if [ "$DELEGATE_RUNNER" = docker ] && command -v docker >/dev/null; then
     docker rm -f "$(svc_name)" "$(egress_task_name)" >/dev/null 2>&1 || true
@@ -1632,7 +1921,7 @@ harness_drift() {
     emit plugins fail "opencode $(opencode --version 2>/dev/null) cannot load these OpenCode 2 plugins; fix: install OpenCode 2 or later"
   elif [ "$oc_major" -ge 2 ] 2>/dev/null; then
     local oc_log=${XDG_DATA_HOME:-$HOME/.local/share}/opencode/log/opencode.log lstate
-    lstate=$(python3 - "$oc_log" "$oc_plug" <<'PYEOF' 2>/dev/null
+    lstate=$(python3 -I - "$oc_log" "$oc_plug" <<'PYEOF' 2>/dev/null
 import os, re, sys, datetime
 log, plug = sys.argv[1], sys.argv[2]
 names = ["chunk-cap", "notes-loop", "todo-loop", "verify-loop"]
@@ -1843,7 +2132,7 @@ cmd_grant() { # list | show NAME [--allow G]...
 ledger_warn() { warn "warn: ledger $1: $2"; }              # one line, never fatal
 
 ledger_resolve() { # the ledger file in force, exactly as lib/ledger.py resolves it (creates nothing)
-  python3 - "$DELEGATE_HOME/lib" "$DELEGATE_LEDGER" "$DELEGATE_STATE" <<'PY'
+  python3 -I - "$DELEGATE_HOME/lib" "$DELEGATE_LEDGER" "$DELEGATE_STATE" <<'PY'
 import os, sys
 sys.path.insert(0, sys.argv[1])
 import ledger
@@ -1915,7 +2204,7 @@ ledger_append() { # --kind K [--task T] [--fields k=v[,k=v]...] [--task-dir D] [
   # The row is built and written by lib/ledger.py. The script itself arrives on stdin (this
   # file's python idiom), so the caller's stdin travels on fd 3 for `--file -`.
   local out="" rc=0
-  out=$(DELEGATE_LIB_DIR=$DELEGATE_HOME/lib python3 - "$path" "${pyargs[@]}" 3<&0 2>&1 <<'PY'
+  out=$(DELEGATE_LIB_DIR=$DELEGATE_HOME/lib python3 -I - "$path" "${pyargs[@]}" 3<&0 2>&1 <<'PY'
 import json, os, sys
 from datetime import datetime, timezone
 sys.path.insert(0, os.environ["DELEGATE_LIB_DIR"])
@@ -2156,7 +2445,7 @@ ledger_show() { # [--kind K]
   path=$(ledger_resolve) || { ledger_warn show "no ledger path resolves"; return 0; }
   # Accepted rows only, oldest first, byte for byte as stored. A missing or unreadable ledger is
   # an empty listing; what could not be accepted is counted on one line, not treated as a failure.
-  DELEGATE_LIB_DIR=$DELEGATE_HOME/lib python3 - "$path" "$kind" <<'PY' || ledger_warn show "the ledger reader failed"
+  DELEGATE_LIB_DIR=$DELEGATE_HOME/lib python3 -I - "$path" "$kind" <<'PY' || ledger_warn show "the ledger reader failed"
 import os, sys
 sys.path.insert(0, os.environ["DELEGATE_LIB_DIR"])
 import ledger
@@ -2212,7 +2501,7 @@ ledger_review() { # TASK_ID --verdict V --bugs high=N,medium=N,low=N --lines-cha
   esac
   local path; path=$(ledger_resolve) || { ledger_warn review "no ledger path resolves"; return 0; }
   local out="" rc=0
-  out=$(DELEGATE_LIB_DIR=$DELEGATE_HOME/lib python3 - "$path" "$task" "$round" "$verdict" \
+  out=$(DELEGATE_LIB_DIR=$DELEGATE_HOME/lib python3 -I - "$path" "$task" "$round" "$verdict" \
           "$bugs" "$lines" "$note" <<'PY' 2>&1
 import os, sys
 sys.path.insert(0, os.environ["DELEGATE_LIB_DIR"])
@@ -2259,7 +2548,7 @@ ledger_import() { # [--state DIR] — R8: the records that still exist become ro
   # Read-only over the records: this writes to the ledger file and nothing else. A task it could
   # not read is one warn line and a skipped count — the command itself never fails on a record.
   local out="" rc=0
-  out=$(DELEGATE_LIB_DIR=$DELEGATE_HOME/lib python3 - "$path" "$state" \
+  out=$(DELEGATE_LIB_DIR=$DELEGATE_HOME/lib python3 -I - "$path" "$state" \
           "${DELEGATE_MODEL:-}" "${DELEGATE_MODEL_HARD:-}" <<'PY' 2>&1
 import os, sys
 sys.path.insert(0, os.environ["DELEGATE_LIB_DIR"])
@@ -2306,7 +2595,9 @@ cmd_ledger() { # append | show | review | import — the ledger's write side, an
 # `review` rows only — timeline lines are dropped at the line level before they are parsed —
 # and every figure comes off those rows, never from chain state (`chain --clean` removes that)
 # nor from a task dir (prune does). Counts only: stats knows no prices and prints no dollars.
-STATS_USAGE="usage: delegate stats [--chain NAME] [--repo R] [--since YYYY-MM-DD] [--json]"
+STATS_USAGE="usage: delegate stats [--chain NAME] [--repo R] [--since YYYY-MM-DD] [--json]
+       R is a project path: rows match it exactly, or when their repo axis is the same
+       directory under another spelling (a symlink, a trailing slash)"
 cmd_stats() {
   local chain="" repo="" since="" mode="text"
   while [ $# -gt 0 ]; do
@@ -2335,7 +2626,7 @@ cmd_stats() {
   esac
   # One warning line for the lines this build cannot use at all, then the tables: what the
   # ledger holds is reported, what it does not is not invented. Exit code stays 0 throughout.
-  DELEGATE_LIB_DIR=$DELEGATE_HOME/lib STATS_MODE=$mode python3 - "$path" "$chain" "$repo" "$since" <<'PY' || \
+  DELEGATE_LIB_DIR=$DELEGATE_HOME/lib STATS_MODE=$mode python3 -I - "$path" "$chain" "$repo" "$since" <<'PY' || \
     ledger_warn stats "the ledger reader failed"
 import json, os, sys
 sys.path.insert(0, os.environ["DELEGATE_LIB_DIR"])
@@ -2457,8 +2748,9 @@ delegate — hand implementation work to a self-hosted coding model, then review
                        [--copy PATH]... [--read PATH]... [--github] [--service postgres] [--grant NAME]... [--allow GUARD]...
                        [--orb .orb-target [--orb-flash]]
                        [--egress filtered|open] [--model M | --hard] [--timeout S]
-      New worktree + branch delegate/SLUG from REF (default: current branch), run the worker
-      on the spec, commit its work, run CMD, print the report. ('-' reads the spec from stdin.)
+      New worktree + branch delegate/SLUG from REF (default: current branch), the worktree filed
+      under its project at <DELEGATE_WORKTREES>/<project>/<slug>; run the worker on the spec,
+      commit its work, run CMD, print the report. ('-' reads the spec from stdin.)
       --here: supervised, in place — the worker edits your checkout directly, natively and
       unsandboxed (no worktree, branch, container, proxy or commits); rounds are snapshots
       under refs/delegate/SLUG/, so diff/report/continue work as usual. For when you watch it.
@@ -2474,10 +2766,12 @@ delegate — hand implementation work to a self-hosted coding model, then review
                                    remove tasks idle N days (default DELEGATE_PRUNE_DAYS=14; `run`
                                    does this by itself), and with --caches the shared caches
   delegate peek ID                 compact snapshot of the current round (a few hundred tokens)
-  delegate top [ID] [--once] [--interval S] [--all]
+  delegate top [ID] [--once] [--interval S] [--all] [--repo PATH]
                                    live view of every round, refreshed every 2 s in your own terminal
                                    (no dashboard needed): state, elapsed, steps, tokens, current item,
-                                   last action; --once prints one frame and exits (scripts, SSH)
+                                   last action; --once prints one frame and exits (scripts, SSH);
+                                   --repo PATH: one project's tasks only, and no leads (they are not
+                                   per project, and their names would leak other work)
   delegate chain PLAN.json [--status | --clean | --wait] [--on-done CMD] [--on-step CMD]
   delegate wait PLAN.json [--timeout S]   block this process until the chain stops (run it in the background)
                                   run a planned slice unattended: each step on the previous step's
@@ -2491,7 +2785,7 @@ delegate — hand implementation work to a self-hosted coding model, then review
   delegate verify ID [CMD]         re-run the verify command in the worker environment
   delegate accept ID -m "why" [--run]  close a failed round as delegator-verified (reason required; --run re-verifies first; the report keeps the failure)
   delegate exec ID -- CMD...       run any command in the worker environment (node, db, ...)
-  delegate list                    tasks, rounds, last status
+  delegate list [--repo PATH]      tasks, rounds, last status (--repo: one project's tasks only)
   delegate rm ID [--delete-branch] remove worktree, sidecar and state (branch kept by default)
   delegate ledger append --kind K [--task T] [--fields k=v[,k=v]...] [--task-dir DIR]
                          [--status S] [--exit N] [--file F|-]
@@ -2576,6 +2870,7 @@ main() {
           exec python3 "$DELEGATE_HOME/lib/chain.py" "$1" --wait "${@:2}" ;;
     report) cmd_report "$@" ;;
     diff) cmd_diff "$@" ;;
+    _repo-git) cmd_repo_git "$@" ;;
     verify) cmd_verify "$@" ;;
     accept) cmd_accept "$@" ;;
     exec) cmd_exec "$@" ;;

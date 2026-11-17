@@ -1112,6 +1112,18 @@ def _axis(row: Mapping[str, Any], field: str) -> str:
     return "" if value is None or value == "" else str(value)
 
 
+def _repo_kept(row: Mapping[str, Any], repo: str) -> bool:
+    """Does this row belong to the project `--repo R` names? Exact equality is the rule; one more
+    way in is the same directory under another spelling — both sides absolute, both through
+    realpath, so a symlink to the checkout or a trailing slash counts as that project. A relative
+    R is not comparable with a row's absolute path and stays exact-match only."""
+    axis = _axis(row, "repo")
+    if axis == repo:
+        return True
+    return (axis.startswith("/") and repo.startswith("/")
+            and os.path.realpath(axis) == os.path.realpath(repo))
+
+
 def read_stats_rows(ledger_path: str) -> dict:
     """The ledger's `round` and `review` rows, oldest first: `{"rows": [...], "skipped": n,
     "filtered": n}`. A missing, empty or unreadable file is no rows and no error — stats on
@@ -1380,7 +1392,8 @@ def stats(ledger_path: str, chain: str = "", repo: str = "", since: str = "") ->
     """R6's totals over one ledger, as plain JSON-ready data and none of it a rendering:
     `{"ledger", "filters", "counts", "groups", "findings", "failures", "totals", "skipped",
     "filtered"}`. `chain`, `repo` and `since` narrow the rows before anything is grouped — they
-    match a row's own field exactly, and `--since` compares on `ts`, so a row with no `ts`
+    match a row's own field exactly (`repo` also when the two spell one directory: see
+    `_repo_kept`), and `--since` compares on `ts`, so a row with no `ts`
     matches no date. The path is reported as it was given; a ledger that is missing, empty or
     unreadable yields empty tables, not an error, because stats is a reader and an owner who
     has not run a round yet has a real answer of zero, not a failure.
@@ -1410,7 +1423,7 @@ def stats(ledger_path: str, chain: str = "", repo: str = "", since: str = "") ->
             continue
         if chain and _axis(row, "chain") != chain:
             continue
-        if repo and _axis(row, "repo") != repo:
+        if repo and not _repo_kept(row, repo):
             continue
         counts["round_rows"] += 1
         key = tuple(_axis(row, field) for field in STATS_AXES)
@@ -1429,7 +1442,7 @@ def stats(ledger_path: str, chain: str = "", repo: str = "", since: str = "") ->
         if since and not _since_ok(row.get("ts"), since):
             continue
         if row["kind"] != "round" or (_axis(row, "chain") and chain and _axis(row, "chain") != chain) \
-                or (repo and _axis(row, "repo") != repo):
+                or (repo and not _repo_kept(row, repo)):
             continue
         tl = tl_index.get((row.get("task_id"), int(_num(row.get("round")) or 0)))
         if tl is None:

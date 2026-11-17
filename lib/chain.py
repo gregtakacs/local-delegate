@@ -93,6 +93,7 @@ ME = Path(__file__).resolve()
 DELEGATE = os.environ.get("DELEGATE_CHAIN_BIN") or str(ME.parent.parent / "bin" / "delegate")   # override: tests
 STATE = Path(os.environ.get("DELEGATE_STATE") or
              Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "delegate")
+UNTRUSTED = os.environ.get("DELEGATE_UNTRUSTED_REPO") == "1"   # no plain host git on the plan's repo
 
 
 def die(msg, code=1):
@@ -157,6 +158,10 @@ def load_plan(path):
     except (OSError, ValueError) as e:
         die(f"cannot read plan {p}: {e}")
     here = bool(plan.get("here"))
+    if here and UNTRUSTED:
+        # Refused here, at load: no step starts and no chain state is written for this plan.
+        die('DELEGATE_UNTRUSTED_REPO=1: an in-place plan runs git in the checkout on the host; '
+            'use an isolated plan (a "base", no "here")', 2)
     for k in ("name", "steps") + (() if here else ("base",)):
         if not plan.get(k):
             die(f"plan is missing '{k}'")
@@ -382,7 +387,13 @@ def run(plan):
         save_state(plan, st)
         return
     base_sha = meta.get("BASE_SHA", plan["base"])
-    stat = sh(["git", "-C", plan["repo"], "diff", "--stat=120", base_sha, f"delegate/{last}"]).stdout.strip()
+    # The one git call an untrusted chain makes on the repo: through the delegate binary, which runs
+    # it in the sandbox. Every other git() call here is in-place-only, behind load_plan's refusal.
+    if UNTRUSTED:
+        r = sh([DELEGATE, "_repo-git", plan["repo"], "--", "diff", "--stat=120", base_sha, f"delegate/{last}"])
+    else:
+        r = sh(["git", "-C", plan["repo"], "diff", "--stat=120", base_sha, f"delegate/{last}"])
+    stat = r.stdout.strip()
     print(f"\nwhole slice: branch delegate/{last} (from {plan['base']})\n```\n" + "\n".join(stat.splitlines()[-40:]) + "\n```")
     print(f"\nnext: one live check of the slice, read the risky files with `git diff {plan['base']}...delegate/{last} -- PATHS`,"
           f" squash-merge delegate/{last}, then `delegate chain {plan['_path']} --clean`.")

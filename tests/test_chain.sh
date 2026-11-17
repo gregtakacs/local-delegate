@@ -9,7 +9,8 @@ export DELEGATE_STATE=$T/state DELEGATE_CHAIN_BIN=$T/fake-delegate
 mkdir -p $DELEGATE_STATE $T/repo/docs && git -C $T/repo init -q -b main && touch $T/repo/docs/a.md $T/repo/docs/b.md && git -C $T/repo add -A && git -C $T/repo -c user.name=t -c user.email=t@t commit -qm i
 cat > $T/fake-delegate <<'F'
 #!/bin/bash
-# fake: run SPEC --repo R --name N ... | continue ID FILE | finish ID ; statuses from $SCRIPT/<name> (one per round)
+# fake: run SPEC --repo R --name N ... | continue ID FILE | finish ID | _repo-git R -- GIT-ARGS ;
+# statuses from $SCRIPT/<name> (one per round)
 cmd=$1; shift
 if [ "$cmd" = run ]; then
   while [ $# -gt 0 ]; do case "$1" in --name) name=$2; shift 2;; --base) echo "$2" >> "$DELEGATE_STATE/bases"; shift 2;; --here) touch "$DELEGATE_STATE/saw-here"; shift;; *) shift;; esac; done
@@ -24,6 +25,8 @@ elif [ "$cmd" = finish ]; then id=$1; name=${id#repo-}; echo "$id" >> "$DELEGATE
   [ "$st" = no-report ] && exit 0
   printf '{"status":"%s","verify_rc":%s}\n' "$st" "$([ "$st" = done-but-verify-failed ] && echo 1 || echo 0)" > $d/$n/report.json
   exit 0
+elif [ "$cmd" = _repo-git ]; then   # untrusted chain (DELEGATE_UNTRUSTED_REPO=1): the closing diffstat
+  echo "$cmd $*" >> "$DELEGATE_STATE/repo-git"; echo "1 file changed, 1 insertion(+)"
 else exit 0; fi
 d=$DELEGATE_STATE/$id/rounds; mkdir -p $d; n=$(( $(ls $d | wc -l) + 1 )); mkdir $d/$n
 st=$(sed -n "${n}p" "$SCRIPT/$name"); st=${st:-done}
@@ -166,5 +169,36 @@ printf 'done\n' > $SCRIPT/a; printf 'done\n' > $SCRIPT/b; plan 2
 DELEGATE_ON_STEP="$STEPHOOK" DELEGATE_ON_DONE="$DONEHOOK" python3 $here/lib/chain.py $T/plan.json >/dev/null 2>&1
 check "DELEGATE_ON_STEP/DELEGATE_ON_DONE work without the flags" \
   '[ -s $T/steps.log ] && [ -s $T/done.log ]'
+
+# 12. DELEGATE_UNTRUSTED_REPO=1: an in-place plan is refused at once, before a step starts or any
+#     state is written (it would run plain host git in the checkout)
+rm -rf $DELEGATE_STATE; mkdir -p $DELEGATE_STATE
+printf 'done\n' > $SCRIPT/a; printf 'done\n' > $SCRIPT/b
+printf '{"name":"u","repo":"%s","here":true,"retries":1,"steps":[{"name":"a","spec":"docs/a.md","verify":"true"},{"name":"b","spec":"docs/b.md","verify":"true"}]}' "$T/repo" > $T/uplan.json
+DELEGATE_UNTRUSTED_REPO=1 python3 $here/lib/chain.py $T/uplan.json > $T/o12 2>&1; rc=$?
+check "untrusted: an in-place plan exits 2"                 '[ $rc = 2 ]'
+check "untrusted: the refusal names DELEGATE_UNTRUSTED_REPO" 'grep -q DELEGATE_UNTRUSTED_REPO $T/o12'
+check "untrusted: no step started, no chain state written"  '[ ! -d $DELEGATE_STATE/repo-a ] && [ ! -e $DELEGATE_STATE/chains/u.json ] && [ ! -f $DELEGATE_STATE/repo-git ]'
+
+# 13. DELEGATE_UNTRUSTED_REPO=1, isolated plan: the closing diffstat goes through the delegate
+#     binary (`_repo-git`, sandboxed), never plain git, and its output is what the chain prints
+rm -rf $DELEGATE_STATE; mkdir -p $DELEGATE_STATE
+printf 'done\n' > $SCRIPT/a; printf 'done\n' > $SCRIPT/b; plan 2
+DELEGATE_UNTRUSTED_REPO=1 python3 $here/lib/chain.py $T/plan.json > $T/o13 2>&1; rc=$?
+rp=$(cd "$T/repo" && pwd -P)                              # chain.py resolves the plan's repo path
+check "untrusted: an isolated chain still completes"        '[ $rc = 0 ] && [ -d $DELEGATE_STATE/repo-b/rounds/1 ]'
+check "untrusted: the diffstat calls _repo-git with the plan's git args" \
+  '[ "$(cat $DELEGATE_STATE/repo-git)" = "_repo-git '"$rp"' -- diff --stat=120 main delegate/b" ]'
+check "untrusted: the chain prints that output under whole slice" \
+  'grep -q "^whole slice: branch delegate/b" $T/o13 && grep -A2 "^whole slice: branch" $T/o13 | tail -1 | grep -q "^1 file changed, 1 insertion"'
+# 14. without the variable the same plan is unchanged: no _repo-git call at all
+rm -rf $DELEGATE_STATE; mkdir -p $DELEGATE_STATE
+printf 'done\n' > $SCRIPT/a; printf 'done\n' > $SCRIPT/b; plan 2
+python3 $here/lib/chain.py $T/plan.json > $T/o14 2>&1; rc=$?
+check "trusted (unset): the same chain exits 0 and never calls _repo-git" \
+  '[ $rc = 0 ] && [ ! -e $DELEGATE_STATE/repo-git ]'
+DELEGATE_UNTRUSTED_REPO=0 python3 $here/lib/chain.py $T/plan.json > $T/o14b 2>&1; rc=$?
+check "trusted (=0): likewise no _repo-git call and no mention of it" \
+  '[ $rc = 0 ] && [ ! -e $DELEGATE_STATE/repo-git ] && ! grep -q DELEGATE_UNTRUSTED_REPO $T/o14b'
 
 exit $fail
