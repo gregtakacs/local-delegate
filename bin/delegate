@@ -395,7 +395,7 @@ make_guard_shims() { # HOME EVIDENCE -> prints the shim dir, or nothing when no 
   local gl; gl=$(grants_py guards "$(grants_file)")
   [ -n "$gl" ] || return 0
   mkdir -p "$dir"
-  DELEGATE_GUARDS="$gl" python3 - "$dir" "$evidence" "$ID" <<'PY'
+  DELEGATE_GUARDS="$gl" python3 -I - "$dir" "$evidence" "$ID" <<'PY'
 import json, os, sys
 d, evidence, task = sys.argv[1], sys.argv[2], sys.argv[3]
 for line in os.environ["DELEGATE_GUARDS"].splitlines():
@@ -876,7 +876,7 @@ do_round() {
   reap_leftovers "round $n" "$rd/stderr.log"
 
   if [ -z "${SESSION:-}" ]; then
-    SESSION=$(python3 -c 'import json,sys
+    SESSION=$(python3 -I -c 'import json,sys
 for l in open(sys.argv[1]):
     try: s=json.loads(l).get("sessionID")
     except Exception: continue
@@ -986,7 +986,7 @@ finalize_round() { # N RD VERIFY RC START END
   if [ "${RAW:-0}" = 1 ]; then
     # raw: the worker's own last message, verbatim, is the output; the report stays on disk
     python3 "$DELEGATE_HOME/lib/report.py" final-text "$rd/events.jsonl"
-    note "raw round $n of $ID: $(python3 -c 'import json,sys;r=json.load(open(sys.argv[1]));print(r["status"], "·", r.get("duration_s", "?"), "s")' "$rd/report.json" 2>/dev/null || echo done) · report: delegate report $ID · follow up: delegate continue $ID --raw -"
+    note "raw round $n of $ID: $(python3 -I -c 'import json,sys;r=json.load(open(sys.argv[1]));print(r["status"], "·", r.get("duration_s", "?"), "s")' "$rd/report.json" 2>/dev/null || echo done) · report: delegate report $ID · follow up: delegate continue $ID --raw -"
   else
     cat "$rd/.report-stdout"
   fi
@@ -996,7 +996,7 @@ finalize_round() { # N RD VERIFY RC START END
   ledger_record_round "$n" "$rd" "$rc" "$start" "$end" || true
   rm -f "$TASK_DIR/.abort"
   grant_unlock
-  progress_stop "$rd" "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["status"])' "$rd/report.json" 2>/dev/null || echo finished)"
+  progress_stop "$rd" "$(python3 -I -c 'import json,sys;print(json.load(open(sys.argv[1]))["status"])' "$rd/report.json" 2>/dev/null || echo finished)"
 }
 
 # ---------------------------------------------------------------- commands ---------
@@ -1475,7 +1475,7 @@ cmd_accept() {
   local n st rc_rerun=null
   n=$(cd "$TASK_DIR/rounds" 2>/dev/null && ls -1 2>/dev/null | grep -E '^[0-9]+$' | sort -n | tail -1)
   [ -n "$n" ] || die "accept: $id has no rounds to accept"
-  st=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("status","no-status"))' "$TASK_DIR/rounds/$n/report.json" 2>/dev/null) \
+  st=$(python3 -I -c 'import json,sys;print(json.load(open(sys.argv[1])).get("status","no-status"))' "$TASK_DIR/rounds/$n/report.json" 2>/dev/null) \
     || die "accept: round $n of $id has no report (still running?) — nothing to accept"
   case "$st" in
     done) die "round $n is $st — nothing to override; accepted is for failed outcomes" ;;
@@ -1486,7 +1486,7 @@ cmd_accept() {
     rc_rerun=0
   fi
   DELEGATE_TASK_DIR=$TASK_DIR DELEGATE_N=$n DELEGATE_ST=$st DELEGATE_NOTE=$note DELEGATE_RERUN=$rc_rerun \
-  python3 - <<'PY'
+  python3 -I - <<'PY'
 import json, os, datetime
 d = os.environ["DELEGATE_TASK_DIR"]
 json.dump({"at": datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds"),
@@ -1892,7 +1892,7 @@ harness_drift() {
     emit plugins fail "opencode $(opencode --version 2>/dev/null) cannot load these OpenCode 2 plugins; fix: install OpenCode 2 or later"
   elif [ "$oc_major" -ge 2 ] 2>/dev/null; then
     local oc_log=${XDG_DATA_HOME:-$HOME/.local/share}/opencode/log/opencode.log lstate
-    lstate=$(python3 - "$oc_log" "$oc_plug" <<'PYEOF' 2>/dev/null
+    lstate=$(python3 -I - "$oc_log" "$oc_plug" <<'PYEOF' 2>/dev/null
 import os, re, sys, datetime
 log, plug = sys.argv[1], sys.argv[2]
 names = ["chunk-cap", "notes-loop", "todo-loop", "verify-loop"]
@@ -2103,7 +2103,7 @@ cmd_grant() { # list | show NAME [--allow G]...
 ledger_warn() { warn "warn: ledger $1: $2"; }              # one line, never fatal
 
 ledger_resolve() { # the ledger file in force, exactly as lib/ledger.py resolves it (creates nothing)
-  python3 - "$DELEGATE_HOME/lib" "$DELEGATE_LEDGER" "$DELEGATE_STATE" <<'PY'
+  python3 -I - "$DELEGATE_HOME/lib" "$DELEGATE_LEDGER" "$DELEGATE_STATE" <<'PY'
 import os, sys
 sys.path.insert(0, sys.argv[1])
 import ledger
@@ -2175,7 +2175,7 @@ ledger_append() { # --kind K [--task T] [--fields k=v[,k=v]...] [--task-dir D] [
   # The row is built and written by lib/ledger.py. The script itself arrives on stdin (this
   # file's python idiom), so the caller's stdin travels on fd 3 for `--file -`.
   local out="" rc=0
-  out=$(DELEGATE_LIB_DIR=$DELEGATE_HOME/lib python3 - "$path" "${pyargs[@]}" 3<&0 2>&1 <<'PY'
+  out=$(DELEGATE_LIB_DIR=$DELEGATE_HOME/lib python3 -I - "$path" "${pyargs[@]}" 3<&0 2>&1 <<'PY'
 import json, os, sys
 from datetime import datetime, timezone
 sys.path.insert(0, os.environ["DELEGATE_LIB_DIR"])
@@ -2416,7 +2416,7 @@ ledger_show() { # [--kind K]
   path=$(ledger_resolve) || { ledger_warn show "no ledger path resolves"; return 0; }
   # Accepted rows only, oldest first, byte for byte as stored. A missing or unreadable ledger is
   # an empty listing; what could not be accepted is counted on one line, not treated as a failure.
-  DELEGATE_LIB_DIR=$DELEGATE_HOME/lib python3 - "$path" "$kind" <<'PY' || ledger_warn show "the ledger reader failed"
+  DELEGATE_LIB_DIR=$DELEGATE_HOME/lib python3 -I - "$path" "$kind" <<'PY' || ledger_warn show "the ledger reader failed"
 import os, sys
 sys.path.insert(0, os.environ["DELEGATE_LIB_DIR"])
 import ledger
@@ -2472,7 +2472,7 @@ ledger_review() { # TASK_ID --verdict V --bugs high=N,medium=N,low=N --lines-cha
   esac
   local path; path=$(ledger_resolve) || { ledger_warn review "no ledger path resolves"; return 0; }
   local out="" rc=0
-  out=$(DELEGATE_LIB_DIR=$DELEGATE_HOME/lib python3 - "$path" "$task" "$round" "$verdict" \
+  out=$(DELEGATE_LIB_DIR=$DELEGATE_HOME/lib python3 -I - "$path" "$task" "$round" "$verdict" \
           "$bugs" "$lines" "$note" <<'PY' 2>&1
 import os, sys
 sys.path.insert(0, os.environ["DELEGATE_LIB_DIR"])
@@ -2519,7 +2519,7 @@ ledger_import() { # [--state DIR] — R8: the records that still exist become ro
   # Read-only over the records: this writes to the ledger file and nothing else. A task it could
   # not read is one warn line and a skipped count — the command itself never fails on a record.
   local out="" rc=0
-  out=$(DELEGATE_LIB_DIR=$DELEGATE_HOME/lib python3 - "$path" "$state" \
+  out=$(DELEGATE_LIB_DIR=$DELEGATE_HOME/lib python3 -I - "$path" "$state" \
           "${DELEGATE_MODEL:-}" "${DELEGATE_MODEL_HARD:-}" <<'PY' 2>&1
 import os, sys
 sys.path.insert(0, os.environ["DELEGATE_LIB_DIR"])
@@ -2597,7 +2597,7 @@ cmd_stats() {
   esac
   # One warning line for the lines this build cannot use at all, then the tables: what the
   # ledger holds is reported, what it does not is not invented. Exit code stays 0 throughout.
-  DELEGATE_LIB_DIR=$DELEGATE_HOME/lib STATS_MODE=$mode python3 - "$path" "$chain" "$repo" "$since" <<'PY' || \
+  DELEGATE_LIB_DIR=$DELEGATE_HOME/lib STATS_MODE=$mode python3 -I - "$path" "$chain" "$repo" "$since" <<'PY' || \
     ledger_warn stats "the ledger reader failed"
 import json, os, sys
 sys.path.insert(0, os.environ["DELEGATE_LIB_DIR"])
