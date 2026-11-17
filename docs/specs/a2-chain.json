@@ -1,0 +1,14 @@
+{
+  "name": "a2-delegate",
+  "repo": "../..",
+  "base": "a2-worktrees",
+  "retries": 2,
+  "steps": [
+    {
+      "name": "a2-1-worktrees",
+      "spec": "docs/specs/a2-1-worktrees.md",
+      "hard": true,
+      "verify": "set -o pipefail && bash -n bin/delegate && python3 -m py_compile lib/*.py && [ -f tests/test_worktree_layout.sh ] && for f in tests/test_*.sh; do l=/tmp/gate-$(basename \"$f\" .sh).log; env -u DELEGATE_EVIDENCE_DIR bash \"$f\" >\"$l\" 2>&1 || { echo \"GATE FAIL $f\"; grep -h FAIL \"$l\" | head -20; exit 1; }; done && ! git diff --name-only a2-worktrees | grep -qvE '^docs/specs/a2-(1-worktrees\\.md|chain\\.json)$|^bin/delegate$|^lib/(taskstate|ledger)\\.py$|^config\\.example\\.env$|^docs/reference\\.md$|^tests/test_(worktree_layout|top|stats)\\.sh$' && echo GATE-OK"
+    }
+  ]
+}
