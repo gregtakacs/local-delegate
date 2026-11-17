@@ -28,9 +28,11 @@ die()  { echo "delegate sandbox: $*" >&2; exit 4; }
 sec()  { echo "delegate sandbox: SECURITY: $*" >&2; exit 3; }
 
 # The same hardening the host's wgit uses for a worker-written worktree, for every git call in
-# here: no hooks, no fsmonitor daemon, no external diff, no signing (no keys in here), and any
+# here: no hooks, no fsmonitor daemon, no signing (no keys in here), and any owner accepted.
+# Not `diff.external=`: an empty value is not "off", git runs the empty string and every diff
+# fails; an external diff or a textconv can only run inside this container anyway. Any
 # owner accepted (the uid is the host user's; a userns remap would otherwise refuse everything).
-G=(git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c diff.external=
+G=(git -c core.hooksPath=/dev/null -c core.fsmonitor=false
    -c commit.gpgSign=false -c tag.gpgSign=false -c safe.directory='*')
 
 verify_mounts() {
