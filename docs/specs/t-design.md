@@ -52,7 +52,11 @@ raw log is pruned after 14 days, R2), which `delegate prune`/`delegate rm`
 - **Kinds and versions**: each row carries `kind` and `schema` (int, ≥ 1, the key's
   version in `lib/ledger.py`'s `KINDS`). T1 ships `round:1`, `timeline:1`, `review:1` and
   registers `benchmark`/`verdict` (slice B's; see §Slice B) so readers tolerate them
-  before they exist. Fields a source cannot give stay empty — never guessed.
+  before they exist. Later revisions: `round:2` adds the orchestrator fields; `timeline:2`
+  (T3) adds `ctx` to each step and the `events` array. Readers accept any schema of a
+  known kind at or below the registered version, so v1 timeline rows still import, still
+  show, and simply have no positions. Fields a source cannot give stay empty — never
+  guessed.
 - **Forward compatibility**: a row whose `kind` the reader doesn't list, or whose
   `schema` is above the known version for that kind, is skipped and counted (the import
   runs against records of every vintage; slice B will add kinds to the same file).
@@ -110,13 +114,14 @@ keys (R7's claim needs only endpoint, model and timestamps).
 
 `events.jsonl` is pruned after 14 days (R2), so the timeline must live in the ledger
 itself; a pointer at the raw log is rejected. Written beside the round row, same
-transaction of the lock (T2). Shape — one row per round holding arrays:
+transaction of the lock (T2). Schema 2 (T3); shape — one row per round holding arrays:
 
 | field | contents |
 |---|---|
 | `task_id`, `run_id`, `round` | identity, same values as the round row (the join key) |
-| `steps` | array, in file order: `{"start": <ms>, "end": <ms>, "input": n, "output": n, "reasoning": n, "cache_read": n, "cache_write": n, "reason": <finish reason>}` |
+| `steps` | array, in file order: `{"start": <ms>, "end": <ms>, "input": n, "output": n, "reasoning": n, "cache_read": n, "cache_write": n, "reason": <finish reason>, "ctx": n}` — `ctx` is the step's context size, `input + cache_read + cache_write`; `null` while the step never closed |
 | `tools` | array, in file order: `{"tool": <name>, "status": <state.status>, "start": <ms>, "end": <ms>}` |
+| `events` | array, step order: the round's reliability records — `{"kind": K, "step": N, "ctx": T}` for every nudge, tool error and verify-fail; kinds `nudge:malformed`, `nudge:api-error`, `nudge:no-status`, `tool-error:invalid-args`, `tool-error`, `verify-fail`; nothing else (no message, no tool text — R4) |
 | `source` | empty, or `import` |
 | `ts` | append time |
 
@@ -131,12 +136,30 @@ the inference server's request logs (R4/R7). A step whose `step_finish` never ca
 mid-step) closes with the last event's timestamp and `reason: null`; tokens are partial —
 the same rule live and on import, so no timeline row silently differs by provenance.
 
+The `events` array (T3) merges three sources in one place, `ledger.timeline_events`,
+called by `append_round_and_timeline` so live and import share it (R8). The walk
+contributes one record per failed tool call — an error line seen again for the same call
+id replaces the earlier record, and an id that later completes drops its open error (a
+retried-and-fixed call interrupted nothing); the error text is read only to decide the
+kind: a message starting `The arguments provided to the tool are invalid` is recorded as
+`tool-error:invalid-args`, anything else as plain `tool-error`. An error inside a step
+that later closes carries that step's `ctx`; one in a step that never closes carries a
+null `ctx` (the `unknown` bucket). The harness's own interruptions land here too: the
+round's `stderr.log` may hold lines the runner echoed as `nudge: <kind> step=<N> ctx=<T>`
+(the pair comes from `lib/report.py position EVENTS`, which answers `<N> <T>`: step_finish
+count and last closed step's context). A line without the pair — the format rounds wrote
+before positions existed — still counts, recorded with `step` and `ctx` null, joining the
+`unknown` bucket: a position nobody recorded is never invented. And a round whose
+`verify_rc` is non-zero contributes one `verify-fail` event at the round's final position:
+the last closed step, else `report.json`'s `steps`/`final_context_tokens`, else `0 0`.
+
 One row per round (not one per step): the row is atomic per round — the same round that
-writes the round row writes one timeline row, no interleaving across rounds, and `stats`
-never parses them at all (filtered out by `kind` before JSON parsing, so their size costs
-totals nothing). The arrays stay bounded by the round's own step/tool counts (report
-counters reach several hundred steps and tool calls in a long round, so a timeline row can be ~100 KB;
-that is why `stats` filters timeline rows out before parsing).
+writes the round row writes one timeline row, no interleaving across rounds. `stats`
+(T3) parses them by kind before anything else and keeps only the identity, the per-step
+`ctx` counts and the events' kinds, steps and sizes; no text from a row can reach a
+table. The arrays stay bounded by the round's own step/tool/event counts (report
+counters reach several hundred steps and tool calls in a long round, so a timeline row
+can be ~100 KB).
 
 ### `kind: "review"` — the orchestrator's verdict, per step (R5)
 
@@ -200,18 +223,36 @@ provenance travels with the value. Live rounds carry `effort_source: "cli"`.
 ## Stats (R6)
 
 `delegate stats [--chain NAME] [--since YYYY-MM-DD] [--repo R] [--kind K] [--json]`
-reads only `round` and `review` rows — timeline rows are filtered out at the line level
-before parsing — and prints, per project grouped by **repo / chain (slice) / model /
-effort** (R6's four axes): rounds, accepted-or-fixed rate, total and mean wall time,
-input/output/reasoning/cache tokens, retries, and the review findings joined by task id
-(verdict counts, bugs by severity, reviewer lines changed). One failures table:
-`tool_errors`, `errors`, and status counts over the same groups. Retries are derived from
+reads `round` and `review` rows, and joins `timeline` rows to the group of their
+`(task_id, round)` for the reliability figures below — every other known kind is
+filtered out at the line level before parsing — and prints, per project grouped by
+**repo / chain (slice) / model / effort** (R6's four axes): rounds, accepted-or-fixed
+rate, total and mean wall time, input/output/reasoning/cache tokens, retries, and the
+review findings joined by task id (verdict counts, bugs by severity, reviewer lines
+changed). One failures table: `tool_errors`, `errors`, and status counts over the same
+groups, plus `verify-fail=N` when the group has rounds whose `verify_rc` is non-zero. Retries are derived from
 the rows themselves — `sum(max(round) − 1)` per task — not from chain state, which
 `chain --clean` removes; that is why the round row carries `round` at all. Import-sourced
 rows are labelled in the totals (their verdict counts come from statuses, since no review
 rows exist for them). `--json` prints the same facts as one object. An empty or unreadable
 ledger prints empty tables and exits 0; unknown-kind and malformed lines are skipped and
 counted on one warning line. No prices, no dollars: R6 asks for counts.
+
+One more table (T3), `reliability (per 100 model requests)`: each group's timeline rows
+say how many model requests its rounds made (one per recorded step) and what
+interrupted them. Per group and in a `(total)` line: `requests`, each event kind's
+`rates_per_100_requests` (`round(100 × count / requests, 2)`; `verify-fail` is excluded —
+it ends a round, not a request), and `verify-fail/100rds`
+(`verify_fail_per_100_rounds`): the rounds whose round row has a non-zero `verify_rc`, over
+the group's round count. It is counted off the round rows, not the timeline events, so rounds
+recorded before timeline schema 2 count too; the `verify-fail` event only places a failure
+in its context bucket. `null`/`-` when the group
+saw no requests at all, `-` when it saw rounds and no timeline row (nothing known,
+not a claim of clean). The same rates broken down by the context size the event landed
+at — `0-32k`, `32-64k`, `64-128k`, `128-256k`, `256-512k`, `512k+`, and `unknown` for
+unclosed steps and v1 rows — appear per bucket in `--json` as `by_context`. A v1
+timeline row has no positions: its steps count as requests in `unknown`, and it holds
+no events.
 
 ## Slice B (not this slice's code)
 
@@ -249,8 +290,9 @@ chain base), later refs the previous step's branch and the step's own.
    so the brief's "outside every task directory" holds while `prune`/`rm` stay unaware of
    it; config key `LEDGER` overrides. Isolation is test-enforced in T3.
 2. **Timeline rows**: `kind:"timeline"`, one row per round holding the arrays (§Timeline);
-   same file, because append + lock + ordering stay one story and `stats` filters them
-   out before parsing.
+   same file, because append + lock + ordering stay one story; `stats` drops other
+   known kinds by `kind` before parsing, and reads timeline rows only for the
+   reliability figures (T3).
 3. **Effort**: new `meta.env` key `EFFORT` from `--hard` — the only R3 field not derivable
    from files that exist today, hence an explicit T2 change; on import it is *inferred*
    and labelled `effort_source:"inferred"` (§Import).
@@ -271,9 +313,10 @@ chain base), later refs the previous step's branch and the step's own.
    readers (unknown rows would only be historical).
 2. **Timeline rows in the same file.** Option A: one file for all kinds; Option B:
    `timeline.jsonl` beside the events file so the stats reader's stream stays small.
-   **Picked A** — one lock, one append order, one file to back up; `stats` already
-   filters by kind before parsing. If stats ever reads slowly on a big ledger, B is a
-   pure move (T1's `read_rows` takes the path; nothing else changes).
+   **Picked A** — one lock, one append order, one file to back up; `stats` drops the
+   kinds it does not read by `kind` before parsing, and reads only the timeline rows
+   whose `(task_id, round)` match a kept round row. If stats ever reads slowly on a big
+   ledger, B is a pure move (T1's `read_rows` takes the path; nothing else changes).
 3. **The totals command's name.** Option A: `delegate stats`; Option B:
    `delegate ledger stats`. **Picked A** — R6 says "shown by a `delegate` command", the
    name is shorter, and `ledger` stays the write side.

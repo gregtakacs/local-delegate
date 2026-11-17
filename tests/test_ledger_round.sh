@@ -50,10 +50,12 @@ cat > "$RD/events.jsonl" <<FIX
 {"type":"step_start","timestamp":5000,"part":{"type":"step-start"}}
 {"type":"tool_use","timestamp":6000,"part":{"type":"tool","tool":"grep","callID":"call_b2","id":"call_b2","state":{"status":"pending","input":"hush","time":{"start":5800}}}}
 {"type":"tool_use","timestamp":8000,"part":{"type":"tool","tool":"grep","callID":"call_b2","id":"call_b2","state":{"status":"completed","input":"hush2","output":"hush3","time":{"start":5800,"end":8100}}}}
+{"type":"tool_use","timestamp":8500,"part":{"type":"tool","tool":"write","callID":"call_c3","id":"call_c3","state":{"status":"error","error":"The arguments provided to the tool are invalid: SECRET-ARGS-MARKER","time":{"start":8400,"end":8500}}}}
 {"type":"text","timestamp":9000,"part":{"type":"text","text":"STATUS: done\n\nSECRETTEXT foobarbaz\nkey SECRET-KEY-VALUE"}}
+{"type":"tool_use","timestamp":9300,"part":{"type":"tool","tool":"bash","callID":"call_d4","id":"call_d4","state":{"status":"error","error":"SECRET-GENERIC-FAILURE","time":{"start":9200,"end":9300}}}}
 {"type":"step_finish","timestamp":9500,"part":{"type":"step-finish","tokens":{"input":1,"output":2,"reasoning":0,"cache":{"read":0,"write":0}},"reason":"end-turn"}}
 FIX
-printf 'nudge: malformed\n' > "$RD/stderr.log"
+printf 'nudge: malformed step=1 ctx=110\nnudge: api-error step=2 ctx=1\nnudge: no-status\n' > "$RD/stderr.log"
 : > "$RD/verify.log"
 # $DELEGATE_RULES_DIR: a fixture tree with exactly the three sources the hash covers
 RL=$T/rules; mkdir -p "$RL/rules" "$RL/plugins"
@@ -221,7 +223,7 @@ cases = [
      and tl_row["ts"] == round_row["ts"],
      "both rows close with one ISO timestamp"),
     (list(tl_row) == ["kind", "schema", "task_id", "run_id", "round",
-                      "steps", "tools", "source", "ts"],
+                      "steps", "tools", "events", "source", "ts"],
      "timeline row: identity + derivation, nothing else, in order"),
     (tl_row["kind"] == "timeline" and tl_row["schema"] == ledger.KINDS["timeline"],
      "timeline kind and schema"),
@@ -229,6 +231,17 @@ cases = [
      and tl_row["round"] == round_row["round"], "timeline joins on the same identity"),
     (tl_row["steps"] == derived["steps"] and tl_row["tools"] == derived["tools"],
      "timeline body is the derivation itself"),
+    ([s["ctx"] for s in tl_row["steps"]] == [110, 1],
+     "every step carries its context size (input+cache.read+cache.write)"),
+    (tl_row["events"] == [
+        {"kind": "nudge:no-status", "step": None, "ctx": None},
+        {"kind": "nudge:malformed", "step": 1, "ctx": 110},
+        {"kind": "tool-error:invalid-args", "step": 2, "ctx": 1},
+        {"kind": "tool-error", "step": 2, "ctx": 1},
+        {"kind": "nudge:api-error", "step": 2, "ctx": 1}],
+     "events: the walk's two tool errors (the invalid-args one split out by its marker), "
+     "the three nudges at their recorded positions — the old-format line at null, sorted "
+     "first, no verify-fail with verify_rc absent — in step order"),
     (tl_row["ts"] == round_row["ts"], "the pair shares one ts"),
 ]
 bad = [msg for ok, msg in cases if not ok]
@@ -239,10 +252,10 @@ PY
 chk=$(EXPECT_VERSION=$VERSION EXPECT_START=$START EXPECT_END=$END \
      python3 "$T/check.py" "$RD/report.json" 2>&1)
 printf '%s\n' "$chk" | grep '^MISMATCH' || true
-check "every field of both rows matches the design's fixture values (34 checks)" \
-  'printf "%s\n" "$chk" | grep -qE "^checked=34 bad=0$"'
+check "every field of both rows matches the design's fixture values (36 checks)" \
+  'printf "%s\n" "$chk" | grep -qE "^checked=36 bad=0$"'
 check "R4/R7: no payload text, call id or key material reached the ledger" \
-  '! grep -qE "SECRETINPUT|SECRETOUTPUT|SECRET-TITLE|SECRET-META|SECRETTEXT|SECRET-KEY-VALUE|foobarbaz|hush|call_a1|call_b2|never-read" "$L"'
+  '! grep -qE "SECRETINPUT|SECRETOUTPUT|SECRET-TITLE|SECRET-META|SECRETTEXT|SECRET-KEY-VALUE|foobarbaz|hush|call_a1|call_b2|never-read|SECRET-ARGS-MARKER|SECRET-GENERIC-FAILURE|call_c3|call_d4" "$L"'
 check "R7: the key file path is not recorded anywhere in the rows" \
   '! grep -q "DELEGATE_API_KEY_FILE" "$L"'
 

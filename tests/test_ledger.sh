@@ -50,7 +50,7 @@ PY
 mkdir -p $T/sandbox
 ROUT=$(pylib $T/resolve.py $T/sandbox); RV() { printf '%s\n' "$ROUT" | sed -n "s/^$1=//p"; }
 check "KINDS: slice T's three kinds, and slice B's two registered so they skip cleanly" \
-  '[ "$(RV kinds)" = "benchmark:1,review:1,round:2,timeline:1,verdict:1" ]'
+  '[ "$(RV kinds)" = "benchmark:1,review:1,round:2,timeline:2,verdict:1" ]'
 check "resolve_ledger: a CLI/config override wins over DELEGATE_LEDGER" \
   '[ "$(RV override)" = /o/led.jsonl ]'
 check "resolve_ledger: DELEGATE_LEDGER is used when no override is given" \
@@ -337,6 +337,10 @@ cases = [
     (s0["reason"] == "tool-calls" and s1["reason"] == "end-turn", "step_finish carries the reason"),
     ((s0["input"], s0["output"], s0["reasoning"], s0["cache_read"], s0["cache_write"])
         == (100, 50, 10, 7, 3), "tokens split cache read/write"),
+    (s0["ctx"] == 110 and s1["ctx"] == 1,
+        "every step carries its context size: input + cache.read + cache.write"),
+    (s2["ctx"] is None, "an unclosed step has no context size to record"),
+    (tl["events"] == [], "no failed tool call, no reliability event"),
     ((s1["input"], s1["output"]) == (1, 2), "each step keeps its own tokens"),
     (s1["start"] == 5000 and s1["end"] == 9500, "step 2 boundaries"),
     (s2["start"] == 10000 and s2["end"] == 10000 and s2["reason"] is None,
@@ -363,7 +367,7 @@ for m in bad:
     print("assert FAIL: " + m)
 
 orph = ledger.derive_timeline(os.path.join(sys.argv[1], "nosuch.jsonl"))
-if orph != {"steps": [], "tools": [],
+if orph != {"steps": [], "tools": [], "events": [],
             "totals": {"input": 0, "output": 0, "reasoning": 0, "cache_read": 0, "cache_write": 0}}:
     print("assert FAIL: a missing events file derives to empty, got " + json.dumps(orph))
 
@@ -375,7 +379,54 @@ if not (len(o["steps"]) == 1 and o["steps"][0]["start"] == 7000 and o["steps"][0
         and o["steps"][0]["input"] == 5 and o["totals"]["input"] == 5):
     print("assert FAIL: a finish whose start never made the log still counts, at its own instant")
 
-sys.exit(1 if bad else 0)
+# timeline schema 2: the reliability events — the two tool-error kinds split by marker,
+# a planted secret in each error text that must not reach the record
+open(os.path.join(sys.argv[1], "errs.jsonl"), "w").write(
+    '{"type":"step_start","timestamp":100,"part":{"type":"step-start"}}\n'
+    '{"type":"tool_use","timestamp":110,"part":{"type":"tool","tool":"edit","id":"x1",'
+    '"state":{"status":"error","error":"The arguments provided to the tool are invalid: SECRET-BADARGS",'
+    '"time":{"start":105,"end":110}}}}\n'
+    '{"type":"step_finish","timestamp":120,"part":{"type":"step-finish",'
+    '"tokens":{"input":40000,"cache":{"read":1,"write":1}},"reason":"tool-calls"}}\n'
+    '{"type":"step_start","timestamp":130,"part":{"type":"step-start"}}\n'
+    '{"type":"tool_use","timestamp":140,"part":{"type":"tool","tool":"bash","id":"x2",'
+    '"state":{"status":"error","error":"SECRET-BOOM","time":{"start":135,"end":140}}}}\n'
+    '{"type":"step_finish","timestamp":150,"part":{"type":"step-finish",'
+    '"tokens":{"input":999,"reasoning":1},"reason":"tool-calls"}}\n')
+e = ledger.derive_timeline(os.path.join(sys.argv[1], "errs.jsonl"))
+eblob = json.dumps(e)
+cases2 = [
+    (e["events"] == [{"kind": "tool-error:invalid-args", "step": 1, "ctx": 40002},
+                     {"kind": "tool-error", "step": 2, "ctx": 999}],
+     "events: one record per failed call, the invalid-args marker splits the kind, step and ctx name the place"),
+    (not any(w in eblob for w in ("SECRET-BADARGS", "SECRET-BOOM", "x1", "x2")),
+     "R4: the error text never reaches the record"),
+]
+
+# timeline schema 2: the shared events merge — new-format nudges at their recorded
+# position, an old-format line at null/unknown, a verify-fail from a non-zero verify_rc
+merged = ledger.timeline_events(e, "nudge: malformed step=1 ctx=40002\n"
+                                "nudge: no-status\n"
+                                "nudge: something-else entirely\n", 1)
+cases2 += [
+    (merged == [{"kind": "nudge:no-status", "step": None, "ctx": None},
+                {"kind": "nudge:something-else", "step": None, "ctx": None},
+                {"kind": "nudge:malformed", "step": 1, "ctx": 40002},
+                {"kind": "tool-error:invalid-args", "step": 1, "ctx": 40002},
+                {"kind": "tool-error", "step": 2, "ctx": 999},
+                {"kind": "verify-fail", "step": 2, "ctx": 999}],
+     "timeline_events merges the walk, the nudges (old format recorded at null, never a "
+     "position nobody wrote) and the verify-fail from verify_rc, in step order, nulls first"),
+    (ledger.timeline_events(e, "nudge: malformed step=1 ctx=40002", 0,
+                            fallback=(57, 123456)) [0] ==
+     {"kind": "nudge:malformed", "step": 1, "ctx": 40002},
+     "a recorded position is kept as written, and verify_rc 0 writes no verify-fail"),
+    (ledger._final_position({"steps": []}, (57, 123456)) == (57, 123456),
+     "with no closed step the fallback pair from the round row is used"),
+    (ledger._final_position(None) == (0, 0), "and with neither, position zero"),
+]
+cases += cases2
+bad = [m for ok, m in cases if not ok]
 PY
 rc=$?
 check 'derive_timeline: all shape, rollup and R4-redaction assertions' "[ $rc -eq 0 ]"
@@ -665,8 +716,11 @@ cases = [
      and tls[0]["ts"] == a1["ts"], "the timeline row joins its round row on identity and shares its ts"),
     (tls[0]["steps"] == derived["steps"] and tls[0]["tools"] == derived["tools"],
      "the imported timeline is the same derivation the live path writes (R8: one code path)"),
-    (list(tls[0]) == ["kind", "schema", "task_id", "run_id", "round", "steps", "tools", "source", "ts"],
+    (list(tls[0]) == ["kind", "schema", "task_id", "run_id", "round", "steps", "tools",
+                      "events", "source", "ts"],
      "the timeline row's keys, in order, source included"),
+    (all("ctx" in s for r in tls for s in r["steps"]),
+     "every imported step carries a ctx key (timeline schema 2)"),
     (a2["ts"] == b1["ts"] and re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", a1["ts"]),
      "ts is one append-time stamp, ISO-8601 UTC"),
 ]
@@ -677,8 +731,8 @@ print(f"checked={len(cases)} bad={len(bad)}")
 PY
 chk=$(EXPECT_REPO=$REPO_FIX DELEGATE_LEDGER=$LI DELEGATE_STATE=$ST pylib $T/imported.py 2>&1)
 printf '%s\n' "$chk" | grep '^MISMATCH' || true
-check "the imported rows answer to §Import's recovery table (22 checks)" \
-  'printf "%s\n" "$chk" | grep -qE "^checked=22 bad=0$"'
+check "the imported rows answer to §Import's recovery table (23 checks)" \
+  'printf "%s\n" "$chk" | grep -qE "^checked=23 bad=0$"'
 
 # A record this build cannot read is a skipped task and one warn line, never a failure.
 mkdir -p $T/state2 && cp -a "$ST/repo-imp-a" $T/state2/

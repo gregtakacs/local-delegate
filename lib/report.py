@@ -138,6 +138,39 @@ def summarize(events):
     }
 
 
+def steps_ctxs(events_path):
+    """Per-step context size (input + cache.read + cache.write tokens), in stream order.
+
+    Reads step_finish parts straight from the event file; a missing or unreadable file
+    is the empty list."""
+    ctxs = []
+    for ev in read_events(events_path):
+        if ev.get("type") != "step_finish":
+            continue
+        p = ev.get("part")
+        if not isinstance(p, dict):
+            continue
+        t = p.get("tokens")
+        if not isinstance(t, dict):
+            t = {}
+        c = t.get("cache")
+        if not isinstance(c, dict):
+            c = {}
+
+        def num(x):
+            return x if isinstance(x, (int, float)) and not isinstance(x, bool) else 0
+
+        ctxs.append(int(num(t.get("input"))) + int(num(c.get("read"))) + int(num(c.get("write"))))
+    return ctxs
+
+
+def position(events_path):
+    """The round's live position as the nudge line records it: (steps so far, context size of
+    the last step). An event file with no steps is (0, 0)."""
+    ctxs = steps_ctxs(events_path)
+    return (len(ctxs), ctxs[-1] if ctxs else 0)
+
+
 def read_text(path):
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
@@ -240,7 +273,7 @@ def cmd_report(a):
         L.append("```")
     if "SECURITY:" in read_text(a.stderr):
         L.insert(4, "**SECURITY: the worker modified the worktree's .git pointer (restored). Review this round's diff with suspicion.**")
-    nudges = re.findall(r"^nudge: (\S+)", read_text(a.stderr), re.M)
+    nudges = re.findall(r"^nudge: (\S+)(?:\s|$)", read_text(a.stderr), re.M)
     if nudges:
         c = Counter(nudges)
         L.insert(4, "NOTE: harness nudged the worker in-session: " +
@@ -305,6 +338,9 @@ def main():
         return
     if len(sys.argv) >= 4 and sys.argv[1] == "nudge-kind":
         print(nudge_kind(read_events(sys.argv[2]), int(sys.argv[3] or 0)))
+        return
+    if len(sys.argv) >= 3 and sys.argv[1] == "position":
+        print(*position(sys.argv[2]))
         return
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["report"])

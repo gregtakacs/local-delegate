@@ -8,7 +8,7 @@
 set -euo pipefail
 
 DELEGATE_HOME=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)
-VERSION=0.6.1
+VERSION=0.6.2
 
 die()  { echo "delegate: $*" >&2; exit 1; }
 warn() { echo "delegate: $*" >&2; }
@@ -750,7 +750,11 @@ for l in open(sys.argv[1]):
     [ -n "${SESSION:-}" ] || break
     left=$(( secs - ($(date +%s) - start) )); [ "$left" -ge 300 ] || left=300
     note "round $n: $kind — nudging the worker in-session"
-    echo "nudge: $kind" >> "$rd/stderr.log"
+    # The position the nudge happened at, recorded right on the line (t-3): the step count so
+    # far and the context size of the last step — reliability rates are per model request, so
+    # where a nudge landed in a round is what makes the rate mean anything.
+    local pos; pos=$(python3 "$DELEGATE_HOME/lib/report.py" position "$rd/events.jsonl" 2>/dev/null || echo "0 0")
+    echo "nudge: $kind step=${pos% *} ctx=${pos#* }" >> "$rd/stderr.log"
     # The retry message is sent, then the worker simply carries on in the same session, often
     # for the rest of the round — so the phase is the worker again; the retry shows in counts.
     phase "$rd" worker
@@ -2407,12 +2411,37 @@ table("\nfindings (review rows)",
 
 def statuses(f):
     names = list(ledger.FAILURE_STATUSES) + [k for k in f["statuses"] if k not in ledger.FAILURE_STATUSES]
-    return " ".join(f"{n}={f['statuses'][n]}" for n in dict.fromkeys(names))
+    # t-3: a round that ended in verify-fail is a failure this table must surface. It is not
+    # a round STATUS — the round is done and the verify says failed — so the count comes
+    # from the round's verify-fail event, 0 when the ledger holds none.
+    parts = [f"{n}={f['statuses'][n]}" for n in dict.fromkeys(names)]
+    if f["verify_fails"]:
+        parts.append(f"verify-fail={f['verify_fails']}")
+    return " ".join(parts)
 
 table("\nfailures (round rows)",
       ["repo/chain", "model", "effort", "tool_errors", "errors", "statuses"],
       [[f["axes"], f["model"] or "-", f["effort"] or "-", f["tool_errors"], f["errors"],
         statuses(f)] for f in failures], {3, 4})
+
+# The reliability block (t-3): interruption and failure rates per 100 model requests, from
+# the timeline rows' events. Only the kinds that occurred get a column; a group without one
+# shows "-", not a zero — no timeline row says nothing, a rate of 0.0 says the round ran
+# clean. verify-fail is its own per-100-rounds column, not a per-request rate.
+rel_kinds = sorted({k for g in [t, *groups] for k in (g["rates_per_100_requests"] or {})})
+if groups or t["rounds"]:
+    def rate(v):
+        return "-" if v is None else f"{v:g}"
+    rel_rows = [[g["repo"] or "-" if not g["chain"] else f'{g["repo"] or "-"}/{g["chain"]}',
+                 g["model"] or "-", g["effort"] or "-", g["requests"],
+                 *(rate((g["rates_per_100_requests"] or {}).get(k)) for k in rel_kinds),
+                 rate(g["verify_fail_per_100_rounds"])] for g in groups]
+    rel_rows.append(["(total)", "", "", t["requests"],
+                     *(rate((t["rates_per_100_requests"] or {}).get(k)) for k in rel_kinds),
+                     rate(t["verify_fail_per_100_rounds"])])
+    table("\nreliability (per 100 model requests)",
+          ["repo/chain", "model", "effort", "requests", *rel_kinds, "verify-fail/100rds"],
+          rel_rows, set(range(3, 4 + len(rel_kinds) + 1)))
 
 c = data["counts"]
 print(f"\n  {c['round_rows']} round rows, {c['review_rows']} review rows, "

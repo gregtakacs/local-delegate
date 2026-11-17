@@ -42,7 +42,10 @@ from typing import Any, Iterator, Mapping
 # time. A kind is valid iff listed here; a row's schema iff 1 <= schema <= KINDS[kind].
 # round:2 adds `orchestrator`/`orchestrator_session` (the delegating session); a v1 round
 # row reads the same with both null.
-KINDS: dict[str, int] = {"round": 2, "timeline": 1, "review": 1, "benchmark": 1, "verdict": 1}
+# timeline:2 adds `ctx` to every step and the `events` list — the reliability positions
+# (nudges, tool errors, verify-fails, each with step and context size); a v1 timeline row
+# reads the same with steps' ctx null and no events.
+KINDS: dict[str, int] = {"round": 2, "timeline": 2, "review": 1, "benchmark": 1, "verdict": 1}
 
 LEDGER_FILENAME = "events.jsonl"          # the ledger's own file, beside — never inside — task dirs
 
@@ -240,7 +243,7 @@ def _events(events_path: str) -> Iterator[dict]:
 
 def _new_step(start: int | None) -> dict:
     return {"start": start, "end": start, "input": 0, "output": 0, "reasoning": 0,
-            "cache_read": 0, "cache_write": 0, "reason": None}
+            "cache_read": 0, "cache_write": 0, "ctx": None, "reason": None}
 
 
 def derive_timeline(events_path: str) -> dict:
@@ -263,6 +266,9 @@ def derive_timeline(events_path: str) -> dict:
     """
     steps: list[dict] = []
     tools: list[dict] = []
+    events: list[dict] = []
+    open_errors: dict[str, dict] = {}         # call id -> its still-open error record (never
+                                              # a list position: those shift when one drops)
     totals = {"input": 0, "output": 0, "reasoning": 0, "cache_read": 0, "cache_write": 0}
     open_step: dict | None = None
     seen_tools: dict[str, int] = {}
@@ -294,9 +300,15 @@ def derive_timeline(events_path: str) -> dict:
             steps.append(step)
             step["end"] = ts if ts is not None else step["start"]
             step.update(counted)
+            step["ctx"] = (counted["input"] + counted["cache_read"]
+                           + counted["cache_write"])
             step["reason"] = part.get("reason")
             for k, v in counted.items():
                 totals[k] += v
+            for ev in events:                              # errors inside the step that just closed
+                if ev.get("open") and ev["step"] == len(steps):
+                    ev["ctx"] = step["ctx"]
+                    ev["open"] = False
         elif etype == "tool_use":
             state = _dict(part.get("state"))
             time_ = _dict(state.get("time"))
@@ -309,11 +321,36 @@ def derive_timeline(events_path: str) -> dict:
                 if isinstance(call_id, str) and call_id:
                     seen_tools[call_id] = len(tools)
                 tools.append(entry)
+            if entry["status"] == "error":
+                # R4 read-only-by-exception: the error TEXT never leaves this walk — its first
+                # characters only decide which of the two tool-error kinds the record gets.
+                err = state.get("error")
+                err = err if isinstance(err, str) else ("" if err is None else str(err))
+                kind = ("tool-error:invalid-args" if err.startswith(INVALID_ARGS_PREFIX)
+                        else "tool-error")
+                # Open errors are tracked by call id, never by list position: positions shift
+                # when an entry is dropped. A repeat of an open error updates that record in
+                # place; a dropped one simply appends a fresh record.
+                if isinstance(call_id, str) and call_id in open_errors:
+                    ev = open_errors[call_id]
+                    ev.update(kind=kind, step=len(steps) + 1, ctx=None, open=True)
+                else:
+                    ev = {"kind": kind, "step": len(steps) + 1, "ctx": None, "open": True}
+                    if isinstance(call_id, str) and call_id:
+                        open_errors[call_id] = ev
+                    events.append(ev)
+            elif isinstance(call_id, str) and call_id in open_errors:
+                ev = open_errors.pop(call_id)               # a retried call that then worked
+                if ev["open"]:
+                    ev["dropped"] = True                    # filtered out at the end
 
     if open_step is not None:                              # killed mid-step: the last event closes it
         open_step["end"] = last_ts
         steps.append(open_step)
-    return {"steps": steps, "tools": tools, "totals": totals}
+    events = [ev for ev in events if not ev.pop("dropped", False)]
+    for ev in events:                                      # an error in a step that never closed
+        ev.pop("open", None)                               # keeps its null ctx
+    return {"steps": steps, "tools": tools, "totals": totals, "events": events}
 
 
 # ----------------------------------------------------------------------- rows -------
@@ -386,6 +423,81 @@ def _count_of(value: Any) -> int | None:
     return _num(value)
 
 
+# The reliability records a timeline row's `events` list holds (schema 2): who interrupted
+# the model or failed, and where in the round it happened — kind, step, context size. The
+# error TEXT behind a tool-error never reaches a row: its first characters only decide
+# which of the two tool-error kinds the record gets (R4's one read-by-exception, and still
+# store-nothing).
+INVALID_ARGS_PREFIX = "The arguments provided to the tool are invalid"
+NUDGE_LINE = re.compile(r"^nudge: ([A-Za-z0-9._-]+)(?: step=(\d+) ctx=(\d+))?$")
+
+# The context-size buckets stats reports reliability by: token counts at powers of two,
+# each bucket holding ctx < its bound; "unknown" takes ctx that never was.
+CTX_BUCKETS = (("0-32k", 32_768), ("32-64k", 65_536), ("64-128k", 131_072),
+               ("128-256k", 262_144), ("256-512k", 524_288), ("512k+", None))
+
+
+def ctx_bucket(n: Any) -> str:
+    """The bucket a context size falls in. Anything that is not a non-negative integer —
+    an unclosed step, a v1 row's step, a record with no position — is "unknown"."""
+    if isinstance(n, bool) or not isinstance(n, int) or n < 0:
+        return "unknown"
+    for label, hi in CTX_BUCKETS:
+        if hi is None or n < hi:
+            return label
+    return "512k+"
+
+
+def parse_nudge_lines(text: str) -> list:
+    """`nudge: <kind>[ step=<N> ctx=<T>]` lines from a round's stderr, in file order, as
+    [("nudge:<kind>", N|None, T|None)]. A line without the position pair is the old format,
+    written before positions existed: still a nudge of that kind, with no position of its own
+    (null step and ctx — never an invented one). A `nudge:` line this grammar does not know
+    is not a nudge."""
+    out = []
+    for line in (text or "").splitlines():
+        m = NUDGE_LINE.match(line.strip())
+        if m:
+            out.append(("nudge:" + m.group(1),
+                        int(m.group(2)) if m.group(2) is not None else None,
+                        int(m.group(3)) if m.group(3) is not None else None))
+    return out
+
+
+def _final_position(derived: Mapping[str, Any] | None, fallback=None) -> tuple:
+    """(steps so far, ctx of the last closed step) from a derivation — the position a
+    verify-fail record takes, being a property of the finished round rather than of one
+    logged instant. With no closed step anywhere the caller's `fallback` pair (read off the
+    round row: `steps`, `final_context_tokens`) is used; with neither, (0, 0)."""
+    ctxs = [s.get("ctx") for s in (derived or {}).get("steps") or [] if s.get("ctx") is not None]
+    if ctxs:
+        return len(ctxs), ctxs[-1]
+    if isinstance(fallback, (tuple, list)) and len(fallback) == 2:
+        return (fallback[0] or 0, fallback[1] or 0)
+    return (0, 0)
+
+
+def timeline_events(derived: Mapping[str, Any] | None, stderr_text: str = "",
+                    verify_rc=None, fallback=None) -> list:
+    """R8, again: the ONE derivation of a timeline row's `events`, shared by the live round
+    and the import. Tool errors come from the walk (already in `derived`); nudges come from
+    the round's stderr — an old-format line with no position of its own records null step and
+    ctx and joins the "unknown" bucket, because a position nobody recorded is never invented.
+    A verify-fail record is appended when the round's verify exit code is non-zero
+    (`verify_rc not in (None, 0)` — the exit code, not a status string), at the round's final
+    position. Sorted by step, stable, nulls first (a missing step sorts like the walk's -1),
+    so a row's events read in round order. Only kind, step and ctx are produced: no message,
+    no tool text (R4)."""
+    events = [dict(ev) for ev in ((derived or {}).get("events") or [])]
+    for kind, n, t in parse_nudge_lines(stderr_text):
+        events.append({"kind": kind, "step": n, "ctx": t})
+    if isinstance(verify_rc, int) and not isinstance(verify_rc, bool) and verify_rc != 0:
+        final = _final_position(derived, fallback)
+        events.append({"kind": "verify-fail", "step": final[0], "ctx": final[1]})
+    events.sort(key=lambda ev: ev["step"] if isinstance(ev["step"], int) else -1)
+    return events
+
+
 def build_timeline_row(derived: Mapping[str, Any], identity: Mapping[str, Any],
                        source: str = "", ts: str | None = None) -> dict:
     """A round's timeline row: the derive_timeline result (steps, tools — never
@@ -398,7 +510,8 @@ def build_timeline_row(derived: Mapping[str, Any], identity: Mapping[str, Any],
         ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     return {"task_id": identity.get("task_id"), "run_id": identity.get("run_id"),
             "round": identity.get("round"), "steps": derived.get("steps") or [],
-            "tools": derived.get("tools") or [], "source": source, "ts": ts}
+            "tools": derived.get("tools") or [], "events": derived.get("events") or [],
+            "source": source, "ts": ts}
 
 
 def append_round_and_timeline(ledger_path: str, report_path: str, events_path: str,
@@ -425,6 +538,18 @@ def append_round_and_timeline(ledger_path: str, report_path: str, events_path: s
     derived = derive_timeline(events_path) if events_path and os.path.exists(events_path) else None
     if derived is not None:
         extra["totals"] = derived["totals"]
+        # R8, once more: the row's `events` come from one merge — the walk's tool errors, the
+        # round's stderr nudge lines, and a verify-fail decided by this round's verify exit
+        # code off report.json. Import arrives here by the same door as a live round.
+        stderr_path = os.path.join(os.path.dirname(report_path), "stderr.log")
+        try:
+            with open(stderr_path, encoding="utf-8", errors="replace") as f:
+                stderr_text = f.read()
+        except OSError:
+            stderr_text = ""
+        derived["events"] = timeline_events(
+            derived, stderr_text, report.get("verify_rc"),
+            fallback=(report.get("steps"), report.get("final_context_tokens")))
     row = build_round_row(report, extra)
     append(ledger_path, {"kind": "round", "schema": KINDS["round"], **row})
     if derived is None:
@@ -803,7 +928,7 @@ def import_state(ledger_path: str, state_dir: str, model: str = "",
 # them, so they are dropped at the line level before anything is parsed. No prices and no
 # dollar amounts appear anywhere in stats: R6 asks counts. Design: t-design.md §Stats.
 
-STATS_KINDS = ("round", "review")                       # the only kinds stats reads
+STATS_KINDS = ("round", "review", "timeline")                 # the only kinds stats reads
 STATS_AXES = ("repo", "chain", "model", "effort")       # R6's four group axes
 TOKEN_FIELDS = ("input_tokens", "output_tokens", "reasoning_tokens",
                 "cache_read", "cache_write")
@@ -836,7 +961,7 @@ def read_stats_rows(ledger_path: str) -> dict:
     parsing. `skipped` counts what this build cannot use at all: not JSON, not an object, a
     kind it does not know, a schema above the one it knows, a blank line. Neither count is a
     failure here: the caller prints one warning line for `skipped` and goes on."""
-    out: dict[str, Any] = {"rows": [], "skipped": 0, "filtered": 0}
+    out: dict[str, Any] = {"rows": [], "skipped": 0, "filtered": 0, "timelines": []}
     try:
         f = open(ledger_path, encoding="utf-8", errors="replace")
     except OSError:
@@ -850,7 +975,7 @@ def read_stats_rows(ledger_path: str) -> dict:
             head = _KIND_HEAD.match(raw)
             if head is not None:
                 kind = head.group(1)
-                if kind in STATS_KINDS:
+                if kind in STATS_KINDS or kind == "timeline":
                     pass                                     # parse it below, like any other
                 elif kind in KINDS:
                     out["filtered"] += 1                      # known kind, not stats' business
@@ -859,8 +984,14 @@ def read_stats_rows(ledger_path: str) -> dict:
                     out["skipped"] += 1                       # unknown kind: never parsed
                     continue
             row = _accepted(raw)
-            if row is None or row["kind"] not in STATS_KINDS:
-                out["skipped" if row is None else "filtered"] += 1
+            if row is None:
+                out["skipped"] += 1
+                continue
+            if row["kind"] == "timeline":                     # stats joins these by (task_id,
+                out["timelines"].append(row)                  # round) after the grouping pass
+                continue
+            if row["kind"] not in STATS_KINDS:
+                out["filtered"] += 1
                 continue
             out["rows"].append(row)
     return out
@@ -882,7 +1013,50 @@ def _new_group(key: tuple) -> dict:
             "_tokens": dict.fromkeys(TOKEN_FIELDS, 0), "_cache_pcts": [], "_done": 0,
             "_reviews": [], "_verdicts": dict.fromkeys(VERDICTS, 0),
             "_last": {}, "_task_verdict": {},
-            "_bugs": {"high": 0, "medium": 0, "low": 0}, "_lines_changed": 0}
+            "_bugs": {"high": 0, "medium": 0, "low": 0}, "_lines_changed": 0,
+            "_keys": set(), "_requests": 0, "_rel_events": {},
+            "_ctx": {}, "_verify_fails": 0}                # bucket -> {requests, events}
+
+
+def _ctx_enter(group: dict, ctx: Any, kind: str | None = None) -> None:
+    """One model request (kind None) or one reliability event into its context bucket."""
+    label = ctx_bucket(ctx)
+    cell = group["_ctx"].setdefault(label, {"requests": 0, "events": {}})
+    if kind is None:
+        cell["requests"] += 1
+    else:
+        cell["events"][kind] = cell["events"].get(kind, 0) + 1
+
+
+def _add_timeline(group: dict, row: Mapping[str, Any]) -> None:
+    """One timeline row's reliability into the group its round row belongs to. Every step is
+    one model request, bucketed by its own context size; every event is one record, bucketed
+    by the position it carries. A v1 row has no positions: its steps count as requests in the
+    `unknown` bucket, and it holds no events. Only kinds, counts and buckets come out of a
+    row here — never a step's or an event's text (R4)."""
+    steps = row.get("steps")
+    steps = steps if isinstance(steps, list) else []
+    try:
+        schema = int(row.get("schema") or 1)
+    except (TypeError, ValueError):
+        schema = 1
+    if schema < 2:
+        for _ in steps:
+            group["_requests"] += 1
+            _ctx_enter(group, None)
+        return
+    for s in steps:
+        group["_requests"] += 1
+        _ctx_enter(group, s.get("ctx") if isinstance(s, dict) else None)
+    events = row.get("events")
+    for ev in events if isinstance(events, list) else []:
+        if not isinstance(ev, dict):
+            continue
+        kind = ev.get("kind")
+        if not isinstance(kind, str) or not kind:
+            continue
+        group["_rel_events"][kind] = group["_rel_events"].get(kind, 0) + 1
+        _ctx_enter(group, ev.get("ctx"), kind)
 
 
 def _add_round(group: dict, row: Mapping[str, Any]) -> None:
@@ -893,6 +1067,12 @@ def _add_round(group: dict, row: Mapping[str, Any]) -> None:
     if row.get("source") == "import":
         group["import_rounds"] += 1
     task_id = row.get("task_id")
+    rnd = _num(row.get("round"))
+    if isinstance(task_id, str) and task_id and rnd is not None:
+        group["_keys"].add((task_id, int(rnd)))              # the join key for a timeline row
+    vrc = row.get("verify_rc")
+    if isinstance(vrc, int) and not isinstance(vrc, bool) and vrc != 0:
+        group["_verify_fails"] += 1     # from the round row: every schema has it, old rounds too
     named = isinstance(task_id, str) and task_id != ""
     if named and task_id not in group["task_ids"]:
         group["task_ids"].append(task_id)
@@ -993,6 +1173,45 @@ def _finish_group(group: dict) -> dict:
                      "bugs_medium": group["_bugs"]["medium"],
                      "bugs_low": group["_bugs"]["low"],
                      "lines_changed": group["_lines_changed"]},
+        **_reliability(group),
+    }
+
+
+def _rate_per_100(counts: Mapping[str, int], denom: int) -> dict | None:
+    """Each kind's occurrences per 100 of the denominator, two decimals; verify-fail is not
+    a per-request rate (it ends a round, not a request) and has its own figure. Rates need a
+    population: with no requests at all in the group, the answer is nothing known (None),
+    not a division by zero."""
+    if not denom:
+        return None
+    return {k: round(100.0 * n / denom, 2)
+            for k, n in sorted(counts.items()) if k != "verify-fail"}
+
+
+def _reliability(group: dict) -> dict:
+    """R4-safe reliability figures from the timeline rows joined into a group: the model
+    requests the round's steps carried, the reliability records per 100 of them, verify-fails
+    per 100 rounds, and the same rates per context-size bucket. A group with no timeline rows
+    has the zero, not the null — it saw rounds and no recorded interruptions."""
+    rel = group["_rel_events"]
+    by_ctx = {}
+    for label, _hi in (*CTX_BUCKETS, ("unknown", None)):
+        cell = group["_ctx"].get(label)
+        if cell is None:
+            continue
+        by_ctx[label] = {"requests": cell["requests"],
+                         "events": dict(sorted(cell["events"].items())),
+                         "rates_per_100_requests": _rate_per_100(cell["events"],
+                                                                  cell["requests"])}
+    return {
+        "requests": group["_requests"],
+        "rates_per_100_requests": _rate_per_100(rel, group["_requests"]),
+        # counted off the round rows' verify_rc, not the timeline events: a round recorded
+        # before timeline schema 2 failed its verify just the same
+        "verify_fails": group["_verify_fails"],
+        "verify_fail_per_100_rounds": round(100.0 * group["_verify_fails"] / group["rounds"], 2)
+        if group["rounds"] else None,
+        "by_context": by_ctx,
     }
 
 
@@ -1016,7 +1235,12 @@ def stats(ledger_path: str, chain: str = "", repo: str = "", since: str = "") ->
     groups: dict[tuple, dict] = {}
     by_task: dict[str, set] = {}
     total = _new_group(("", "", "", ""))            # the same accumulators, over every kept row
-    counts = {"round_rows": 0, "review_rows": 0}
+    counts = {"round_rows": 0, "review_rows": 0, "timeline_rows": 0}
+    tl_index: dict[tuple, dict] = {}               # (task_id, round) -> its timeline row
+    for row in data["timelines"]:
+        task_id, rnd = row.get("task_id"), _num(row.get("round"))
+        if isinstance(task_id, str) and task_id and rnd is not None:
+            tl_index[(task_id, int(rnd))] = row    # a rerun's row supersedes the earlier one
     for row in data["rows"]:
         if since and not _since_ok(row.get("ts"), since):
             continue
@@ -1037,6 +1261,22 @@ def stats(ledger_path: str, chain: str = "", repo: str = "", since: str = "") ->
         task_id = row.get("task_id")
         if isinstance(task_id, str) and task_id:
             by_task.setdefault(task_id, set()).add(key)
+    # The reliability pass: every kept round row that has a timeline row gets one. A round
+    # whose events were pruned (or a v1 round imported from before positions) has none, and
+    # contributes nothing here — its rounds and statuses are already in the group.
+    for row in data["rows"]:
+        if since and not _since_ok(row.get("ts"), since):
+            continue
+        if row["kind"] != "round" or (_axis(row, "chain") and chain and _axis(row, "chain") != chain) \
+                or (repo and _axis(row, "repo") != repo):
+            continue
+        tl = tl_index.get((row.get("task_id"), int(_num(row.get("round")) or 0)))
+        if tl is None:
+            continue
+        counts["timeline_rows"] += 1
+        key = tuple(_axis(row, field) for field in STATS_AXES)
+        _add_timeline(groups.get(key) or total, tl)
+        _add_timeline(total, tl)
     joined: set = set()
     for row in data["rows"]:
         if row["kind"] != "review":
@@ -1085,5 +1325,6 @@ def _failures_table_row(g: Mapping[str, Any]) -> dict:
     statuses = {name: g["statuses"].get(name, 0) for name in FAILURE_STATUSES}
     statuses.update({k: v for k, v in g["statuses"].items() if k not in statuses})
     return {"axes": _axes_label(g), "model": g["model"], "effort": g["effort"],
-            "tool_errors": g["tool_errors"], "errors": g["errors"], "statuses": statuses}
+            "tool_errors": g["tool_errors"], "errors": g["errors"], "statuses": statuses,
+            "verify_fails": g["verify_fails"]}
 
