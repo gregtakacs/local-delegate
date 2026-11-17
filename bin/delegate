@@ -8,7 +8,7 @@
 set -euo pipefail
 
 DELEGATE_HOME=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)
-VERSION=0.6.0
+VERSION=0.6.1
 
 die()  { echo "delegate: $*" >&2; exit 1; }
 warn() { echo "delegate: $*" >&2; }
@@ -194,7 +194,8 @@ last_round() { local n=0 r; for r in "$TASK_DIR"/rounds/*/; do [ -d "$r" ] || co
 
 lock_task() {
   mkdir "$TASK_DIR/lock" 2>/dev/null || die "task $ID is busy (another round or exec is running; stale? rmdir $TASK_DIR/lock)"
-  trap 'rmdir "$TASK_DIR/lock" 2>/dev/null || true' EXIT
+  # The round's network goes with its lock (release_service), however the round ends.
+  trap 'release_service || true; rmdir "$TASK_DIR/lock" 2>/dev/null || true' EXIT
 }
 
 # ---------------------------------------------------------------- grants -----------
@@ -353,6 +354,41 @@ ensure_network() {
   else
     docker network create --label delegate.task="$ID" "$net" >/dev/null
   fi
+}
+
+# A task's network lives only while a round (or verify) holds the task's lock: kept for the
+# task's whole record, every finished task held an address pool until `delegate rm`, and the
+# host ran out of pools (2026-11-16). ensure_service recreates it for the next round. Kept:
+# a postgres task's (its sidecar lives on that network until rm), and one another container
+# of the task is still on (a `delegate exec` running beside the round).
+release_service() {
+  [ "${DELEGATE_RUNNER:-}" = docker ] && command -v docker >/dev/null 2>&1 || return 0
+  [ "${SERVICE:-}" = postgres ] && return 0
+  local net te c; net=$(svc_net); te=$(egress_task_name)
+  docker network inspect "$net" >/dev/null 2>&1 || return 0
+  for c in $(docker network inspect -f '{{range .Containers}}{{.Name}} {{end}}' "$net" 2>/dev/null); do
+    [ "$c" = "$EGRESS_NAME" ] || [ "$c" = "$te" ] || return 0
+  done
+  docker rm -f "$te" >/dev/null 2>&1 || true
+  docker network disconnect -f "$net" "$EGRESS_NAME" >/dev/null 2>&1 || true
+  docker network rm "$net" >/dev/null 2>&1 || true
+}
+
+# Release every task network no round holds: tasks without a lock, tasks whose record is gone,
+# and doctor probes whose process is gone (networks left by a delegate older than 0.6.1, or by
+# a run that was killed before its trap ran). Cheap; runs before a new task takes a network.
+gc_networks() {
+  [ "${DELEGATE_RUNNER:-}" = docker ] && command -v docker >/dev/null 2>&1 || return 0
+  local n id d
+  for n in $(docker network ls --filter label=delegate.task --format '{{.Name}}' 2>/dev/null); do
+    id=$(docker network inspect -f '{{index .Labels "delegate.task"}}' "$n" 2>/dev/null) || continue
+    case "$id" in ''|*/*|.*) continue ;; esac
+    case "$id" in doctor-*) kill -0 "${id#doctor-}" 2>/dev/null && continue ;; esac
+    d=$DELEGATE_STATE/$id
+    [ -d "$d/lock" ] && continue
+    grep -qs '^SERVICE=postgres$' "$d/meta.env" && continue
+    ( ID=$id; SERVICE=; release_service ) || true
+  done
 }
 
 ensure_egress() {
@@ -666,6 +702,7 @@ do_round() {
   [ -n "${SESSION:-}" ] && sess_args=(--session "$SESSION")
 
   ensure_grants
+  gc_networks                  # finished tasks' networks back to the pool before this one takes one
   ensure_service
   note "round $n: worker running (model $MODEL, runner $DELEGATE_RUNNER, timeout ${secs}s) ..."
   start=$(date +%s)
@@ -1761,7 +1798,8 @@ cmd_doctor() {
       -e HTTPS_PROXY="$px" -e https_proxy="$px" -e HTTP_PROXY="$px" -e http_proxy="$px" \
       -v "$DELEGATE_API_KEY_FILE:/k:ro" "$DELEGATE_IMAGE" -c "
         c(){ curl -s -o /dev/null -m 15 -w %{http_code} \"\$@\"; }
-        echo \"\$(c -H \"Authorization: Bearer \$(cat /k)\" $u/models) \$(c https://registry.npmjs.org/) \$(c -k https://10.255.255.1/) \$(c http://169.254.169.254/) \$(curl -s -o /dev/null -m 4 -w %{http_code} --noproxy '*' https://registry.npmjs.org/)\"")
+        echo \"\$(c -H \"Authorization: Bearer \$(cat /k)\" $u/models) \$(c https://registry.npmjs.org/) \$(c -k https://10.255.255.1/) \$(c http://169.254.169.254/) \$(curl -s -o /dev/null -m 4 -w %{http_code} --noproxy '*' https://registry.npmjs.org/)\"") \
+      || res=""     # a failed probe is reported below; it must not skip the cleanup (set -e)
     docker network disconnect -f "$(svc_net)" "$EGRESS_NAME" >/dev/null 2>&1 || true
     docker network rm "$(svc_net)" >/dev/null 2>&1 || true
     set -- $res ${1:+"$1"}
