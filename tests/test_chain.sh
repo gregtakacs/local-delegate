@@ -50,6 +50,8 @@ printf 'done-but-verify-failed\ndone\n' > $SCRIPT/a; printf 'done\n' > $SCRIPT/b
 python3 $here/lib/chain.py $T/plan.json >/dev/null 2>&1; rc=$?
 check "verify failure retried then accepted" '[ $rc = 0 ] && [ -d $DELEGATE_STATE/repo-a/rounds/2 ]'
 check "retry message carries the verify output" 'grep -q "boom: assertion failed" $DELEGATE_STATE/last-retry-a'
+check "…and says to end blocked, not keep trying, if the spec and the repo contradict" \
+  'grep -q "STATUS: blocked and state the contradiction" $DELEGATE_STATE/last-retry-a'
 
 # 3. blocked stops at once (no retry), exit 3, step b never starts
 rm -rf $DELEGATE_STATE; mkdir -p $DELEGATE_STATE
@@ -62,6 +64,8 @@ rm -rf $DELEGATE_STATE; mkdir -p $DELEGATE_STATE
 printf 'partial\npartial\npartial\npartial\n' > $SCRIPT/a; plan 2
 python3 $here/lib/chain.py $T/plan.json >/dev/null 2>&1; rc=$?
 check "gives up after 1+2 rounds" '[ $rc = 3 ] && [ -d $DELEGATE_STATE/repo-a/rounds/3 ] && [ ! -d $DELEGATE_STATE/repo-a/rounds/4 ]'
+check "a partial's retry message says the same about a contradiction" \
+  'grep -q "STATUS: blocked and state the contradiction" $DELEGATE_STATE/last-retry-a'
 
 # 5. resume: after the orchestrator fixes things, a re-run continues the failed step, keeps done ones
 printf 'partial\npartial\npartial\ndone\n' > $SCRIPT/a; printf 'done\n' > $SCRIPT/b

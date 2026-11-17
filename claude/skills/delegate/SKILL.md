@@ -81,6 +81,9 @@ and runs the chain itself.
 - Spec paths resolve: the chain looks in the repo first, then next to the plan file, so a plan
   for another repo uses bare file names.
 - Nothing in the plan contradicts the design's rulings.
+- Run `delegate chain PLAN --check`: it refuses a step whose scope misses a file its spec owns.
+  Also look for existing tests that pin behaviour a step changes, and put them in that step's
+  spec and scope.
 - **Every step that guards a boundary runs `"hard": true`:** validating untrusted input,
   building commands or paths from it, auth or tokens, sandboxing, permission checks, crypto.
   Set it yourself when the plan doesn't. A local design marks steps by algorithmic

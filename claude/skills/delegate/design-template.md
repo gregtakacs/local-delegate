@@ -44,8 +44,12 @@ what must not change. Write each one so it can go into the step specs word for w
    - A step gets `"hard": true` when it has real algorithmic content **or** guards a security
      boundary: validating untrusted input, building commands or paths from it, auth or tokens,
      sandboxing, permission checks, crypto. Every other step gets `"hard": false`.
+   - Every step gets `"scope"`: the path patterns it may change — exactly the files its own spec
+     lists under "Files owned", plus that step's test fixture directories. `delegate chain PLAN
+     --check` refuses a step whose scope misses one of them.
    - Every verify runs the real toolchain and the repo's full gate, plus the step's own tests.
-     Use `set -o pipefail` when it pipes.
+     Use `set -o pipefail` when it pipes. A chain verify carries no scope gate of its own: the
+     chain runs each step's `"scope"` first, against the branch that step itself starts from.
    - A plan for a different repo uses an absolute `"repo"` and bare spec file names.
 
 ## Rules
@@ -61,4 +65,4 @@ Any change outside `docs/specs/`.
 
 `python3 -c "import json,os;p=json.load(open('docs/specs/<slice>-chain.json'));assert p['steps'];[open(s['spec']) for s in p['steps']];assert os.path.getsize('docs/specs/<slice>-design.md')>3000;print('ok',len(p['steps']),'steps')" && git diff --name-only HEAD | grep -v '^docs/specs/' | (! grep .)`
 
-A scope gate written `… | grep -v X | (! grep .)` passes only without `set -o pipefail`: under pipefail the empty, in-scope case fails too (grep -v exits 1). In a verify that sets pipefail, write it `! git diff --name-only | grep -qvE 'X'`. In a chain, a step's scope gate diffs against the branch that step starts from (`delegate/<previous step>`; the chain's base only for step 1): diffed against the chain base, step 2 inherits step 1's files and can never pass.
+A chain step does not write its own scope gate: it gets a `"scope"` listing exactly the files its spec owns, and the chain runs that gate itself, first, diffed against the branch that step starts from (`delegate/<previous step>`; the plan's base only for step 1).

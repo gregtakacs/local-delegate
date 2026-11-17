@@ -11,6 +11,20 @@ the larger plan: "Slice W2 of docs/design.md §12: ...".>
 - `<path/to/existing/file>` — <the pattern to imitate: structure, naming, error style>
 - `<path/to/types-or-schema>` — <the types it must use, not redefine>
 
+## Files owned
+
+Every file this step creates or changes. A chain step's `"scope"` is checked against exactly
+these lines, so a file listed here and missing there stops the chain before its first round
+(`delegate chain PLAN.json --check` says so in a second). The paths come first, comma-separated
+(a bare file name takes the directory of the path before it); everything after ` — `, after a `;`
+or a full stop, and everything in parentheses, is prose and is never read as a path, so name files
+the step must leave alone there or under "Out of scope".
+
+- create: `<path>` — <what it is>
+- modify: `<path>` — <what changes there>
+- delete: `<path>`
+- modify: `<dir>/**` — <every file under a directory>
+
 ## Contract
 
 <Everything that must come out exactly as written. Be literal.>

@@ -419,6 +419,37 @@ background job whose exit you are told about, never in the foreground of an agen
 Claude Code agent (`claude/agents/`, installed by `install.sh`) uses this: it plans the
 slice once, runs the chain, and checks the result once.
 
+**Step scopes: `"scope": [...]` on a step.** Each entry is a repo-relative pattern for a path the
+step may change: `path/to/file.py` (that exact file), `path/to/dir/` (anything under that
+directory), or a pattern with `*`, `?`, `**` — where `*` and `?` never cross a `/` and `**` matches
+any number of path segments, including none (`a/**/b.py` matches `a/b.py` and `a/x/y/b.py`, and
+`dir/**` is everything under `dir/`). A plan-level `scope` is not supported: the rule belongs on the
+step that can break it. Entries are validated at load (exit 2): non-empty strings, no leading `/`,
+no `..` segment, and only `A-Za-z0-9 . _ / * ? + @ = , ~ -` — so no quote, space, `$`, backslash,
+bracket or newline can reach the shell the gate runs in. A plan with scoped steps also needs a plain
+`base` (`A-Za-z0-9 . _ / @ + -`), since the gate names it.
+
+The chain then does three things with it. **It lints the plan** against the specs: every file a step's
+spec claims in a `- new:`/`create:`/`modify:`/`delete:`/`remove:` bullet (its "Files owned", see the
+step-spec template) must be admitted by that step's scope, or the plan is refused with one line per
+miss and nothing has started. Only the path list at the head of such a bullet counts: text after
+` — `, `;` or a full stop and anything in parentheses is prose, a bare file name takes the directory of
+the path before it, and a `:LINE` suffix is dropped — which is the mistake a hand-written gate makes in the other direction,
+a guard that omits a file the spec told the worker to change. `delegate chain PLAN.json --check` runs
+exactly that and nothing else: one line per step (`scope: K entries, owned: M (all covered)` or
+`no scope`), exit 0 when the plan is sound, exit 2 when it is not. It starts no step, writes no chain
+state and fires no hook, so it is the command to run on a freshly written plan. **It runs the gate
+first**: a scoped step's verify starts with a short bash snippet that lists what the step changed
+(committed, staged, unstaged, deleted, untracked; `git diff --name-only --no-renames` from the merge
+base with the branch the step started from, plus untracked files) and exits 1 on anything outside the
+scope, before the real verify begins. A scope miss therefore costs a second instead of a full test run,
+and step 2 is compared against `delegate/<step 1>`, not against the chain's base, so it does not
+inherit step 1's files. (In place, the gate diffs the step's own HEAD.) **And it does not retry a plan
+bug**: when the gate names a file the step's own spec mentions, no round can fix that — the chain stops
+at once (exit 3) and says to fix the plan and re-check it. A gate failure on any other path gets one
+targeted retry, whose message lists the paths and tells the worker to revert them or stop as blocked.
+A step with no `scope` is untouched by all of this: the same verify, the same retries as before.
+
 ### Watching locally: `delegate top`
 
 `delegate top` is the same view with no server: it reads the state dirs and refreshes in place

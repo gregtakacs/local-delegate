@@ -2,6 +2,8 @@
 """delegate chain — run a planned slice step by step on the local worker, unattended.
 
   delegate chain PLAN.json            run (or resume) the chain
+  delegate chain PLAN.json --check    lint the plan (each step's "scope" vs the files its spec
+                                      owns) and exit: nothing starts, no state is written, no hook
   delegate chain PLAN.json --status   where the chain is, without running anything
   delegate chain PLAN.json --clean    remove the chain's tasks (worktrees, sidecars; branches kept)
   delegate chain PLAN.json --on-done CMD
@@ -52,7 +54,8 @@ PLAN.json (written by the orchestrator, normally next to the specs):
     "timeout": 5400,                            # optional, per round
     "here": false,                              # optional: in place, see below
     "steps": [
-      {"name": "w4-1-handles", "spec": "docs/specs/w4-1.md", "verify": "npm ci && npm test"},
+      {"name": "w4-1-handles", "spec": "docs/specs/w4-1.md", "verify": "npm ci && npm test",
+       "scope": ["src/handles/", "tests/fixtures/handles/"]},
       {"name": "w4-2-publish", "spec": "docs/specs/w4-2.md", "verify": "...", "hard": false}
     ]
   }
@@ -66,6 +69,17 @@ the orchestrator can make). Re-running the same command resumes from the failed 
 fix its spec or answer its question first, then run again. A step whose last round was
 interrupted (its harness died before writing the report) is finished first, with
 `delegate finish`, and the chain decides on the report that produces.
+
+A step may carry `"scope": [...]` — the path patterns it is allowed to change, exactly the files its
+spec owns (see the step-spec template's "Files owned"). `load_plan` validates every entry, and a run
+or `--check` lints each scoped step's scope against its spec: a plan whose scope misses a file the
+spec tells the worker to modify is refused there, before any state is written, with one line per
+miss. A scoped step's verify is handed to the worker with a scope gate in front of it, so a step that
+changed something outside its scope fails in a second, before the real verify starts, against the
+branch that step itself begins from. A gate failure naming a file the spec owns is a plan bug: the
+chain stops at once (exit 3) rather than spending retries on it, because no round can fix the plan.
+A failure on any other path gets one targeted retry, to revert it. A step with no `scope` behaves
+exactly as before.
 
 In place ("here": true, no "base"): every step runs `delegate run --here` in the plan's repo
 checkout itself, natively, in sequence, so the user watches the edits land live. The checkout
@@ -133,17 +147,30 @@ def verify_tail(tid, n, lines=40):
         return "(no verify log)"
 
 
-def retry_message(rep, tid, n):
+CONTRADICTION = ("If the spec contradicts itself, an existing test or the verify command, do not keep "
+                 "trying: end with STATUS: blocked and state the contradiction under QUESTIONS.")
+
+
+def retry_message(rep, tid, n, scope_paths=()):
     st = rep.get("status")
     if st == "done-but-verify-failed":
-        return (f"The harness ran this step's verify command after your round and it FAILED (exit "
-                f"{rep.get('verify_rc')}). Here is the tail of its output:\n\n```\n{verify_tail(tid, n)}\n```\n\n"
-                "Find the cause and fix it in the code (never by weakening a test or the check), run the "
-                "verify command yourself until it passes, then finish with the closing block.")
+        msg = (f"The harness ran this step's verify command after your round and it FAILED (exit "
+               f"{rep.get('verify_rc')}). Here is the tail of its output:\n\n```\n{verify_tail(tid, n)}\n```\n\n"
+               "Find the cause and fix it in the code (never by weakening a test or the check), run the "
+               "verify command yourself until it passes, then finish with the closing block.")
+        if scope_paths:
+            msg += ("\n\nThe scope gate refused this step before its verify ran: these changed paths are "
+                    "outside this step's scope:\n"
+                    + "".join(f"  {p}\n" for p in scope_paths)
+                    + "\nRevert them — restore each changed file from this step's base and delete the new "
+                      "ones — unless the spec requires them; if it does, end with STATUS: blocked and name "
+                      "the file under QUESTIONS.")
+        return msg + "\n\n" + CONTRADICTION
     if st in ("partial", "no-status"):
         return ("Your last round ended without completing the step (status: " + st + "). Finish every "
                 "acceptance criterion in the spec, run the verify command until it passes, and end with "
-                "the closing block. If something truly cannot be done, say exactly what under QUESTIONS.")
+                "the closing block. If something truly cannot be done, say exactly what under QUESTIONS. "
+                + CONTRADICTION)
     if st in ("worker-error", "truncated", "timeout"):
         return ("Your last round was cut off (" + st + "). Re-check the state of the worktree (git status, "
                 "the last files you touched), then continue the step from where it stands, keep tool "
@@ -151,7 +178,247 @@ def retry_message(rep, tid, n):
     return f"The step is not accepted yet (status: {st}). Complete it per the spec and verify."
 
 
-def load_plan(path):
+# ------------------------------------------------------------------------------ scope ----
+# A chain step's "only these files" rule is a plan field, not a grep at the end of a verify string:
+# the chain lints it against the spec at load, runs it as the FIRST thing inside the verify it hands
+# the task (so a scope miss costs a second, not a full test run), and refuses to retry a failure the
+# worker cannot fix. A plan whose steps carry no "scope" is untouched by all of this.
+
+SCOPE_CHARS = re.compile(r"[A-Za-z0-9._/*?+@=,~-]+\Z")          # nothing shell-shaped can reach a shell
+SCOPE_BASE = re.compile(r"[A-Za-z0-9._/@+-]+\Z")                # the branch the gate diffs against
+SCOPE_ESC = ".+()[]{}|^$\\"                                     # ERE metacharacters this regex may emit
+OWNED_HEAD = re.compile(r"^\s*[-*]\s+(new|create|modify|delete|remove)\s*:", re.I)
+BACKTICK = re.compile(r"`([^`\n]*)`")
+OWNED_CUT = re.compile(r"\s(?:—|--)\s|;\s|\.(?=\s|$)|(?<=`)\s*:\s")
+SCOPE_PROBE = "__delegate-scope-probe__"
+
+
+def _scope_seg(seg):
+    """One path segment (no '/'), its '*' and '?' as wildcards, as a POSIX ERE fragment."""
+    out = []
+    for ch in seg:
+        if ch == "*":
+            out.append("[^/]*")                                 # '*' never crosses '/'
+        elif ch == "?":
+            out.append("[^/]")
+        elif ch in SCOPE_ESC:
+            out.append("\\" + ch)                              # '.', '+' and friends stay literal
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _scope_entry(entry):
+    """One scope entry as a POSIX ERE fragment matching the whole path it admits: an exact path,
+    'dir/' for anything under a directory, and '*', '?', '**' as wildcards ('**' spans any number
+    of segments, including none)."""
+    parts = entry.split("/")
+    rx, skip_sep = "", False
+    for i, part in enumerate(parts):
+        last = i == len(parts) - 1
+        if part == "**":                                        # '**', 'dir/**', 'a/**/b'
+            if i == 0:
+                rx += ".*" if last else "(.*/)?"                # a leading ** eats its own separator
+                skip_sep = True
+            else:
+                rx += "(/.*)?"
+                skip_sep = False
+        elif last and part == "":                               # 'dir/': anything under dir
+            rx += "(/.*)?"
+            skip_sep = False
+        else:
+            if not skip_sep and i:
+                rx += "/"
+            rx += _scope_seg(part)
+            skip_sep = False
+    return rx
+
+
+def scope_regex(entries):
+    """The entries as one anchored POSIX ERE. The lint (re.fullmatch) and the gate (grep -E) use
+    this same string, so the two cannot disagree about what a scope admits."""
+    return "^(" + "|".join(_scope_entry(e) for e in entries) + ")$"
+
+
+def validate_scope(plan, s):
+    """A step's 'scope' must be a non-empty list of repo-relative path patterns whose characters
+    leave no way into a shell: no quote, space, '$', backslash, bracket or newline."""
+    ent = s.get("scope")
+    if not isinstance(ent, list) or not ent:
+        die(f"step {s['name']}: 'scope' must be a non-empty list of path patterns", 2)
+    for e in ent:
+        why = None
+        if not isinstance(e, str):
+            die(f"step {s['name']}: scope entry {e!r}: every entry must be a string", 2)
+        if not e:
+            why = "it is empty"
+        elif e.startswith("/"):
+            why = "it must be repo-relative (no leading '/')"
+        elif ".." in e.split("/"):
+            why = "it may not contain a '..' segment"
+        elif not SCOPE_CHARS.match(e):
+            why = "it uses a character outside A-Za-z0-9 . _ / * ? + @ = , ~ -"
+        if why:
+            die(f"step {s['name']}: scope entry {e!r}: {why}", 2)
+    s["_scope_re"] = scope_regex(ent)
+
+
+def owned_paths(spec_text):
+    """[(path, line_no)] — the files a spec claims to own: the backticked paths at the HEAD of a
+    '- new:|create:|modify:|delete:|remove:' bullet (its continuation lines included). The head is
+    the path list: it ends at the first ' — ', ' -- ', '; ' or sentence end, and text in
+    parentheses is prose, so the bullet "modify: a.py, b.py (calls x.y) — reads c.md" (each name
+    backticked) owns a.py and b.py only. A bullet under a 'Read first' heading is not an edit; a bare filename
+    takes the directory of the path before it; 'dir/**' names that directory; a ':LINE' suffix is
+    dropped."""
+    lines = spec_text.splitlines()
+    out, seen, heading_read = [], set(), False
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith("#"):
+            heading_read = line.lstrip("#").strip().lower() == "read first"
+            continue
+        if heading_read or not OWNED_HEAD.match(line):
+            continue
+        indent = len(line) - len(line.lstrip())
+        bullet = [line]
+        for nxt in lines[i + 1:]:
+            if not nxt.strip() or len(nxt) - len(nxt.lstrip()) <= indent:
+                break
+            bullet.append(nxt)
+        path_dir = None
+        text = OWNED_HEAD.sub("", " ".join(x.strip() for x in bullet), count=1)
+        while True:                                          # parentheses are prose: drop them
+            t2 = re.sub(r"\([^()]*\)", " ", text)
+            if t2 == text:
+                break
+            text = t2
+        text = OWNED_CUT.split(text, maxsplit=1)[0]         # the path list ends at the first prose
+        for tok in BACKTICK.findall(text):
+            tok = re.sub(r":\d+(-\d+)?$", "", tok.strip())   # `file.py:670` is that file
+            if not tok or " " in tok or ("/" not in tok and "." not in tok):
+                continue                                     # ROUTE_PARAMS, frozenset({"hidden"}), …
+            if tok.endswith("**"):
+                tok = tok[:-2].rstrip("/") + "/"              # a '**' entry means the directory
+            if not tok:
+                continue
+            if "/" in tok:
+                path_dir = tok if tok.endswith("/") else tok[:tok.rindex("/") + 1]
+            else:
+                tok = (path_dir or "") + tok                   # bare name: the last path's directory
+            if (tok, i + 1) not in seen:
+                seen.add((tok, i + 1))
+                out.append((tok, i + 1))
+    return out
+
+
+def owned_first(text):
+    """A spec's owned paths de-duplicated by path, keeping the line of the first mention."""
+    first = {}
+    for p, n in owned_paths(text):
+        first.setdefault(p, n)
+    return first
+
+
+def spec_text(s):
+    """The step's spec as it is on disk NOW (a spec edited between rounds is what decides)."""
+    try:
+        return Path(s["_spec"]).read_text(errors="replace")
+    except OSError:
+        return ""
+
+
+def lint_plan(plan):
+    """Every path a step's spec owns must be inside that step's scope; a step with no 'scope' is
+    not linted. Refuses (exit 2) before any state is written and before any step starts."""
+    misses = []
+    for s in plan["steps"]:
+        s["_owned"] = sorted(owned_first(spec_text(s)))
+        if not s.get("scope"):
+            continue
+        rx = re.compile(s["_scope_re"])
+        for p, line in owned_first(spec_text(s)).items():
+            probe = p + SCOPE_PROBE if p.endswith("/") else p          # a dir: covered by any path in it
+            if not rx.fullmatch(probe):
+                misses.append(f"step {s['name']}: the spec owns {p} ({s['spec']}:{line}) "
+                              f"but the step's scope does not admit it")
+    if misses:
+        die("\n".join(dict.fromkeys(misses)), 2)
+
+
+def check_plan(plan):
+    """`delegate chain PLAN --check`: the lint's verdict for every step, and nothing else."""
+    for i, s in enumerate(plan["steps"], 1):
+        if s.get("scope"):
+            print(f"  {i}. {s['name']}  scope: {len(s['scope'])} entries, "
+                  f"owned: {len(s.get('_owned') or [])} (all covered)")
+        else:
+            print(f"  {i}. {s['name']}  no scope")
+
+
+def scope_violations(tid, n):
+    """The paths the scope gate refused in this round's verify.log, in order ([] if it said nothing)."""
+    try:
+        lines = (STATE / tid / "rounds" / str(n) / "verify.log").read_text(errors="replace").splitlines()
+    except OSError:
+        return []
+    out = []
+    for line in lines:
+        rest = line[len("DELEGATE-SCOPE:"):].strip() if line.startswith("DELEGATE-SCOPE:") else ""
+        if rest and not (rest.startswith("ok ") or rest.startswith("outside") or
+                         rest.startswith("cannot find")) and rest not in out:
+            out.append(rest)
+    return out
+
+
+def names_path(text, path):
+    """True when the spec text names this exact path: not as part of a longer one (`a.py` is not
+    named by `data.py` or `x/a.py`)."""
+    return re.search(r"(?<![\w./-])" + re.escape(path) + r"(?![\w/-]|\.\w)", text) is not None
+
+
+def step_verify(s, base):
+    """The verify to hand a step: the scope gate in front of it when the step has a scope (so a
+    scope miss fails in a second, before the real verify starts), the plan's verify otherwise.
+    `base` is the branch this step starts from, or None in place."""
+    if not s.get("scope"):
+        return s["verify"]
+    return scope_gate(s["scope"], base) + "\n" + s["verify"]
+
+
+def scope_gate(entries, base):
+    """The bash snippet that runs FIRST inside the verify: every path this step changed (committed,
+    staged, unstaged, deleted, untracked) must match the step's scope, diffed from the branch the
+    step starts from. On a violation it prints the paths and exits 1, so the real verify never
+    starts. `base` is None for an in-place step, whose changes sit uncommitted on its own HEAD."""
+    from_ = ("__dsc_from=HEAD" if base is None else
+             f"__dsc_from=$(git merge-base HEAD '{base}' 2>/dev/null || true)\n"
+             f"if [ -z \"$__dsc_from\" ]; then "
+             f"printf 'DELEGATE-SCOPE: cannot find the base %s\\n' '{base}'; exit 1; fi")
+    return ("# delegate chain: this step's scope gate (runs before the verify; it takes a second)\n"
+            "__dsc_re='" + scope_regex(entries) + "'\n" + from_ + "\n"
+            "__dsc_files=$( { git -c core.quotePath=false diff --name-only --no-renames \"$__dsc_from\"; "
+            "git -c core.quotePath=false ls-files --others --exclude-standard; } | sort -u)\n"
+            "__dsc_n=0\n__dsc_bc=0\n__dsc_bad=''\n"
+            "while IFS= read -r __dsc_p; do\n"
+            "  [ -n \"$__dsc_p\" ] || continue\n"
+            "  __dsc_n=$((__dsc_n+1))\n"
+            "  if [[ $__dsc_p =~ $__dsc_re ]]; then continue; fi\n"
+            "  __dsc_bc=$((__dsc_bc+1))\n"
+            "  if [ \"$__dsc_bc\" = 1 ]; then __dsc_bad=\"$__dsc_p\"; "
+            "else __dsc_bad=\"$__dsc_bad\n$__dsc_p\"; fi\n"
+            "done <<< \"$__dsc_files\"\n"
+            "if [ \"$__dsc_bc\" != 0 ]; then\n"
+            "  printf \"DELEGATE-SCOPE: outside this step's scope:\\n\"\n"
+            "  while IFS= read -r __dsc_p; do\n"
+            "    [ -n \"$__dsc_p\" ] || continue\n"
+            "    printf 'DELEGATE-SCOPE:   %s\\n' \"$__dsc_p\"\n"
+            "  done <<< \"$__dsc_bad\"\n"
+            "  exit 1\n"
+            "fi\n"
+            "printf 'DELEGATE-SCOPE: ok (%s changed paths)\\n' \"$__dsc_n\"")
+
+
+def load_plan(path, lint=False):
     p = Path(path).resolve()
     try:
         plan = json.loads(p.read_text())
@@ -169,6 +436,8 @@ def load_plan(path):
         for k in ("base", "service", "copy"):
             if plan.get(k):
                 die(f"an in-place plan (\"here\": true) cannot use '{k}'")
+    if "scope" in plan:
+        die("plan-level 'scope' is not supported; put it on each step", 2)
     plan["_dir"] = p.parent
     plan["_path"] = str(p)
     plan["repo"] = str((p.parent / plan.get("repo", ".")).resolve())
@@ -188,6 +457,12 @@ def load_plan(path):
         if not sp.exists():
             die(f"step {s['name']}: spec not found: {s['spec']}")
         s["_spec"] = str(sp)
+        if s.get("scope") is not None:
+            validate_scope(plan, s)
+    if any(s.get("scope") for s in plan["steps"]) and plan.get("base") and not SCOPE_BASE.match(plan["base"]):
+        die(f"plan base {plan['base']!r}: a scoped step diffs against it; use A-Za-z0-9 . _ / @ + -", 2)
+    if lint:
+        lint_plan(plan)
     return plan
 
 
@@ -321,10 +596,11 @@ def run(plan):
                 die(f"{label}: finishing round {n} produced no report (exit {r.returncode}): "
                     f"`delegate finish {tid}` (then `delegate report {tid}`)", 2)
         hard = ["--hard"] if s.get("hard") else []
+        verify = step_verify(s, None if here else base)
         if n is None:
             note(f"{label}: starting " + ("in place" if here else f"from {base}"))
             r = subprocess.run([DELEGATE, "run", s["_spec"], "--repo", plan["repo"], "--name", s["name"],
-                                *([] if here else ["--base", base]), "--verify", s["verify"], *common,
+                                *([] if here else ["--base", base]), "--verify", verify, *common,
                                 *step_access(plan, s), *hard],
                                stdout=subprocess.DEVNULL)
             if r.returncode not in (0,):
@@ -348,6 +624,17 @@ def run(plan):
                 print_status(plan)
                 die(f"{label} is BLOCKED and needs a decision: `delegate report {tid}` (QUESTIONS). "
                     f"Answer it with `delegate continue {tid} -m \"...\"`, then re-run the chain.", 3)
+            scope_paths = scope_violations(tid, n) if stt == "done-but-verify-failed" and s.get("scope") else []
+            if scope_paths:
+                # A path the spec itself names: no round can fix that, only an edited plan can.
+                named = [p for p in scope_paths
+                         if p in owned_first(spec_text(s)) or names_path(spec_text(s), p)]
+                if named:
+                    print_status(plan)
+                    die(" ".join(f"{s['name']}: the scope gate refused {p}, which the spec names: the "
+                                 f"plan's scope is wrong. Fix the step's \"scope\" in {plan['_path']} "
+                                 f"(delegate chain {plan['_path']} --check), then re-run the chain."
+                                 for p in named), 3)
             if tries >= retries:
                 print_status(plan)
                 die(f"{label} still '{stt}' after {tries} retr{'y' if tries == 1 else 'ies'}: "
@@ -355,9 +642,10 @@ def run(plan):
             tries += 1
             note(f"{label}: {stt} — retry {tries}/{retries} in the same session")
             msg_file = STATE / tid / "chain-retry.md"
-            msg_file.write_text(retry_message(rep or {}, tid, n))
+            msg_file.write_text(retry_message(rep or {}, tid, n, scope_paths))
             # the plan's verify, not the one the task was started with: an edited plan takes effect
-            subprocess.run([DELEGATE, "continue", tid, str(msg_file), "--verify", s["verify"]],
+            subprocess.run([DELEGATE, "continue", tid, str(msg_file),
+                            "--verify", step_verify(s, None if here else base)],
                            stdout=subprocess.DEVNULL)
         base = f"delegate/{s['name']}"
 
@@ -594,8 +882,12 @@ def main():
     if not args or args[0] in ("-h", "--help"):
         print(__doc__)
         return
-    plan = load_plan(args[0])
-    if "--status" in args:
+    # only a run and --check lint the plan: --status, --clean and --wait read and report as before
+    plan = load_plan(args[0], lint=("--check" in args or
+                                    not any(f in args for f in ("--status", "--clean", "--wait"))))
+    if "--check" in args:
+        check_plan(plan)
+    elif "--status" in args:
         print_status(plan)
     elif "--clean" in args:
         clean(plan)
