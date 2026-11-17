@@ -130,8 +130,13 @@ pick_base_url() {
 # hooks/fsmonitor forced off. WT_GITDIR comes from meta.env, recorded before the worker ran.
 wgit() {
   if untrusted; then sbx wt-git "$WT_GITDIR" "$WORKTREE" "$GIT_COMMON" -- "$@"; return; fi
-  git --git-dir="$WT_GITDIR" --work-tree="$WORKTREE" \
-      -c core.hooksPath=/dev/null -c core.fsmonitor=false -c diff.external= "$@"
+  # GIT_COMMON_DIR pins the repository's own administration: the worktree's git dir is the
+  # worker's to write, and its `commondir` file would otherwise choose whose config, hooks and
+  # filters this host-side git loads.
+  # No `-c diff.external=`: git 2.53 runs an empty value as a command and every diff fails;
+  # delegate's own diffs pass --no-ext-diff instead.
+  GIT_COMMON_DIR="$GIT_COMMON" git --git-dir="$WT_GITDIR" --work-tree="$WORKTREE" \
+      -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"
 }
 # Host-side git on the task's main checkout ($REPO): plain host git, or the sandbox's.
 hgit() {
@@ -245,6 +250,30 @@ check_gitlink() {
     warn "SECURITY: $WORKTREE/.git was modified by the worker (was: ${have:0:120}); restored"
     rm -rf "$WORKTREE/.git"; printf '%s\n' "$want" > "$WORKTREE/.git"
     echo "SECURITY: worktree .git pointer was tampered with and restored" >> "${1:-/dev/null}"
+  fi
+  # The worktree's git dir is mounted into the worker. Two files there would steer host-side git:
+  # `commondir` (whose repository wgit treats as the common one; wgit pins it anyway) and
+  # `config.worktree` (per-worktree config git reads when the repo enables worktreeConfig).
+  # Neither is delegate's to change: a commondir that does not lead back to $GIT_COMMON is
+  # restored, and a config.worktree the worker wrote is moved aside, both said out loud.
+  [ -n "$WT_GITDIR" ] && [ -d "$WT_GITDIR" ] && [ ! -L "$WT_GITDIR" ] || return 0
+  local cd_file=$WT_GITDIR/commondir cd_now="" cd_real=""
+  if [ -L "$cd_file" ] || [ ! -f "$cd_file" ]; then cd_now="(missing or not a file)"
+  else
+    cd_now=$(head -c 4096 "$cd_file" 2>/dev/null | head -1)
+    case "$cd_now" in /*) cd_real=$(realpath -e -- "$cd_now" 2>/dev/null) ;;
+                      *) cd_real=$(cd "$WT_GITDIR" 2>/dev/null && realpath -e -- "$cd_now" 2>/dev/null) ;; esac
+  fi
+  if [ "$cd_real" != "$(realpath -e -- "$GIT_COMMON" 2>/dev/null)" ]; then
+    warn "SECURITY: $cd_file was modified by the worker (was: ${cd_now:0:120}); restored"
+    rm -rf "$cd_file"; printf '../..\n' > "$cd_file"
+    echo "SECURITY: worktree commondir was tampered with and restored" >> "${1:-/dev/null}"
+  fi
+  if [ -e "$WT_GITDIR/config.worktree" ] || [ -L "$WT_GITDIR/config.worktree" ]; then
+    local aside; aside="$WT_GITDIR/config.worktree.delegate-quarantined.$(date +%s)"
+    mv -f -- "$WT_GITDIR/config.worktree" "$aside"
+    warn "SECURITY: the worker wrote $WT_GITDIR/config.worktree; moved aside to $aside"
+    echo "SECURITY: worktree config.worktree written by the worker, moved aside" >> "${1:-/dev/null}"
   fi
 }
 
@@ -957,7 +986,7 @@ finalize_round() { # N RD VERIFY RC START END
   ( cd "$WORKTREE"
     wgit add -A
     for c in $COPIED; do wgit reset -q -- "$c" 2>/dev/null || true; done
-    if ! wgit diff --cached --quiet; then
+    if ! wgit diff --no-ext-diff --cached --quiet; then
       wgit commit -q --no-verify -m "delegate($SLUG): round $n$([ "$was_aborted" = 1 ] && echo ' (aborted)')" \
         -m "${status_line:-STATUS: unknown}"
     fi )
@@ -974,7 +1003,7 @@ finalize_round() { # N RD VERIFY RC START END
     vrc=${vrc:-0}
   fi
 
-  wgit diff --stat=120 "$BASE_SHA" "$commit" > "$rd/diffstat" || true
+  wgit diff --no-ext-diff --stat=120 "$BASE_SHA" "$commit" > "$rd/diffstat" || true
   python3 "$DELEGATE_HOME/lib/report.py" report \
     --id "$ID" --round "$n" --events "$rd/events.jsonl" --stderr "$rd/stderr.log" \
     --exit "$rc" --duration "$((end - start))" --model "$MODEL" \
@@ -1548,9 +1577,9 @@ cmd_diff() {
     if [ "$round" -gt 1 ]; then from=$(cat "$TASK_DIR/rounds/$((round - 1))/commit"); fi
   fi
   if [ "$full" = 1 ] || [ ${#paths[@]} -gt 0 ]; then
-    wgit --no-pager diff "$from" "$to" -- "${paths[@]}"
+    wgit --no-pager diff --no-ext-diff "$from" "$to" -- "${paths[@]}"
   else
-    wgit --no-pager diff --stat=120 "$from" "$to"
+    wgit --no-pager diff --no-ext-diff --stat=120 "$from" "$to"
   fi
 }
 
