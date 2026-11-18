@@ -473,6 +473,15 @@ background job whose exit you are told about, never in the foreground of an agen
 Claude Code agent (`claude/agents/`, installed by `install.sh`) uses this: it plans the
 slice once, runs the chain, and checks the result once.
 
+**A failed verify shows why.** A verify's stages usually log to `/tmp` (`suite > /tmp/x.log &&
+grep -q ok /tmp/x.log`), and `/tmp` dies with the worker's container. In the docker runner the
+verify now runs in a subshell, and afterwards the small `*.log` files it wrote under `/tmp`
+(under 2 MB, at most 50, never a build tree) are copied to the round's evidence,
+`evidence/verify-r<n>/` (`evidence/verify-manual/` for `delegate verify`). When the verify
+fails, its log ends with the list of those files and each one's tail (up to six, ten lines
+each), so the report and a chain's retry both show the stage that failed, not just an exit
+code. The native runner runs a verify as written: its `/tmp` is the host's.
+
 **The repo's gate: `"gate": "CMD"` on the plan.** The one command the repo's own docs name as
 the worker's full gate (`make check-sandbox`, `npm test`, …). Every step's verify must contain it
 character for character, or the plan is refused at load (`--check` and run alike), so a step can

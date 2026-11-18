@@ -727,6 +727,42 @@ read_mount_args() {
 # ---------------------------------------------------------------- runners ----------
 # run_worker NAME_TAG CMD... — run CMD in the worker environment, cwd = the worktree.
 # stdout/stderr are the caller's.
+# --- a verify's own stage logs ----------------------------------------------------------------
+# A verify usually runs stages that log to /tmp (`suite > /tmp/x.log && grep -q ok /tmp/x.log`),
+# and /tmp died with the container, so a failed round reported an exit code and nothing else:
+# the worker and the orchestrator re-derived which stage failed, round after round (gal2-2: five
+# rounds, two of them on causes a log line would have named). So in the docker runner the verify
+# runs in a subshell, and afterwards the small *.log files it wrote under /tmp are copied to the
+# round's evidence (KEEP), which outlives the container; a failed verify's log then names them and
+# shows the newest one's tail (verify_keep_note), which the report and a chain retry both read.
+# Not the native runner: there /tmp is the host's, shared with everything else.
+VERIFY_KEEP_MAX=50          # files kept per verify
+VERIFY_KEEP_SIZE=2048k      # find -size bound: a stage log, not a build tree
+verify_wrapped() { # VERIFY KEEP — the command the worker container runs for this verify
+  local v=$1 keep=$2
+  [ "$DELEGATE_RUNNER" = docker ] || { printf '%s' "$v"; return 0; }
+  printf '__dvk=%q\n__dvm=$(mktemp /tmp/.delegate-verify.XXXXXX)\n(\n%s\n)\n__dvrc=$?\n' "$keep" "$v"
+  printf 'mkdir -p "$__dvk" 2>/dev/null && find /tmp -xdev -maxdepth 3 -type f -name "*.log" -newer "$__dvm" -size -%s 2>/dev/null | head -n %s | while IFS= read -r __f; do cp -p "$__f" "$__dvk/$(printf %%s "${__f#/tmp/}" | tr / _)" 2>/dev/null; done\n' "$VERIFY_KEEP_SIZE" "$VERIFY_KEEP_MAX"
+  printf 'rm -f "$__dvm"\nexit $__dvrc\n'
+}
+verify_keep_note() { # LOG KEEP RC — after a failed verify: what it logged, and each log's tail
+  # Each log's tail, not "the newest one's": stages that run milliseconds apart share an mtime at
+  # the filesystem's clock tick, so recency cannot single out the failing stage. Up to six logs,
+  # most recent first, ten lines each: the failing stage is among them, a passing one costs little.
+  local log=$1 keep=$2 rc=$3 f
+  [ "$rc" != 0 ] && [ -d "$keep" ] || return 0
+  [ -n "$(ls -A "$keep" 2>/dev/null)" ] || return 0
+  {
+    echo
+    echo "delegate: the verify exited $rc; the stage logs it wrote are kept in $keep:"
+    ls -t "$keep" | sed 's/^/  /'
+    ls -t "$keep" | head -n 6 | while IFS= read -r f; do
+      echo "delegate: $f (tail):"
+      tail -n 10 "$keep/$f" | sed 's/^/  | /'
+    done
+  } >> "$log"
+}
+
 run_worker() {
   local tag=$1; shift
   ensure_grants
@@ -1058,9 +1094,12 @@ finalize_round() { # N RD VERIFY RC START END
     phase "$rd" verifying
     note "round $n: running verify: $(verify_shown "$verify")"
     printf '$ %s\n' "$(verify_shown "$verify")" > "$rd/verify.log"
-    run_limited "$DELEGATE_VERIFY_TIMEOUT" "v$n" run_worker "v$n" bash -lc "$verify" >> "$rd/verify.log" 2>&1 || vrc=$?
+    local keep="$TASK_DIR/evidence/verify-r$n"
+    rm -rf "$keep"
+    run_limited "$DELEGATE_VERIFY_TIMEOUT" "v$n" run_worker "v$n" bash -lc "$(verify_wrapped "$verify" "$keep")" >> "$rd/verify.log" 2>&1 || vrc=$?
     reap_leftovers "verify $n" "$rd/verify.log"
     vrc=${vrc:-0}
+    verify_keep_note "$rd/verify.log" "$keep" "$vrc"
   fi
 
   wgit diff --no-ext-diff --stat=120 "$BASE_SHA" "$commit" > "$rd/diffstat" || true
@@ -1563,7 +1602,10 @@ cmd_verify() {
   BASE_URL=${LVL_URLS%% *}; MODEL=${MODEL:-$DELEGATE_MODEL}
   lock_task; ensure_service
   local rc=0
-  run_limited "$DELEGATE_VERIFY_TIMEOUT" "verify" run_worker verify bash -lc "$cmd" || rc=$?
+  local keep="$TASK_DIR/evidence/verify-manual" vl; vl=$(mktemp)
+  rm -rf "$keep"
+  run_limited "$DELEGATE_VERIFY_TIMEOUT" "verify" run_worker verify bash -lc "$(verify_wrapped "$cmd" "$keep")" || rc=$?
+  verify_keep_note "$vl" "$keep" "$rc"; cat "$vl"; rm -f "$vl"
   echo "delegate: verify exit $rc"
   return "$rc"
 }
