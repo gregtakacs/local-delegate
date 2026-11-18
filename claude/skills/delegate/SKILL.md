@@ -74,6 +74,20 @@ not. Skip a phase only for a reason you can name.
 security-sensitive: auth, tokens, sandboxing, untrusted input or code, crypto, permission
 models. Also use it when the local design fails your review twice. The lead writes the specs
 and runs the chain itself.
+- **"Untrusted input" includes files that agents, workers or other programs write**, even when the
+  slice only reads them: transcripts, task state, ledgers, plan files, git metadata, another
+  tool's database. A "read-only plumbing" slice that parses such files is security-sensitive.
+  Measured (codehub WV/WV2, 2026-11-17): a local design of exactly that kind passed 3300 tests
+  and still shipped eight hostile-input bugs that an independent review found in minutes (a FIFO
+  `.git` hanging every request, `1e999` turning a listing into a 500, per-call module globals
+  under a threading server, unbounded amplification from one transcript line).
+- **Whoever designs it, the specs name the hostile cases as acceptance items**, each with its
+  expected outcome; "treat as untrusted" alone produces no tests. For a file reader at least:
+  a non-regular file (FIFO, device, symlink) where a file is expected, non-finite and huge
+  numbers, oversize files and lines, control and bidi characters in text that reaches a
+  response, paths that leave the allowed roots, a trailing newline past a `^...$` check
+  (Python's `$`; use `\Z` or `fullmatch`), concurrent requests, and one bad record among good
+  ones (skip it, keep the listing).
 
 **Phase 2: you review the plan (minutes, not hours).**
 - Every step is under ~1500 lines and ~90 min.

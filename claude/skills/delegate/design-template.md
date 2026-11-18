@@ -31,6 +31,12 @@ workers will run step by step. Write no product code.
 <Anything not open to the worker's judgement: security rules, limits, names already decided,
 what must not change. Write each one so it can go into the step specs word for word.>
 
+<If the slice parses anything an agent, worker or other program wrote (transcripts, state,
+ledgers, plan files, git metadata, another tool's database), it is security-sensitive: a
+Claude lead designs it (SKILL.md, Phase 1). Either way, list its hostile cases here as required
+acceptance items: non-regular files, non-finite and huge numbers, oversize input, control and
+bidi characters, root escapes, `$` vs `\Z`, concurrency, one bad record among good ones.>
+
 ## What to write
 
 1. `docs/specs/<slice>-design.md`: what the slice adds, mapped to the design's sentences
