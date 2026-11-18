@@ -20,6 +20,7 @@ Set these in `~/.config/delegate/config.env` (see [config.example.env](../config
 |---|---|
 | `DELEGATE_BASE_URLS` | One or more `/v1` URLs, tried in order: vLLM, SGLang, llama.cpp `llama-server`, Ollama (`http://host:11434/v1`), LM Studio, LiteLLM, OpenRouter, OpenAI, or any gateway that speaks the chat-completions API |
 | `DELEGATE_API_KEY_FILE` | A file holding the bearer key. Put a dummy value in it if the server needs none |
+| `DELEGATE_BASE_URLS_HARD`, `DELEGATE_API_KEY_FILE_HARD` | Optional: the `--hard` level's own URLs and key file. Each defaults to the one above |
 | `DELEGATE_MODEL`, `DELEGATE_MODEL_HARD` | Model names as the server knows them (`--hard` uses the second) |
 | `DELEGATE_CONTEXT` | The model's context window, in tokens |
 | `DELEGATE_STREAM_IDLE_S` | Seconds a streamed reply may go silent before the worker retries it (default 180; 0 = opencode's own) |

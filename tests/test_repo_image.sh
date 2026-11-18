@@ -99,7 +99,7 @@ mk_task() { # ID KEY=VALUE... — written as bin/delegate writes it, each value 
   for kv in "${@:2}"; do printf '%s=%q\n' "${kv%%=*}" "${kv#*=}" >> "$d/meta.env"; done
 }
 printf '%s\n' "$lt" > "$T/load_task.sh"
-lrun() { run "task_dir() { echo \"$T/state/\$1\"; }; . \"$T/load_task.sh\"
+lrun() { run "task_dir() { echo \"$T/state/\$1\"; }; set_level() { :; }; . \"$T/load_task.sh\"
 load_task $1; echo \$DELEGATE_IMAGE"; }
 mk_task t1 "REPO=$plain" "IMAGE=delegate-worker-gorb-os-2:local" "IMAGE_REPO=$gorb"
 check "a task runs in the image recorded at run, whatever the repo holds now" \

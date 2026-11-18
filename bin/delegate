@@ -67,6 +67,10 @@ install_line() {
 : "${DELEGATE_API_KEY_FILE:=${XDG_CONFIG_HOME:-$HOME/.config}/delegate/api-key}"
 : "${DELEGATE_MODEL:=}"
 : "${DELEGATE_MODEL_HARD:=$DELEGATE_MODEL}"
+# The hard level (--hard, a chain step's "hard": true) may use its own endpoints and key; each
+# defaults to the normal level's, so a config without them behaves exactly as before.
+: "${DELEGATE_BASE_URLS_HARD:=$DELEGATE_BASE_URLS}"
+: "${DELEGATE_API_KEY_FILE_HARD:=$DELEGATE_API_KEY_FILE}"
 : "${DELEGATE_CONTEXT:=131072}"
 : "${DELEGATE_OUTPUT:=32768}"
 : "${DELEGATE_VISION:=1}"
@@ -102,7 +106,7 @@ export DELEGATE_BASE_IMAGE=${DELEGATE_BASE_IMAGE:-$DELEGATE_IMAGE}
                                      # <endpoint host>/agents/progress (stackd's dashboard). Off by default:
                                      # only turn it on for an endpoint you run yourself.
 : "${DELEGATE_PROGRESS_URL:=}"       # default: the endpoint in use, minus /v1
-: "${DELEGATE_PROGRESS_KEY_FILE:=}"  # default: DELEGATE_API_KEY_FILE
+: "${DELEGATE_PROGRESS_KEY_FILE:=}"  # default: the task level's key file (DELEGATE_API_KEY_FILE or _HARD)
 : "${DELEGATE_UNTRUSTED_REPO:=0}"     # 1: someone else can write the repository (its .git, working tree and task
                                      # worktrees): delegate's host-side git and path handling for it run in a
                                      # throwaway container (docs/reference.md "Untrusted repositories"). 0: as always.
@@ -110,6 +114,7 @@ export DELEGATE_BASE_IMAGE=${DELEGATE_BASE_IMAGE:-$DELEGATE_IMAGE}
 : "${DELEGATE_SANDBOX_TIMEOUT:=600}" # seconds one sandboxed git step may take
 
 DELEGATE_API_KEY_FILE=$(expand "$DELEGATE_API_KEY_FILE")
+DELEGATE_API_KEY_FILE_HARD=$(expand "$DELEGATE_API_KEY_FILE_HARD")
 DELEGATE_WORKTREES=$(expand "$DELEGATE_WORKTREES")
 DELEGATE_STATE=$(expand "$DELEGATE_STATE")
 DELEGATE_LEDGER=$(expand "$DELEGATE_LEDGER")
@@ -129,14 +134,29 @@ need_config() {
   esac
 }
 
+# The level a task runs at picks its endpoints and key: LVL_URLS and KEY_FILE are what this
+# process uses (pick_base_url, the key the worker gets, the progress board). A task's level is
+# its EFFORT (meta.env), so continue, exec, verify and every later round keep the run's level.
+LVL_URLS=$DELEGATE_BASE_URLS; KEY_FILE=$DELEGATE_API_KEY_FILE
+set_level() { # normal | hard
+  if [ "${1:-normal}" = hard ]; then LVL_URLS=$DELEGATE_BASE_URLS_HARD; KEY_FILE=$DELEGATE_API_KEY_FILE_HARD
+  else LVL_URLS=$DELEGATE_BASE_URLS; KEY_FILE=$DELEGATE_API_KEY_FILE; fi
+}
+need_level() { # normal | hard — set_level, then refuse a level whose endpoint or key is unusable
+  set_level "$1"
+  [ "${1:-normal}" = hard ] || return 0
+  [ -n "$DELEGATE_BASE_URLS_HARD" ] || die "DELEGATE_BASE_URLS_HARD is empty (edit $CONFIG_FILE)"
+  [ -r "$DELEGATE_API_KEY_FILE_HARD" ] || die "API key file not readable: $DELEGATE_API_KEY_FILE_HARD (DELEGATE_API_KEY_FILE_HARD, the --hard level's key)"
+}
+
 # First base URL whose /models answers 200 with our key. Lets one config serve a laptop
 # that is sometimes on the LAN (fast, direct) and sometimes away (public route).
-pick_base_url() {
-  local u code
-  for u in $DELEGATE_BASE_URLS; do
+pick_base_url() { # [URLS KEY_FILE] — default: the current level's
+  local u code urls=${1-$LVL_URLS} key=${2-$KEY_FILE}
+  for u in $urls; do
     u=${u%/}
     code=$(curl -s -o /dev/null -m "${DELEGATE_PROBE_TIMEOUT:-4}" -w '%{http_code}' \
-             -H "Authorization: Bearer $(cat "$DELEGATE_API_KEY_FILE")" "$u/models" || true)
+             -H "Authorization: Bearer $(cat "$key")" "$u/models" || true)
     if [ "$code" = 200 ]; then printf '%s' "$u"; return 0; fi
     warn "endpoint $u -> ${code:-no answer}"
   done
@@ -362,6 +382,7 @@ load_task() {
   if [ -n "$DELEGATE_IMAGE_CALLER" ]; then DELEGATE_IMAGE=$DELEGATE_IMAGE_CALLER; IMAGE_REPO=""
   elif [ -n "${IMAGE:-}" ]; then DELEGATE_IMAGE=$IMAGE; IMAGE_REPO=${IMAGE_REPO:-}
   else choose_image "${REPO:-}"; fi
+  set_level "${EFFORT:-normal}"
   return 0
 }
 
@@ -533,7 +554,8 @@ svc_net()  { printf 'delegate-%s' "$ID"; }
 svc_name() { printf 'delegate-%s-pg' "$ID"; }
 EGRESS_NAME=delegate-egress
 
-url_hosts() { local u; for u in $DELEGATE_BASE_URLS; do printf '%s\n' "$u" | sed -E 's#^[a-z]+://([^/:]+).*#\1#'; done | sort -u; }
+# every level's hosts: the egress proxy is shared, and a hard task must reach its own endpoint
+url_hosts() { local u; for u in $DELEGATE_BASE_URLS $DELEGATE_BASE_URLS_HARD; do printf '%s\n' "$u" | sed -E 's#^[a-z]+://([^/:]+).*#\1#'; done | sort -u; }
 
 # --add-host flags for names only the host's resolver knows (LAN DNS, /etc/hosts, WSL): only
 # names that resolve to a PRIVATE address are pinned. Public names (e.g. behind Cloudflare)
@@ -783,7 +805,7 @@ run_worker_docker() {
     --user "$(id -u):$(id -g)" \
     "${wm[@]}" \
     -v "$home:/home/worker" -v delegate-cache:/home/worker/.cache -v delegate-npm:/home/worker/.npm \
-    -v "$evidence:$evidence" -v "$DELEGATE_API_KEY_FILE:/run/secrets/delegate_key:ro" \
+    -v "$evidence:$evidence" -v "$KEY_FILE:/run/secrets/delegate_key:ro" \
     -v "$DELEGATE_RULES_DIR:/opt/delegate/opencode:ro" \
     -v "$DELEGATE_HOME/lib/render-opencode-config.py:/opt/delegate/lib/render-opencode-config.py:ro" \
     -e DELEGATE_BASE_URL="$BASE_URL" -e DELEGATE_API_KEY_FILE=/run/secrets/delegate_key \
@@ -802,7 +824,7 @@ run_worker_native() {
   cp -r "$DELEGATE_RULES_DIR/rules" "$DELEGATE_RULES_DIR/plugins" "$cfg/"
   cp "$DELEGATE_RULES_DIR/delegate-rules.md" "$cfg/"
   DELEGATE_BASE_URL="$BASE_URL" DELEGATE_MODEL="$MODEL" DELEGATE_EVIDENCE_DIR="$evidence" \
-  DELEGATE_API_KEY_FILE="$DELEGATE_API_KEY_FILE" DELEGATE_MODEL_HARD="$DELEGATE_MODEL_HARD" \
+  DELEGATE_API_KEY_FILE="$KEY_FILE" DELEGATE_MODEL_HARD="$DELEGATE_MODEL_HARD" \
   DELEGATE_CONTEXT="$DELEGATE_CONTEXT" DELEGATE_OUTPUT="$DELEGATE_OUTPUT" \
   DELEGATE_VISION="$DELEGATE_VISION" DELEGATE_REASONING="$DELEGATE_REASONING" \
   DELEGATE_STREAM_IDLE_S="$DELEGATE_STREAM_IDLE_S" \
@@ -898,7 +920,7 @@ progress_start() { # N RD START
   url=${url%/v1}
   rm -f "$2/.progress-stop"
   python3 "$DELEGATE_HOME/lib/progress.py" --events "$2/events.jsonl" --stderr "$2/stderr.log" \
-    --url "$url" --key-file "${DELEGATE_PROGRESS_KEY_FILE:-$DELEGATE_API_KEY_FILE}" --task "$ID" --round "$1" \
+    --url "$url" --key-file "${DELEGATE_PROGRESS_KEY_FILE:-$KEY_FILE}" --task "$ID" --round "$1" \
     --phase-file "$2/.phase" --stop-file "$2/.progress-stop" --ppid $$ --started "$3" \
     --repo "$REPO" --branch "$BRANCH" --model "$MODEL" --host "$(hostname -s 2>/dev/null || hostname)" \
     --worktree "$WORKTREE" --prompt-file "$2/prompt.md" --report-file "$2/report.md" \
@@ -1231,7 +1253,8 @@ cmd_run() {
   fi
   fi
 
-  BASE_URL=$(pick_base_url) || die "no endpoint in DELEGATE_BASE_URLS answered /models with this key"
+  need_level "$effort"
+  BASE_URL=$(pick_base_url) || die "no endpoint in $( [ "$effort" = hard ] && echo DELEGATE_BASE_URLS_HARD || echo DELEGATE_BASE_URLS) answered /models with this key"
   MODEL=${model:-$DELEGATE_MODEL}
 
   # The worker needs the file in its worktree; copy it if git doesn't carry it. In place (--here)
@@ -1392,6 +1415,7 @@ cmd_continue() {
   # `--hard` on continue upgrades the recorded effort; without it the record stands (t-2 §Effort).
   if [ "$effort" = hard ] && [ "${EFFORT:-normal}" != hard ]; then meta_set EFFORT hard; EFFORT=hard; fi
   local n; n=$(( $(last_round) + 1 ))
+  need_level "${EFFORT:-normal}"
   BASE_URL=$(pick_base_url) || die "no endpoint answered"
   lock_task
   [ -n "$raw_flag" ] && RAW=1
@@ -1484,7 +1508,7 @@ cmd_finish() {
     rmdir "$TASK_DIR/lock" 2>/dev/null || true
     note "removed the stale lock of $id"
   fi
-  BASE_URL=${DELEGATE_BASE_URLS%% *}; MODEL=${MODEL:-$DELEGATE_MODEL}
+  BASE_URL=${LVL_URLS%% *}; MODEL=${MODEL:-$DELEGATE_MODEL}
   lock_task
   reap_leftovers "round $n (finish)" "$rd/stderr.log"
   echo "harness: the round's harness died before reporting; finished by 'delegate finish'" >> "$rd/stderr.log"
@@ -1536,7 +1560,7 @@ cmd_verify() {
   load_task "$id"
   if untrusted; then untrusted_task_check; fi
   local cmd=${1:-$VERIFY}; [ -n "$cmd" ] || die "no verify command recorded for $id; pass one"
-  BASE_URL=${DELEGATE_BASE_URLS%% *}; MODEL=${MODEL:-$DELEGATE_MODEL}
+  BASE_URL=${LVL_URLS%% *}; MODEL=${MODEL:-$DELEGATE_MODEL}
   lock_task; ensure_service
   local rc=0
   run_limited "$DELEGATE_VERIFY_TIMEOUT" "verify" run_worker verify bash -lc "$cmd" || rc=$?
@@ -1589,9 +1613,9 @@ PY
   # tell the live board too (best-effort, same url/key the round's reporter used): recolour the
   # card to `accepted` with the note. If DELEGATE_PROGRESS=0 there is no board to tell.
   if [ "$DELEGATE_PROGRESS" = 1 ]; then
-    local purl=${DELEGATE_PROGRESS_URL:-${DELEGATE_BASE_URLS%% *}}; purl=${purl%/}; purl=${purl%/v1}
+    local purl=${DELEGATE_PROGRESS_URL:-${LVL_URLS%% *}}; purl=${purl%/}; purl=${purl%/v1}
     python3 "$DELEGATE_HOME/lib/progress.py" accepted --url "$purl" \
-      --key-file "${DELEGATE_PROGRESS_KEY_FILE:-$DELEGATE_API_KEY_FILE}" \
+      --key-file "${DELEGATE_PROGRESS_KEY_FILE:-$KEY_FILE}" \
       --task "$id" --round "$n" --status-before "$st" --note "$note" 2>/dev/null || true
   fi
   note "accepted $id round $n (was: $st) — listings show accepted while that round stands"
@@ -1603,7 +1627,7 @@ cmd_exec() {
   [ $# -gt 0 ] || die "usage: delegate exec ID -- CMD..."
   load_task "$id"
   if untrusted; then untrusted_task_check; fi
-  BASE_URL=${DELEGATE_BASE_URLS%% *}; MODEL=${MODEL:-$DELEGATE_MODEL}
+  BASE_URL=${LVL_URLS%% *}; MODEL=${MODEL:-$DELEGATE_MODEL}
   ensure_service
   local tag="x$$"
   run_worker "$tag" bash -lc "$*"
@@ -1732,8 +1756,8 @@ cmd_rm() {
   quarantine_if_flagged "$TASK_DIR" "$id"
   rm -rf "$TASK_DIR"
   if [ "$DELEGATE_PROGRESS" = 1 ]; then    # its card leaves the dashboard now (best-effort)
-    python3 "$DELEGATE_HOME/lib/progress.py" gone --url "${DELEGATE_PROGRESS_URL:-$(u=${BASE_URL:-${DELEGATE_BASE_URLS%% *}}; printf %s "${u%/}")}" \
-      --key-file "${DELEGATE_PROGRESS_KEY_FILE:-$DELEGATE_API_KEY_FILE}" --task "$id" 2>/dev/null || true
+    python3 "$DELEGATE_HOME/lib/progress.py" gone --url "${DELEGATE_PROGRESS_URL:-$(u=${BASE_URL:-${LVL_URLS%% *}}; printf %s "${u%/}")}" \
+      --key-file "${DELEGATE_PROGRESS_KEY_FILE:-$KEY_FILE}" --task "$id" 2>/dev/null || true
   fi
   note "removed $id"
 }
@@ -2189,7 +2213,17 @@ cmd_doctor() {
     fi
   fi
   harness_drift "${1:-}" || ok=0
-  u=$(pick_base_url) || { echo "endpoint: NONE of [$DELEGATE_BASE_URLS] answered /models"; exit 1; }
+  u=$(pick_base_url "$DELEGATE_BASE_URLS" "$DELEGATE_API_KEY_FILE") || { echo "endpoint: NONE of [$DELEGATE_BASE_URLS] answered /models"; exit 1; }
+  # the hard level, when it has its own endpoints or key: probed with its own key, as a --hard task uses it
+  local uh="" hsep=0
+  if [ "$DELEGATE_BASE_URLS_HARD" != "$DELEGATE_BASE_URLS" ] || [ "$DELEGATE_API_KEY_FILE_HARD" != "$DELEGATE_API_KEY_FILE" ]; then
+    hsep=1
+    if [ ! -r "$DELEGATE_API_KEY_FILE_HARD" ]; then
+      echo "endpoint (hard): API key file not readable: $DELEGATE_API_KEY_FILE_HARD (DELEGATE_API_KEY_FILE_HARD)"; ok=0
+    elif ! uh=$(pick_base_url "$DELEGATE_BASE_URLS_HARD" "$DELEGATE_API_KEY_FILE_HARD"); then
+      echo "endpoint (hard): NONE of [$DELEGATE_BASE_URLS_HARD] answered /models"; ok=0; uh=""
+    fi
+  fi
   if [ "$DELEGATE_RUNNER" = docker ] && [ "$DELEGATE_EGRESS" = filtered ]; then
     ID=doctor-$$ EGRESS=filtered
     ensure_network && ensure_egress
@@ -2214,7 +2248,12 @@ cmd_doctor() {
   fi
   echo "endpoint: $u"
   python3 "$DELEGATE_HOME/lib/probe.py" "$u" "$DELEGATE_API_KEY_FILE" "$DELEGATE_MODEL" ${1:+"$1"} || ok=0
-  if [ "$DELEGATE_MODEL_HARD" != "$DELEGATE_MODEL" ]; then
+  if [ "$hsep" = 1 ]; then
+    if [ -n "$uh" ]; then
+      echo "endpoint (hard): $uh"
+      python3 "$DELEGATE_HOME/lib/probe.py" "$uh" "$DELEGATE_API_KEY_FILE_HARD" "$DELEGATE_MODEL_HARD" --quick || ok=0
+    fi
+  elif [ "$DELEGATE_MODEL_HARD" != "$DELEGATE_MODEL" ]; then
     python3 "$DELEGATE_HOME/lib/probe.py" "$u" "$DELEGATE_API_KEY_FILE" "$DELEGATE_MODEL_HARD" --quick || ok=0
   fi
   [ "$ok" = 1 ] && echo "doctor: OK" || { echo "doctor: PROBLEMS FOUND"; exit 1; }

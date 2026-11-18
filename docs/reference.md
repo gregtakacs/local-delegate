@@ -98,10 +98,20 @@ the opencode permission merge and `delegate doctor`. Roll back with the same com
 the rollback works — and pruning old releases is a later slice, so until then remove one by hand
 once `current` has moved off it. Tags are opaque: no version comparison, no downgrade protection.
 
+**Two levels.** `--hard` (and a chain step with `"hard": true`) can have an endpoint and key of its
+own: `DELEGATE_BASE_URLS_HARD` and `DELEGATE_API_KEY_FILE_HARD` (install flags `--base-url-hard URL`
+and `--key-file-hard PATH`). Each defaults to its normal-level value, `DELEGATE_BASE_URLS` and
+`DELEGATE_API_KEY_FILE`, so a config without them behaves exactly as one endpoint always did. A
+hard task uses its level everywhere: the endpoint it picks, the key its worker gets, every later
+round, `continue`, `exec` and `verify` (the level is the task's recorded `EFFORT`), and its ledger
+rows' `endpoint`. A missing or unreadable hard key file refuses a `--hard` run, as the normal one
+refuses every run. The egress proxy allows both levels' hosts.
+
 `delegate doctor` checks the config, the image, which endpoint answers, and **sends a real
 tool call, both streaming and non-streaming**. It fails if the call comes back as text in `content`
 (unparsed or "phantom" tool calls) or if its arguments aren't valid JSON. Fix those before
-trusting any agent on the endpoint.
+trusting any agent on the endpoint. When the hard level has its own endpoints or key, doctor picks
+and probes it too, with its own key and `DELEGATE_MODEL_HARD`, on an `endpoint (hard):` line.
 
 ### Runners
 
@@ -193,7 +203,7 @@ delegate rm app-add-handles --delete-branch
 | `--github` | let the worker clone private GitHub repos and call the API with `DELEGATE_GITHUB_TOKEN_FILE`. Use a fine-grained **read-only** token |
 | `--egress filtered\|open` | network policy for this task (default `DELEGATE_EGRESS=filtered`, see Security model) |
 | `--service postgres` | a throwaway Postgres just for this task, as `$DATABASE_URL`. Removed by `delegate rm` |
-| `--hard` | use `DELEGATE_MODEL_HARD` (e.g. a high-reasoning-effort variant); recorded as the task's `EFFORT=hard` in its `meta.env`, and on every round's ledger row |
+| `--hard` | use `DELEGATE_MODEL_HARD` (e.g. a high-reasoning-effort variant), on the hard level's endpoint and key (`DELEGATE_BASE_URLS_HARD`, `DELEGATE_API_KEY_FILE_HARD`; by default the normal ones); recorded as the task's `EFFORT=hard` in its `meta.env`, and on every round's ledger row |
 | `--timeout S` | wall-clock limit for the round (default `DELEGATE_TIMEOUT`, 90 min) |
 
 `delegate peek ID` prints a compact snapshot of the current round (state, steps, tool calls,

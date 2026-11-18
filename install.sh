@@ -5,6 +5,7 @@
 #   ./install.sh                                   # interactive-free; edit the config after
 #   ./install.sh --base-url https://llm.example.com/v1 --model qwen3-coder \
 #                [--model-hard qwen3-coder-think] [--key-file PATH | --key-stdin] \
+#                [--base-url-hard URL] [--key-file-hard PATH] \
 #                [--runner docker|native] [--context 131072] [--no-build]
 #                [--claude-profile|--no-claude-profile] [--claude-permissions] [--claude-hook]
 #   ./install.sh --release TAG [--repo URL | --from DIR] [any install flags above]
@@ -45,7 +46,7 @@ agents_dir=${CLAUDE_AGENTS_DIR:-$HOME/.claude/agents}
 xdg_data=${XDG_DATA_HOME:-}; case "$xdg_data" in /*) ;; *) xdg_data="$HOME/.local/share" ;; esac
 root=$xdg_data/delegate
 
-base_url="" model="" model_hard="" key_file="" key_stdin=0 runner="" context="" build=1 claude_hook=0
+base_url="" base_url_hard="" model="" model_hard="" key_file="" key_file_hard="" key_stdin=0 runner="" context="" build=1 claude_hook=0
 # Claude profile: "" = default (on when ~/.claude exists), 1/0 = explicit flag. Permissions
 # default off (design Q2): the static arrays are the owner's call, not the installer's.
 claude_profile="" claude_permissions=0
@@ -56,6 +57,8 @@ while [ $# -gt 0 ]; do
     --model) model=$2; shift 2 ;;
     --model-hard) model_hard=$2; shift 2 ;;
     --key-file) key_file=$2; shift 2 ;;
+    --base-url-hard) base_url_hard=$2; shift 2 ;;
+    --key-file-hard) key_file_hard=$2; shift 2 ;;
     --key-stdin) key_stdin=1; shift ;;
     --runner) runner=$2; shift 2 ;;
     --context) context=$2; shift 2 ;;
@@ -70,7 +73,7 @@ while [ $# -gt 0 ]; do
     --from) from=$2; shift 2 ;;
     --uninstall) uninstall=1; shift ;;
     --purge) purge=1; shift ;;
-    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
     *) echo "install.sh: unknown option $1" >&2; exit 2 ;;
   esac
 done
@@ -224,6 +227,8 @@ EOF
   [ -n "$model" ]      && setv DELEGATE_MODEL "$model"
   [ -n "$model_hard$model" ] && setv DELEGATE_MODEL_HARD "${model_hard:-$model}"
   [ -n "$key_file" ]   && setv DELEGATE_API_KEY_FILE "$key_file"
+  [ -n "$base_url_hard" ] && setv DELEGATE_BASE_URLS_HARD "$base_url_hard"
+  [ -n "$key_file_hard" ] && setv DELEGATE_API_KEY_FILE_HARD "$key_file_hard"
   [ -n "$runner" ]     && setv DELEGATE_RUNNER "$runner"
   [ -n "$context" ]    && setv DELEGATE_CONTEXT "$context"
   say "config -> $cfg  (review it: endpoint, model ids, context, runner)"
