@@ -21,6 +21,16 @@ DIFFSTAT_MAX_LINES = 60
 VERIFY_TAIL_LINES = 40
 
 
+SCOPE_GATE_END = "\n# delegate chain: end of the scope gate\n"   # lib/chain.py SCOPE_GATE_END
+
+
+def shown_verify(cmd):
+    """A chain step's verify starts with its scope gate (about 25 lines of bash the plan never
+    wrote); show it as "[scope gate]" so the report shows the step's own verify."""
+    head, sep, rest = cmd.partition(SCOPE_GATE_END)
+    return "[scope gate] " + rest if sep and head.startswith("# delegate chain:") else cmd
+
+
 def read_events(path):
     events = []
     try:
@@ -347,7 +357,7 @@ def cmd_report(a):
     L.append("```")
     if a.verify_cmd:
         L.append("")
-        L.append(f"## Verify (harness): `{a.verify_cmd}` -> exit {verify_rc}")
+        L.append(f"## Verify (harness): `{shown_verify(a.verify_cmd)}` -> exit {verify_rc}")
         L.append("")
         L.append("```")
         L.append(clip(verify_log, VERIFY_TAIL_LINES, "tail"))

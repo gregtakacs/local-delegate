@@ -444,7 +444,9 @@ first**: a scoped step's verify starts with a short bash snippet that lists what
 base with the branch the step started from, plus untracked files) and exits 1 on anything outside the
 scope, before the real verify begins. A scope miss therefore costs a second instead of a full test run,
 and step 2 is compared against `delegate/<step 1>`, not against the chain's base, so it does not
-inherit step 1's files. (In place, the gate diffs the step's own HEAD.) **And it does not retry a plan
+inherit step 1's files. (In place, the gate diffs the step's own HEAD.) The task still runs the whole
+snippet, but its notes, `verify.log` and report show it as `[scope gate]` in front of the plan's
+verify; the gate's own `DELEGATE-SCOPE:` lines in the log say what it found. **And it does not retry a plan
 bug**: when the gate names a file the step's own spec mentions, no round can fix that — the chain stops
 at once (exit 3) and says to fix the plan and re-check it. A gate failure on any other path gets one
 targeted retry, whose message lists the paths and tells the worker to revert them or stop as blocked.

@@ -13,6 +13,16 @@ VERSION=0.8.1
 die()  { echo "delegate: $*" >&2; exit 1; }
 warn() { echo "delegate: $*" >&2; }
 note() { echo "delegate: $*" >&2; }
+# A chain step's verify starts with its scope gate (lib/chain.py scope_gate, ending in the
+# SCOPE_GATE_END line); notes and verify.log show it as "[scope gate]", not 25 lines of bash.
+verify_shown() {
+  local v=$1 end=$'\n# delegate chain: end of the scope gate\n'
+  if [[ $v == "# delegate chain:"* && $v == *"$end"* ]]; then
+    printf '[scope gate] %s' "${v#*"$end"}"
+  else
+    printf '%s' "$v"
+  fi
+}
 
 # ---------------------------------------------------------------- configuration ----
 CONFIG_FILE=${DELEGATE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/delegate/config.env}
@@ -996,8 +1006,8 @@ finalize_round() { # N RD VERIFY RC START END
 
   if [ -n "$verify" ] && [ "$was_aborted" = 0 ]; then
     phase "$rd" verifying
-    note "round $n: running verify: $verify"
-    printf '$ %s\n' "$verify" > "$rd/verify.log"
+    note "round $n: running verify: $(verify_shown "$verify")"
+    printf '$ %s\n' "$(verify_shown "$verify")" > "$rd/verify.log"
     run_limited "$DELEGATE_VERIFY_TIMEOUT" "v$n" run_worker "v$n" bash -lc "$verify" >> "$rd/verify.log" 2>&1 || vrc=$?
     reap_leftovers "verify $n" "$rd/verify.log"
     vrc=${vrc:-0}

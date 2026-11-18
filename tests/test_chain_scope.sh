@@ -430,4 +430,20 @@ check "an in-place scoped step gets the gate too" \
 check "…and it diffs HEAD, with no merge-base and no --base" \
   'grep -q "^__dsc_from=HEAD$" $DELEGATE_STATE/run-verify-a && ! grep -q merge-base $DELEGATE_STATE/run-verify-a \
    && ! grep -q delegate/step-1 $DELEGATE_STATE/run-verify-a'
+
+# 11. reports and logs show the gate as "[scope gate]", the plan's verify as written
+fresh; printf 'done\n' > $SCRIPT/a
+cplan "$(step_json a docs/specs/a.md '["hub/app.py"]')"
+python3 $here/lib/chain.py $T/plan.json >/dev/null 2>&1
+check "the gate's last line is the end marker, right before the plan's verify" \
+  '[ "$(tail -2 $DELEGATE_STATE/run-verify-a | head -1)" = "# delegate chain: end of the scope gate" ]'
+shown_py=$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1] + "/lib"); import report; print(report.shown_verify(open(sys.argv[2]).read()))' "$here" $DELEGATE_STATE/run-verify-a)
+check "report: a gated verify is shown as [scope gate] plus the plan's verify" '[ "$shown_py" = "[scope gate] true" ]'
+check "report: a verify without a gate is shown unchanged" \
+  '[ "$(python3 -c "import sys; sys.path.insert(0, \"$here/lib\"); import report; print(report.shown_verify(\"make test\"))")" = "make test" ]'
+check "report: a user verify that merely contains the marker text is left alone" \
+  '[ "$(python3 -c "import sys; sys.path.insert(0, \"$here/lib\"); import report; print(report.shown_verify(\"echo hi\n# delegate chain: end of the scope gate\nmake\"))" | head -1)" = "echo hi" ]'
+eval "$(sed -n '/^verify_shown()/,/^}/p' $here/bin/delegate)"
+check "bin/delegate: notes and verify.log show the same short form" \
+  '[ "$(verify_shown "$(cat $DELEGATE_STATE/run-verify-a)")" = "[scope gate] true" ] && [ "$(verify_shown "make test")" = "make test" ]'
 exit $fail

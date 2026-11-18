@@ -385,6 +385,11 @@ def step_verify(s, base):
     return scope_gate(s["scope"], base) + "\n" + s["verify"]
 
 
+# The gate's last line. Reports and logs show everything up to it as "[scope gate]" (bin/delegate
+# verify_shown, lib/report.py shown_verify), so a step's own verify stays readable.
+SCOPE_GATE_END = "# delegate chain: end of the scope gate"
+
+
 def scope_gate(entries, base):
     """The bash snippet that runs FIRST inside the verify: every path this step changed (committed,
     staged, unstaged, deleted, untracked) must match the step's scope, diffed from the branch the
@@ -415,7 +420,8 @@ def scope_gate(entries, base):
             "  done <<< \"$__dsc_bad\"\n"
             "  exit 1\n"
             "fi\n"
-            "printf 'DELEGATE-SCOPE: ok (%s changed paths)\\n' \"$__dsc_n\"")
+            "printf 'DELEGATE-SCOPE: ok (%s changed paths)\\n' \"$__dsc_n\"\n"
+            + SCOPE_GATE_END)
 
 
 def load_plan(path, lint=False):
