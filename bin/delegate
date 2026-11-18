@@ -1306,6 +1306,21 @@ cmd_run() {
   rm -f "$p"
 }
 
+# The verify the chain plan gives this task's step now (lib/chain.py step_verify), from the plan
+# the chain state of $CHAIN names. Fails, printing nothing, when there is no chain state, no plan
+# or no step named $SLUG in it: the caller then keeps the verify it recorded.
+chain_step_verify() {
+  local st=$DELEGATE_STATE/chains/$CHAIN.json plan
+  [ -f "$st" ] || return 1
+  plan=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get("plan") or "")' "$st" 2>/dev/null) || return 1
+  [ -n "$plan" ] && [ -f "$plan" ] || return 1
+  if [ "${HERE:-0}" = 1 ]; then
+    python3 "$DELEGATE_HOME/lib/chain.py" "$plan" --step-verify "$SLUG" --here 2>/dev/null
+  else
+    python3 "$DELEGATE_HOME/lib/chain.py" "$plan" --step-verify "$SLUG" --base "$BASE_REF" 2>/dev/null
+  fi
+}
+
 cmd_continue() {
   local id=${1:-}
   [ -n "$id" ] || die "usage: delegate continue ID (FEEDBACK.md | - | -m \"text\"...) [--verify CMD] [--model M | --hard] [--timeout S]"
@@ -1338,6 +1353,12 @@ cmd_continue() {
     [ "$verify" = "$VERIFY" ] || { meta_set VERIFY "$verify"; note "verify for $id is now: $verify"; }
   else
     verify=$VERIFY
+    # a chain step follows its plan: a scope or verify edited there since the last round applies
+    # to this round as well, as it does to the chain's own retries (which pass --verify)
+    local now
+    if [ -n "${CHAIN:-}" ] && now=$(chain_step_verify); then
+      [ "$now" = "$VERIFY" ] || { meta_set VERIFY "$now"; verify=$now; note "verify for $id follows the chain plan's current step"; }
+    fi
   fi
   [ -n "$model" ] && MODEL=$model
   # `--hard` on continue upgrades the recorded effort; without it the record stands (t-2 §Effort).

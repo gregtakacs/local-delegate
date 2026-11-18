@@ -173,7 +173,7 @@ Follow-ups: `delegate continue ID -m "first item" -m "second item"` (each `-m` i
 item), or a file, or `-` for stdin. `delegate stop ID` aborts a running round. The worker's
 partial work is still committed, and the round reports as `aborted`.
 
-`continue --verify CMD` replaces the task's verify from then on (later rounds, `delegate verify`, and a chain's retries), and a chain retry always runs the plan's current verify, so editing a step's verify in the plan and re-running the chain takes effect.
+`continue --verify CMD` replaces the task's verify from then on (later rounds, `delegate verify`, and a chain's retries), and a chain retry always runs the plan's current verify, so editing a step's verify in the plan and re-running the chain takes effect. A plain `continue` (no `--verify`) of a chain step does the same: it rebuilds the step's verify, scope gate included, from the plan the chain state names, so a scope widened in the plan applies to that round too. A step the plan no longer has, or a chain with no state, keeps the recorded verify.
 
 **Flagged rounds are kept.** When a worker's closing message reports planted instructions, a prompt injection or an exfiltration attempt, `delegate rm` (and `prune`, `chain --clean`) copies that round's events, report and prompt to `$DELEGATE_STATE/quarantine/<id>-<time>/` before removing the task, so the source can still be traced. Nothing else is kept.
 

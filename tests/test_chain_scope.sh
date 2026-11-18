@@ -446,4 +446,25 @@ check "report: a user verify that merely contains the marker text is left alone"
 eval "$(sed -n '/^verify_shown()/,/^}/p' $here/bin/delegate)"
 check "bin/delegate: notes and verify.log show the same short form" \
   '[ "$(verify_shown "$(cat $DELEGATE_STATE/run-verify-a)")" = "[scope gate] true" ] && [ "$(verify_shown "make test")" = "make test" ]'
+# 12. `delegate continue` on a chain step takes the plan's current verify (scope edits included),
+#     the same one a chain retry passes with --verify; without a chain or a step it keeps its own
+eval "$(sed -n '/^chain_step_verify()/,/^}/p' $here/bin/delegate)"
+DELEGATE_HOME=$here CHAIN=c SLUG=a BASE_REF=main HERE=0
+now=$(chain_step_verify); rc=$?
+check "continue: a chain step's verify is the one the chain handed it" \
+  '[ $rc = 0 ] && [ "$now" = "$(cat $DELEGATE_STATE/run-verify-a)" ]'
+cplan "$(step_json a docs/specs/a.md '["hub/app.py","hub/tests/test_install.py"]')"
+now=$(chain_step_verify); rc=$?
+check "continue: a scope edited in the plan reaches the next continue" \
+  '[ $rc = 0 ] && printf "%s\n" "$now" | grep -q "hub/tests/test_install" && [ "$now" != "$(cat $DELEGATE_STATE/run-verify-a)" ]'
+check "…and diffs from the base the task was started on" 'printf "%s\n" "$now" | grep -q "merge-base HEAD '"'"'main'"'"'"'
+now=$(HERE=1 chain_step_verify)
+check "…or from HEAD for an in-place step" 'printf "%s\n" "$now" | grep -q "^__dsc_from=HEAD$"'
+now=$(SLUG=gone chain_step_verify); rc=$?
+check "continue: a step the plan no longer has keeps the recorded verify (fails, prints nothing)" '[ $rc != 0 ] && [ -z "$now" ]'
+now=$(CHAIN=nochain chain_step_verify); rc=$?
+check "continue: no chain state keeps the recorded verify" '[ $rc != 0 ] && [ -z "$now" ]'
+cont=$(sed -n '/^cmd_continue()/,/^}/p' $here/bin/delegate)
+check "continue: an explicit --verify still wins (the refresh is only in the no---verify branch)" \
+  'printf "%s\n" "$cont" | awk "/verify_set\" = 1/{a=1} a&&/else/{b=1} b&&/chain_step_verify/{print; exit}" | grep -q chain_step_verify'
 exit $fail

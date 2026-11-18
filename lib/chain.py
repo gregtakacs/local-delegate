@@ -385,6 +385,16 @@ def step_verify(s, base):
     return scope_gate(s["scope"], base) + "\n" + s["verify"]
 
 
+def print_step_verify(plan, name, base):
+    """Print step `name`'s verify as the plan has it now (step_verify), with no newline added.
+    Exit 2 when the plan has no such step, so the caller keeps the verify it recorded."""
+    for s in plan["steps"]:
+        if s.get("name") == name:
+            sys.stdout.write(step_verify(s, base or None))
+            return
+    die(f"{plan['_path']} has no step {name!r}", 2)
+
+
 # The gate's last line. Reports and logs show everything up to it as "[scope gate]" (bin/delegate
 # verify_shown, lib/report.py shown_verify), so a step's own verify stays readable.
 SCOPE_GATE_END = "# delegate chain: end of the scope gate"
@@ -890,8 +900,14 @@ def main():
         return
     # only a run and --check lint the plan: --status, --clean and --wait read and report as before
     plan = load_plan(args[0], lint=("--check" in args or
-                                    not any(f in args for f in ("--status", "--clean", "--wait"))))
-    if "--check" in args:
+                                    not any(f in args for f in ("--status", "--clean", "--wait",
+                                                                "--step-verify"))))
+    if "--step-verify" in args:
+        # `delegate continue` on a chain step asks for the plan's current verify, so a scope or
+        # verify edited in the plan reaches that round too (not only the chain's own retries).
+        print_step_verify(plan, _str_opt(args, "--step-verify"),
+                          None if "--here" in args else _str_opt(args, "--base"))
+    elif "--check" in args:
         check_plan(plan)
     elif "--status" in args:
         print_status(plan)
