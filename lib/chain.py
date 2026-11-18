@@ -102,6 +102,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import taskstate                                                      # the task states top/list use
 import ledger                                                         # the chain row (T2-F)
+import launch                                                         # the launch fingerprint
 
 ME = Path(__file__).resolve()
 DELEGATE = os.environ.get("DELEGATE_CHAIN_BIN") or str(ME.parent.parent / "bin" / "delegate")   # override: tests
@@ -876,7 +877,8 @@ def record_chain_row(mark, plan, outcome, exit_code):
             "started_at": mark["started"], "ended_at": time.time(),
             "outcome": outcome or chain_outcome(exit_code, plan), "exit": exit_code,
             "steps": chain_step_records(plan),
-            "orchestrator": harness, "orchestrator_session": session})
+            "orchestrator": harness, "orchestrator_session": session,
+            "launch_sha256": mark.get("launch")})
     except Exception as e:                                # noqa: BLE001 — by contract, as with hooks
         note(f"chain row: {e} (the chain's result stands)")
 
@@ -918,7 +920,10 @@ def main():
     else:
         plan["_on_step"] = _str_opt(args, "--on-step") or os.environ.get("DELEGATE_ON_STEP", "")
         hook = _str_opt(args, "--on-done") or os.environ.get("DELEGATE_ON_DONE", "")
-        mark = {"written": False, "started": time.time()}
+        mark = {"written": False, "started": time.time(), "launch": launch.launch_sha256()}
+        # every step's rounds carry this run's launch, not their own (bin/delegate launch_hash):
+        # set even when empty, so a step never fingerprints the chain process as its launcher
+        os.environ["DELEGATE_LAUNCH_SHA256"] = mark["launch"] or ""
         install_chain_signals(mark, plan)
         rc = 0
         try:

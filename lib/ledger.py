@@ -49,7 +49,11 @@ from typing import Any, Iterator, Mapping
 # reads the same with steps' ctx null and no events.
 # chain:1 (T2-F) is one row per `delegate chain` run, written when that run stops: how the chain
 # ended, at which step, with which exit code. It is not a round, so `stats` does not read it.
-KINDS: dict[str, int] = {"round": 3, "timeline": 2, "review": 1, "chain": 1,
+# round:4 and chain:2 add `launch_sha256`: the sha256 of the Bash tool call that launched the
+# round's `delegate run`/`continue` (a chain step's rounds carry the chain's) or the chain
+# (lib/launch.py) — it names which agent of a session delegated; the command is never stored.
+# An older row reads the same with it null.
+KINDS: dict[str, int] = {"round": 4, "timeline": 2, "review": 1, "chain": 2,
                          "benchmark": 1, "verdict": 1}
 
 LEDGER_FILENAME = "events.jsonl"          # the ledger's own file, beside — never inside — task dirs
@@ -172,7 +176,8 @@ def append(ledger_path: str, row: Mapping) -> None:
 # later reader has of a finished slice: how it ended, on which step, with what exit code. Steps,
 # statuses and counts only — no step text, no commands, no diffs (R4).
 CHAIN_KEYS = ("chain", "repo", "project", "plan_hash", "started_at", "ended_at",
-              "outcome", "exit", "steps", "orchestrator", "orchestrator_session", "ts")
+              "outcome", "exit", "steps", "orchestrator", "orchestrator_session",
+              "launch_sha256", "ts")
 
 CHAIN_OUTCOMES = ("done", "blocked", "partial", "failed", "interrupted")
 
@@ -206,6 +211,14 @@ def clip_chain_steps(value: Any) -> list:
     return out
 
 
+def sha256_hex(value: Any) -> str | None:
+    """A sha256 as 64 lowercase hex characters, or None: anything else is not stored."""
+    if not isinstance(value, str):
+        return None
+    value = value.strip().lower()
+    return value if re.fullmatch(r"[0-9a-f]{64}", value) else None
+
+
 def build_chain_row(values: Mapping[str, Any]) -> dict:
     """The chain row, in CHAIN_KEYS order, from what the run knew at its end: the plan's `name`,
     its absolute `repo` and the project that repo belongs to (pass `git_common`, the repo's git
@@ -214,7 +227,8 @@ def build_chain_row(values: Mapping[str, Any]) -> dict:
     stored as ISO-8601 UTC, as a round row stores its times), the `outcome` — one of
     CHAIN_OUTCOMES, `failed` when the caller could not name one — the run's `exit` code, its
     `steps`, and the `orchestrator`/`orchestrator_session` of the session that started it (null
-    when the environment does not say). Nothing here is inferred from anything but the run."""
+    when the environment does not say), and the `launch_sha256` of the command that launched it
+    (lib/launch.py; null when none was found). Nothing here is inferred from anything but the run."""
     values = values if isinstance(values, Mapping) else {}
     repo = values.get("repo")
     repo = _item(repo, 500) if isinstance(repo, str) and repo else None
@@ -235,6 +249,7 @@ def build_chain_row(values: Mapping[str, Any]) -> dict:
                          if isinstance(values.get("orchestrator"), str) else None),
         "orchestrator_session": (_item(values.get("orchestrator_session"), 128) or None
                                  if isinstance(values.get("orchestrator_session"), str) else None),
+        "launch_sha256": sha256_hex(values.get("launch_sha256")),
         "ts": values.get("ts"),
     }
     if row["ts"] is None:
@@ -453,8 +468,8 @@ ROUND_KEYS = (
     "task_id", "slug", "repo", "project", "chain", "step", "run_id", "round", "spec_hash",
     "base_ref", "base_sha", "verify", "endpoint", "model", "effort",
     "effort_source", "delegate_version", "rules_hash", "image_stamp", "runner",
-    "orchestrator", "orchestrator_session", "timeout_s", "edit_cap", "parallel_rounds",
-    "status", "worker_status",
+    "orchestrator", "orchestrator_session", "launch_sha256", "timeout_s", "edit_cap",
+    "parallel_rounds", "status", "worker_status",
     "exit", "verify_rc", "nudges", "tool_calls", "tool_errors", "errors",
     "todos_done", "todos_total", "todos", "worker_report", "retries", "round_start", "round_end",
     "duration_s", "steps", "input_tokens", "output_tokens", "reasoning_tokens",
@@ -782,6 +797,8 @@ def build_round_row(report: Mapping[str, Any], extra: Mapping[str, Any] | None =
         # it was started from a plain shell or before round:2
         "orchestrator": pick("orchestrator") or None,
         "orchestrator_session": pick("orchestrator_session") or None,
+        # round:4 — the launching Bash tool call's sha256 (lib/launch.py), null when unknown
+        "launch_sha256": sha256_hex(pick("launch_sha256")),
         "timeout_s": _num(extra.get("timeout_s")), "edit_cap": _num(extra.get("edit_cap")),
         "parallel_rounds": _num(extra.get("parallel_rounds")),
         "status": pick("status"), "worker_status": pick("worker_status"),
@@ -1003,6 +1020,12 @@ def _import_round(ledger_path: str, task_dir: str, round_no: int, task_id: str,
             diff_lines = parse_diffstat(f.read())
     except OSError:
         pass                                                 # nothing captured, nothing known
+    launch = None
+    try:
+        with open(os.path.join(rd, "launch.sha256"), encoding="utf-8") as f:
+            launch = sha256_hex(f.read(200))
+    except OSError:
+        pass                                                 # a round from before round:4
     derived = derive_timeline(events_path) if events_path else None
     start_ms = _first_step_start_ms(derived)
     try:
@@ -1019,6 +1042,7 @@ def _import_round(ledger_path: str, task_dir: str, round_no: int, task_id: str,
         "verify": meta.get("VERIFY") or None, "runner": meta.get("RUNNER") or None,
         "orchestrator": meta.get("ORCH") or None,
         "orchestrator_session": meta.get("ORCH_SESSION") or None,
+        "launch_sha256": launch,
         "effort": _inferred_effort(report_model, model, model_hard),
         "effort_source": "inferred",
         "spec_hash": spec_hash, "diff_lines": diff_lines,

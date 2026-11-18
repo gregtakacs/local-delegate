@@ -261,6 +261,17 @@ step with its status and round/retry counts, and the orchestrator session. `--st
 `--wait` and `--clean` write no row. `stats` ignores chain rows — a chain is not a round.
 Like every other write, neither field nor row is ever fatal: one `warn:` line, same result.
 
+**Who launched it: round rows at schema 4, chain rows at schema 2.** Both add `launch_sha256`,
+beside `orchestrator_session`. A Claude Code sub-agent's shell has its session's environment, so the
+session id cannot say which agent delegated; the command can. Claude Code runs each Bash tool call
+as `bash -c '<prelude> && eval '<command>' && pwd -P >| ...'`, and `<command>` is byte for byte the
+`command` of that tool call in the launching agent's transcript. `lib/launch.py` walks up from
+delegate's process (at most 8 parents) to the first such wrapper and records the lowercase hex
+sha256 of `<command>` — never the command itself — or null: no wrapper, a cmdline it cannot parse
+or over 1 MiB, no `/proc`. A round row takes its `delegate run`/`continue`'s launch (the round dir's
+`launch.sha256`, so `finish` keeps it); a chain's steps all carry the chain's own launch, which
+`lib/chain.py` exports to them. Older rows read the same, with it null.
+
 **Your verdicts: `delegate ledger review`.** When a step lands you record what you decided; the
 ledger stores it as one `review` row, linked to that task's round rows by task id — a verdict is
 data you supply, never something inferred from a review document:

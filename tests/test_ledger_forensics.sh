@@ -159,8 +159,8 @@ row = {n: json.loads(lines[2 * n - 2]) for n in range(1, 6)}
 out = []
 def want(cond, name): out.append(("ok" if cond else "fail") + "|" + name)
 
-want(all(r["kind"] == "round" and r["schema"] == 3 for r in row.values()),
-     "every round row written by this build is kind round at schema 3")
+want(all(r["kind"] == "round" and r["schema"] == 4 for r in row.values()),
+     "every round row written by this build is kind round at schema 4")
 want(all(list(r) == ["kind", "schema"] + json.loads(
      sys.argv[1])["round_keys"] for r in row.values()),
      "the row keys are kind, schema, then ROUND_KEYS in order (todos and worker_report after todos_total)")

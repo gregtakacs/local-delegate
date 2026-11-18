@@ -378,6 +378,19 @@ orchestrator_of() { # -> "HARNESS SESSION_ID" of the session that delegates, or 
   printf '%s %s' "$h" "$id"
 }
 
+launch_hash() { # -> the sha256 of the Bash tool call that launched this command, or nothing
+  # Claude Code runs a tool call as `bash -c '... && eval '<command>' && ...'`; lib/launch.py
+  # finds that ancestor and hashes <command>, which names the (sub-)agent whose transcript holds
+  # it — the environment cannot, a sub-agent shares its session's. A chain's steps carry the
+  # chain's own launch (it exports DELEGATE_LAUNCH_SHA256, empty when it found none). Anything
+  # but 64 lowercase hex is not recorded; the command text never is.
+  local h=""
+  if [ -n "${DELEGATE_CHAIN:-}" ] && [ -n "${DELEGATE_LAUNCH_SHA256+set}" ]; then h=$DELEGATE_LAUNCH_SHA256
+  else h=$(python3 -I "$DELEGATE_HOME/lib/launch.py" --pid $$ 2>/dev/null) || h=""; fi
+  if [[ "$h" =~ ^[0-9a-f]{64}$ ]]; then printf '%s' "$h"; fi
+  return 0
+}
+
 meta_set() { # key value  (rewrites meta.env atomically)
   local f="$TASK_DIR/meta.env" k=$1 v=$2
   { grep -v "^$k=" "$f" 2>/dev/null || true; printf '%s=%q\n' "$k" "$v"; } > "$f.tmp" && mv "$f.tmp" "$f"
@@ -907,6 +920,7 @@ do_round() {
   local n=$1 prompt_file=$2 verify=$3 secs=$4
   local rd="$TASK_DIR/rounds/$n" start end rc=0 vrc="" sess_args=()
   mkdir -p "$rd"
+  launch_hash > "$rd/launch.sha256"      # who launched this round: its ledger row's launch_sha256
   cp "$prompt_file" "$rd/prompt.md"
   local bytes; bytes=$(wc -c < "$rd/prompt.md")
   [ "$bytes" -lt 120000 ] || die "prompt is $bytes bytes; keep specs under ~120 KB and point at files instead"
@@ -2251,7 +2265,8 @@ ledger_meta_fields() { # DIR -> NUL-separated field=value rows, from that task's
 ledger_append() { # --kind K [--task T] [--fields k=v[,k=v]...] [--task-dir D] [--status S] [--exit N] [--file F|-]
   #           [round mode: --round-from-report R --events E --diffstat F --endpoint U --effort E
   #            --effort-source S --delegate-version V --rules-hash H --image-stamp I --timeout-s N
-  #            --edit-cap N --parallel-rounds N --spec-hash H --round-start S --round-end E --source S]
+  #            --edit-cap N --parallel-rounds N --spec-hash H --round-start S --round-end E --source S
+  #            --launch-sha256 H]
   local kind="" task="" status="" exitc="" file="" tdir=""
   local -a fields=() pyextra=()
   while [ $# -gt 0 ]; do
@@ -2265,7 +2280,7 @@ ledger_append() { # --kind K [--task T] [--fields k=v[,k=v]...] [--task-dir D] [
         shift 2 ;;
       --round-from-report|--events|--diffstat|--endpoint|--effort|--effort-source| \
       --delegate-version|--rules-hash|--image-stamp|--timeout-s|--edit-cap| \
-      --parallel-rounds|--spec-hash|--round-start|--round-end|--source)
+      --parallel-rounds|--spec-hash|--round-start|--round-end|--source|--launch-sha256)
         [ $# -ge 2 ] || { ledger_warn append "missing value for $1"; return 0; }
         # round-mode conditions; an empty value carries nothing, and the lib stores null.
         [ -n "$2" ] && pyextra+=("$1" "$2")
@@ -2316,7 +2331,7 @@ def parse_flags(argv):
              "delegate-version": None, "rules-hash": None, "image-stamp": None,
              "timeout-s": None, "edit-cap": None, "parallel-rounds": None,
              "spec-hash": None, "round-start": None, "round-end": None,
-             "source": None}
+             "source": None, "launch-sha256": None}
     meta, fields = [], []
     while argv:
         flag = argv.pop(0)
@@ -2404,6 +2419,7 @@ def round_extra(flags, meta):
                         ("timeout-s", "timeout_s"), ("edit-cap", "edit_cap"),
                         ("parallel-rounds", "parallel_rounds"),
                         ("spec-hash", "spec_hash"), ("round-start", "round_start"),
+                        ("launch-sha256", "launch_sha256"),
                         ("round-end", "round_end"), ("task", "task_id"),
                         ("status", "status"), ("exit", "exit")):
         if flags.get(flag) is not None:
@@ -2519,6 +2535,7 @@ ledger_record_round() { # N RD RC START END — the round and timeline rows for 
   ledger_append --kind round --task-dir "$TASK_DIR" \
     --round-from-report "$rd/report.json" --events "$rd/events.jsonl" \
     --diffstat "$rd/diffstat" --endpoint "$BASE_URL" "${eff_args[@]}" \
+    --launch-sha256 "$(cat "$rd/launch.sha256" 2>/dev/null || true)" \
     --spec-hash "$shaverspec" --rules-hash "$hash" --image-stamp "$img" \
     --timeout-s "${secs:-$DELEGATE_TIMEOUT}" --edit-cap "$DELEGATE_CHUNK_CAP" \
     --parallel-rounds "$(ledger_parallel_rounds)" --delegate-version "$VERSION" \

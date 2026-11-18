@@ -188,7 +188,7 @@ cases = [
     (round_row["orchestrator"] == "claude-code"
      and round_row["orchestrator_session"] == "1e061308-50b0",
      "the delegating session from meta.env (round:2)"),
-    (round_row["schema"] == 3, "a round row with the orchestrator fields is schema 3"),
+    (round_row["schema"] == 4, "a round row with the orchestrator and launch fields is schema 4"),
     (round_row["timeout_s"] == 5400 and round_row["edit_cap"] == 8000,
      "timeout and edit cap in force"),
     (round_row["parallel_rounds"] == 1,
