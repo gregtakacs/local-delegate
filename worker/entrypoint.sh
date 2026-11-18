@@ -38,4 +38,9 @@ if [ -n "${DELEGATE_EVIDENCE_DIR:-}" ]; then
   mkdir -p "$DELEGATE_EVIDENCE_DIR"
 fi
 
+# The PATH this container started with: the image's own, with the runner's guard shims first.
+# A login shell (bash -lc: every verify and exec) resets PATH from /etc/profile;
+# /etc/profile.d/zz-delegate-path.sh restores it from this.
+export DELEGATE_PATH="$PATH"
+
 exec "$@"

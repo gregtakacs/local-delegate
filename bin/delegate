@@ -26,6 +26,10 @@ verify_shown() {
 
 # ---------------------------------------------------------------- configuration ----
 CONFIG_FILE=${DELEGATE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/delegate/config.env}
+# An image the CALLER named overrides a repo's own (.delegate/Dockerfile). Recorded before the
+# config file is read, and exported even when empty, so a chain's child delegate inherits the
+# caller's choice instead of mistaking the config's (exported) default for one.
+export DELEGATE_IMAGE_CALLER=${DELEGATE_IMAGE_CALLER-${DELEGATE_IMAGE:-}}
 if [ -f "$CONFIG_FILE" ]; then
   # The caller's own DELEGATE_* exports win over the file (e.g. DELEGATE_IMAGE for one run):
   # keep them, read the file, then put them back.
@@ -71,6 +75,9 @@ install_line() {
 : "${DELEGATE_STREAM_IDLE_S:=180}"
 : "${DELEGATE_RUNNER:=docker}"
 : "${DELEGATE_IMAGE:=delegate-worker:local}"
+# the base every repo image is built FROM: the configured (or caller's) image, fixed once here so
+# a child that inherits a repo image as DELEGATE_IMAGE still builds and stamps against the base
+export DELEGATE_BASE_IMAGE=${DELEGATE_BASE_IMAGE:-$DELEGATE_IMAGE}
 : "${DELEGATE_IMAGE_STALE:=error}"      # error | warn | rebuild — what an image built from another tree costs you
 : "${DELEGATE_IMAGE_ALLOW_STALE:=0}"    # 1: keep this image whatever the stamp says (deliberate hot-patch)
 : "${DELEGATE_WORKTREES:=$HOME/delegate-worktrees}"
@@ -350,6 +357,11 @@ load_task() {
   ORB_FILE=${ORB_FILE:-}; ORB_LABEL=${ORB_LABEL:-}; ORB_BASE_MAC=${ORB_BASE_MAC:-}; ORB_SERIAL=${ORB_SERIAL:-}; ORB_IP=${ORB_IP:-}; ORB_FLASH=${ORB_FLASH:-0}
   HERE=${HERE:-0}; RAW=${RAW:-0}; GRANTS=${GRANTS:-}; ALLOW=${ALLOW:-}
   [ -n "${RUNNER:-}" ] && DELEGATE_RUNNER=$RUNNER
+  # The image this task runs in: the caller's explicit one, else the one recorded at run, else
+  # (a task from before IMAGE was recorded) its repo's own, else the base.
+  if [ -n "$DELEGATE_IMAGE_CALLER" ]; then DELEGATE_IMAGE=$DELEGATE_IMAGE_CALLER; IMAGE_REPO=""
+  elif [ -n "${IMAGE:-}" ]; then DELEGATE_IMAGE=$IMAGE; IMAGE_REPO=${IMAGE_REPO:-}
+  else choose_image "${REPO:-}"; fi
   return 0
 }
 
@@ -1095,7 +1107,6 @@ cmd_run() {
     DELEGATE_WORKTREES=$(realpath -m -- "$DELEGATE_WORKTREES")
   fi
   need_config
-  check_image_fresh
   # old tasks go by themselves: anything idle DELEGATE_PRUNE_DAYS days (0 turns it off)
   [ "${DELEGATE_PRUNE_DAYS:-0}" -gt 0 ] 2>/dev/null && cmd_prune --quiet
   if [ "$github" = 1 ]; then
@@ -1138,6 +1149,8 @@ cmd_run() {
   repo=$(git -C "${repo:-.}" rev-parse --show-toplevel 2>/dev/null) || die "not a git repository: ${repo:-.}"
   fi
   REPO=$repo
+  choose_image "$repo"
+  check_image_fresh
   local reponame; reponame=$(basename "$repo")
   [ -n "$name" ] || name=$(head -n 20 "$spec" | grep -m1 -E '^#' | sed 's/^#* *//')
   SLUG=$(slugify "${name:-task-$(date +%Y%m%d-%H%M%S)}")
@@ -1251,6 +1264,7 @@ cmd_run() {
     printf 'GRANTS=%q\nALLOW=%q\n' "$GRANTS" "$ALLOW"
     if untrusted; then printf 'UNTRUSTED=1\n'; fi   # sticky: every later command treats this task so
     printf 'EFFORT=%q\n' "$effort"
+    printf 'IMAGE=%q\nIMAGE_REPO=%q\n' "$DELEGATE_IMAGE" "${IMAGE_REPO:-}"
     # the chain this step belongs to, when `delegate chain` started it (it exports DELEGATE_CHAIN):
     # `delegate top` groups the step under its chain and names the plan that resumes it.
     printf 'CHAIN=%q\n' "${DELEGATE_CHAIN:-}"
@@ -1343,8 +1357,8 @@ cmd_continue() {
   [ -n "$fb" ] || [ ${#msgs[@]} -gt 0 ] || die "continue: give a feedback file, - (stdin), or -m \"text\""
   [ -z "$fb" ] || [ "$fb" = - ] || [ -r "$fb" ] || die "continue: cannot read $fb"
   need_config
-  check_image_fresh
   load_task "$id"
+  check_image_fresh
   if untrusted; then untrusted_task_check; fi
   [ -d "$WORKTREE" ] || die "worktree $WORKTREE is gone"
   if [ "$verify_set" = 1 ]; then
@@ -1724,35 +1738,73 @@ context_stamp() { # the content hash of everything both worker images are built 
     { find worker opencode lib/render-opencode-config.py -type f -print0 |
         LC_ALL=C sort -z | xargs -0 sha256sum; } | sha256sum | cut -c1-64 )
 }
+# --- a repo's own image ---------------------------------------------------------------
+# A repo that needs a toolchain the base image lacks (a cross compiler, an SDK, a language)
+# declares it in .delegate/Dockerfile, built FROM the base (`ARG BASE` / `FROM ${BASE}`) with
+# .delegate/ as its whole context. Every task on that repo then runs in it: chosen at `run`,
+# recorded in meta.env (IMAGE), and reused by continue, exec, verify and every chain step, so no
+# command can land in the wrong image by forgetting an export. The rule it serves: what the
+# repo's CI runs, the worker can run. An untrusted repo's Dockerfile is never built or used.
+repo_image_name() { # REPO -> its image tag
+  local n; n=$(basename "$1" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9._-' '-'); n=${n%-}
+  printf 'delegate-worker-%s:local' "${n:-repo}"
+}
+repo_layer_stamp() { # REPO -> the content hash of its .delegate/ build context
+  ( cd "$1/.delegate" &&
+    { find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum; } | sha256sum | cut -c1-64 )
+}
+choose_image() { # REPO — sets DELEGATE_IMAGE and IMAGE_REPO for a task on REPO
+  IMAGE_REPO=""
+  [ -z "$DELEGATE_IMAGE_CALLER" ] || { DELEGATE_IMAGE=$DELEGATE_IMAGE_CALLER; return 0; }
+  DELEGATE_IMAGE=$DELEGATE_BASE_IMAGE
+  untrusted && return 0
+  [ -n "$1" ] && [ -f "$1/.delegate/Dockerfile" ] || return 0
+  DELEGATE_IMAGE=$(repo_image_name "$1"); IMAGE_REPO=$1
+}
+image_layer() { # IMAGE — the repo-layer stamp a tag carries, "" for a base image
+  docker image inspect -f '{{range $k, $v := .Config.Labels}}{{if eq $k "io.delegate.layer"}}{{$v}}{{end}}{{end}}' "$1" 2>/dev/null | head -1
+}
+
 image_stamp() { # IMAGE — the stamp a tag carries, "" when it carries none
   docker image inspect -f '{{range $k, $v := .Config.Labels}}{{if eq $k "io.delegate.stamp"}}{{$v}}{{end}}{{end}}' "$1" 2>/dev/null | head -1
 }
-image_freshness() { # IMAGE — fresh | stale | unstamped
+image_freshness() { # IMAGE [REPO] — fresh | stale | unstamped; with REPO, its .delegate/ must match too
   local want have
   want=$(context_stamp); have=$(image_stamp "$1")
   if [ -z "$have" ]; then echo unstamped
-  elif [ "$have" = "$want" ]; then echo fresh
-  else echo stale
+  elif [ "$have" != "$want" ]; then echo stale
+  elif [ -n "${2:-}" ] && [ "$(image_layer "$1")" != "$(repo_layer_stamp "$2")" ]; then echo stale
+  else echo fresh
   fi
 }
 check_image_fresh() { # docker runner only; DELEGATE_IMAGE_STALE=error|warn|rebuild
   [ "$DELEGATE_RUNNER" = docker ] || return 0
   [ "$DELEGATE_IMAGE_ALLOW_STALE" = 1 ] && return 0
-  docker image inspect "$DELEGATE_IMAGE" >/dev/null 2>&1 || die "image $DELEGATE_IMAGE not present — run: delegate build"
-  local fresh; fresh=$(image_freshness "$DELEGATE_IMAGE")
+  local build="delegate build" rb=()
+  [ -z "${IMAGE_REPO:-}" ] || { build="delegate build --repo $IMAGE_REPO"; rb=(--repo "$IMAGE_REPO"); }
+  docker image inspect "$DELEGATE_IMAGE" >/dev/null 2>&1 || die "image $DELEGATE_IMAGE not present — run: $build"
+  local fresh; fresh=$(image_freshness "$DELEGATE_IMAGE" "${IMAGE_REPO:-}")
   [ "$fresh" = fresh ] && return 0
   case "$DELEGATE_IMAGE_STALE" in
-    rebuild) note "image $DELEGATE_IMAGE is $fresh for this tree — rebuilding"; cmd_build
-             [ "$(image_freshness "$DELEGATE_IMAGE")" = fresh ] || die "image still $fresh after rebuild" ;;
-    warn)    note "image $DELEGATE_IMAGE is $fresh for this tree: run 'delegate build' (DELEGATE_IMAGE_STALE=error refuses, DELEGATE_IMAGE_ALLOW_STALE=1 keeps it)" ;;
-    *)       die "image $DELEGATE_IMAGE is $fresh for this tree: run 'delegate build' (DELEGATE_IMAGE_STALE=warn downgrades, DELEGATE_IMAGE_ALLOW_STALE=1 skips this check)" ;;
+    rebuild) note "image $DELEGATE_IMAGE is $fresh for this tree — rebuilding"; ( cmd_build "${rb[@]}" )
+             [ "$(image_freshness "$DELEGATE_IMAGE" "${IMAGE_REPO:-}")" = fresh ] || die "image still $fresh after rebuild" ;;
+    warn)    note "image $DELEGATE_IMAGE is $fresh for this tree: run '$build' (DELEGATE_IMAGE_STALE=error refuses, DELEGATE_IMAGE_ALLOW_STALE=1 keeps it)" ;;
+    *)       die "image $DELEGATE_IMAGE is $fresh for this tree: run '$build' (DELEGATE_IMAGE_STALE=warn downgrades, DELEGATE_IMAGE_ALLOW_STALE=1 skips this check)" ;;
   esac
 }
 
-cmd_build() {
+cmd_build() { # [--repo DIR] [docker build args] — the base images, then DIR's own layer if it has one
   command -v docker >/dev/null || die "docker is not installed"
+  local repo="" pass=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --repo) repo=$2; shift 2 ;;
+      *) pass+=("$1"); shift ;;
+    esac
+  done
   local stamp; stamp=$(context_stamp)
-  docker build --label "io.delegate.stamp=$stamp" -t "$DELEGATE_IMAGE" -f "$DELEGATE_HOME/worker/Dockerfile" "$@" "$DELEGATE_HOME"
+  DELEGATE_IMAGE=$DELEGATE_BASE_IMAGE
+  docker build --label "io.delegate.stamp=$stamp" -t "$DELEGATE_IMAGE" -f "$DELEGATE_HOME/worker/Dockerfile" "${pass[@]}" "$DELEGATE_HOME"
   docker build --label "io.delegate.stamp=$stamp" -t "$DELEGATE_EGRESS_IMAGE" -f "$DELEGATE_HOME/worker/egress.Dockerfile" "$DELEGATE_HOME"
   # a running proxy on the old image is replaced on the next task (its config label changes)
   local v
@@ -1760,6 +1812,14 @@ cmd_build() {
     docker volume create "$v" >/dev/null
     docker run --rm --user 0 --entrypoint chmod -v "$v:/v" "$DELEGATE_IMAGE" 1777 /v
   done
+  [ -n "$repo" ] || return 0
+  repo=$(git -C "$repo" rev-parse --show-toplevel 2>/dev/null) || die "build --repo: not a git repository: $repo"
+  [ -f "$repo/.delegate/Dockerfile" ] || die "build --repo: $repo has no .delegate/Dockerfile"
+  [ "$DELEGATE_UNTRUSTED_REPO" = 1 ] && die "build --repo: DELEGATE_UNTRUSTED_REPO=1: a repository you do not trust does not get its Dockerfile built"
+  local tag; tag=$(repo_image_name "$repo")
+  docker build --label "io.delegate.stamp=$stamp" --label "io.delegate.layer=$(repo_layer_stamp "$repo")" \
+    --build-arg "BASE=$DELEGATE_BASE_IMAGE" -t "$tag" -f "$repo/.delegate/Dockerfile" "$repo/.delegate"
+  echo "delegate: built $tag for $repo"
 }
 
 # delegate update — move a release install to another tag. Retargets `current`, atomically, and
@@ -2864,7 +2924,8 @@ delegate — hand implementation work to a self-hosted coding model, then review
                                    Counts only: stats has no prices and prints no dollars. An empty
                                    or unreadable ledger prints empty tables and exits 0; --since
                                    filters on ts, --chain and --repo match a row's own field exactly
-  delegate build                   build the worker image (docker runner)
+  delegate build [--repo DIR]      build the worker image (docker runner); with --repo, also DIR's own
+                                   image from its .delegate/Dockerfile (FROM the base)
   delegate update [--to TAG] [--repo URL] [--from DIR]
                                    move a release install to TAG by flipping `current` (install.sh
                                    --release installs; a dev checkout is updated with git):

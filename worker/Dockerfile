@@ -53,6 +53,9 @@ RUN mkdir -p /home/worker/.cache /home/worker/.npm /home/worker/.local/share \
 
 COPY --chmod=755 worker/delegate-shot /usr/local/bin/delegate-shot
 COPY --chmod=755 worker/entrypoint.sh /usr/local/bin/delegate-entrypoint
+# A login shell (every verify, exec and chain step) resets PATH; this puts the container's own back,
+# guard shims first (worker/profile-path.sh). Root-owned and 0644: the worker cannot remove it.
+COPY --chmod=644 worker/profile-path.sh /etc/profile.d/zz-delegate-path.sh
 COPY opencode/ /opt/delegate/opencode/
 COPY lib/render-opencode-config.py /opt/delegate/lib/render-opencode-config.py
 

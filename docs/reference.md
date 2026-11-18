@@ -110,6 +110,39 @@ trusting any agent on the endpoint.
 | `docker` (default) | `delegate-worker` image: node 24 + corepack, python3, git, psql, chromium, opencode (pinned) | the task worktree, the repo's git dir, an evidence dir, the key (read-only). **No** docker socket, home dir, SSH keys or root | almost always. Also required for `--service postgres` |
 | `native` | `opencode` from your PATH, as you, with a per-task `HOME` | everything you can reach (the file tools are fenced to the worktree, `bash` is not) | no Docker available, and you trust the model with your user account |
 
+**A repo's own image: `.delegate/Dockerfile`.** The base image carries what every project needs
+and nothing project-specific. A repo whose work needs more (a cross compiler, an SDK, another
+language) declares it in `.delegate/Dockerfile`, built FROM the base, with `.delegate/` as the
+whole build context:
+
+```dockerfile
+ARG BASE=delegate-worker:local
+FROM ${BASE}
+RUN …the toolchain, pinned to the versions the repo's CI uses…
+RUN go version && clang --version   # fail the build, not the first task
+```
+
+`delegate build --repo DIR` builds it as `delegate-worker-<repo>:local`. Every task on that repo
+then runs in it: `run` chooses it and records it in the task (`IMAGE` in `meta.env`), and
+`continue`, `exec`, `verify` and every chain step reuse that record, so no command lands in
+the wrong image for want of an export. It is stale (and refused, naming the build that fixes
+it) when the base changed or anything under `.delegate/` did. An explicit `DELEGATE_IMAGE`
+still overrides it, and an untrusted repository's Dockerfile is never built or used.
+
+What belongs there: the toolchains the repo's CI installs, at CI's versions; the rule is that
+what CI runs, the worker can run. What does not: project dependencies (modules, packages from
+the repo's own lockfiles), which the worker fetches itself through the egress proxy into the
+shared caches, and anything only a person or the host has (a device, a GUI browser on the
+host, a signing key), which stays with the orchestrator. A worker may propose a change to
+`.delegate/Dockerfile` like any other file; it is built on the host, after review, never by the
+worker.
+
+**Login shells keep the container's PATH.** Every verify, `exec` and chain step runs through
+`bash -lc`, and a login shell reads `/etc/profile`, which resets `PATH`. Until 0.8.6 that
+dropped what an image put on `PATH` (a project layer's toolchain) and the guard shims the
+runner puts first. The entrypoint now records the starting `PATH` as `DELEGATE_PATH`, and a
+root-owned `/etc/profile.d/zz-delegate-path.sh` restores it after `/etc/profile`'s reset.
+
 **Supervised, in place: `delegate run SPEC --here`.** For when you're watching. The worker
 edits your current checkout directly, with the native runner, whatever `DELEGATE_RUNNER`
 says: no worktree, branch, container, egress filter or commits, so changes appear live in your
