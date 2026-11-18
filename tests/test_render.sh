@@ -35,6 +35,12 @@ check "instructions: the renderer does not list a path that would silently miss 
 (cd "$wt" && DELEGATE_BASE_URL=http://x/v1 DELEGATE_API_KEY_FILE=$T/key DELEGATE_MODEL=m \
   DELEGATE_READ_PATHS="$ref" python3 "$here/lib/render-opencode-config.py" "$cfg") > $T/c2.json
 check "worktree defaults to the cwd"         'cmp -s $T/c.json $T/c2.json'
+ct() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["provider"]["delegate"]["options"].get("chunkTimeout","none"))' "$1"; }
+check "stream idle: 180 s by default"        '[ "$(ct $T/c.json)" = 180000 ]'
+DELEGATE_STREAM_IDLE_S=45 render "$wt" > $T/c3.json
+check "stream idle: the setting is honoured"  '[ "$(ct $T/c3.json)" = 45000 ]'
+DELEGATE_STREAM_IDLE_S=0 render "$wt" > $T/c4.json
+check "stream idle: 0 leaves opencode its own" '[ "$(ct $T/c4.json)" = none ]'
 
 if [ "${DELEGATE_E2E:-0}" = 1 ]; then
   # Real opencode, real model: ask for three writes, only the in-worktree one may land.

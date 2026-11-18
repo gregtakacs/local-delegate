@@ -22,6 +22,7 @@ Set these in `~/.config/delegate/config.env` (see [config.example.env](../config
 | `DELEGATE_API_KEY_FILE` | A file holding the bearer key. Put a dummy value in it if the server needs none |
 | `DELEGATE_MODEL`, `DELEGATE_MODEL_HARD` | Model names as the server knows them (`--hard` uses the second) |
 | `DELEGATE_CONTEXT` | The model's context window, in tokens |
+| `DELEGATE_STREAM_IDLE_S` | Seconds a streamed reply may go silent before the worker retries it (default 180; 0 = opencode's own) |
 | `DELEGATE_VISION`, `DELEGATE_REASONING` | 1 if the model takes images, or emits reasoning content |
 
 The worker is opencode with one provider, `@ai-sdk/openai-compatible`

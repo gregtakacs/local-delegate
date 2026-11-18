@@ -28,6 +28,11 @@ context = int(env("DELEGATE_CONTEXT", "131072"))
 output = int(env("DELEGATE_OUTPUT", "32768"))
 vision = env("DELEGATE_VISION", "1") == "1"
 evidence = env("DELEGATE_EVIDENCE_DIR", "")
+# The longest silence a streamed reply may have before opencode drops it and retries. A stream
+# that sent its 200 and then nothing held a round for 15 minutes on 2026-11-17 (the reply never
+# arrived); a real reply is never that quiet, because a reasoning model streams its thinking.
+# 180 s still covers a cold prefill of a full context before the first token. 0 = opencode's own.
+stream_idle_s = int(env("DELEGATE_STREAM_IDLE_S", "180") or 0)
 
 
 def model_entry(name):
@@ -101,7 +106,9 @@ config = {
         "delegate": {
             "npm": "@ai-sdk/openai-compatible",
             "name": "delegate worker endpoint",
-            "options": {"baseURL": base_url, "apiKey": "{file:" + key_file + "}"},
+            "options": dict(
+                {"baseURL": base_url, "apiKey": "{file:" + key_file + "}"},
+                **({"chunkTimeout": stream_idle_s * 1000} if stream_idle_s > 0 else {})),
             "models": {m: model_entry(m) for m in dict.fromkeys([model, hard])},
         }
     },
