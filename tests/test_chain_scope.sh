@@ -199,6 +199,33 @@ printf '{"name":"badbase","repo":"%s","base":"main; rm -rf /","steps":[{"name":"
 python3 $here/lib/chain.py $T/plan.json --check > $T/r3 2>&1; rc=$?
 check "a plan with no scope is left as it was, base and all" '[ $rc = 0 ] && grep -q "no scope" $T/r3'
 
+# the plan's "gate": the repo's own gate command, named once; every verify must run it verbatim,
+# and --check prints each verify as stored. (A generated verify once turned PYTHON into PYTHO2 in
+# four steps: each still ran, weaker, and no review read the stored text.)
+gate_plan() { # gate_plan GATE VERIFY_A VERIFY_B
+  printf '{"name":"gate","repo":"%s","base":"main","gate":%s,"steps":[{"name":"a","spec":"docs/specs/a.md","verify":"%s"},{"name":"b","spec":"docs/specs/b.md","verify":"%s"}]}\n' \
+    "$T/repo" "$1" "$2" "$3" > $T/plan.json; }
+gate_plan '"make check-sandbox"' 'python3 tools/a_test.py && make check-sandbox' 'set -o pipefail; python3 tools/b_test.py && make check-sandbox'
+python3 $here/lib/chain.py $T/plan.json --check > $T/r3 2>&1; rc=$?
+check "every verify runs the plan's gate: the plan passes" '[ $rc = 0 ]'
+check "--check names the gate" 'grep -q "gate: make check-sandbox" $T/r3'
+check "--check prints each step's verify as stored" \
+  'grep -qx "       verify: python3 tools/a_test.py && make check-sandbox" $T/r3 && grep -qx "       verify: set -o pipefail; python3 tools/b_test.py && make check-sandbox" $T/r3'
+gate_plan '"make check-sandbox"' 'python3 tools/a_test.py && make check-sandbox' 'python3 tools/b_test.py && make check-host PYTHO2=/usr/bin/python3'
+python3 $here/lib/chain.py $T/plan.json --check > $T/r3 2>&1; rc=$?
+check "a step whose verify skips the gate is refused, and named" '[ $rc = 2 ] && grep -q "does not run the plan.s gate" $T/r3 && grep -q ": b$" $T/r3'
+check "…and nothing ran, no chain state written" '[ ! -e $DELEGATE_STATE/calls ] && [ ! -e $DELEGATE_STATE/chains/gate.json ]'
+gate_plan '"make check-sandbox"' 'make check-sandbo' 'make check-sandbox'
+python3 $here/lib/chain.py $T/plan.json --check > $T/r3 2>&1; rc=$?
+check "the gate must appear character for character" '[ $rc = 2 ] && grep -q ": a$" $T/r3'
+gate_plan '""' 'true' 'true'
+python3 $here/lib/chain.py $T/plan.json --check > $T/r3 2>&1; rc=$?
+check "an empty gate is refused" '[ $rc = 2 ] && grep -q "non-empty" $T/r3'
+gate_plan '7' 'true' 'true'
+python3 $here/lib/chain.py $T/plan.json --check > $T/r3 2>&1; rc=$?
+check "a non-string gate is refused" '[ $rc = 2 ]'
+rm -f $DELEGATE_STATE/calls
+
 # 4. what a spec owns: the bullets that name files the step will change, and only those
 FIX=$here/tests/fixtures/chain-scope
 python3 $T/owned.py "$here" $FIX/spec-owned.md > $T/o4

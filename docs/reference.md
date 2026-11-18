@@ -473,6 +473,15 @@ background job whose exit you are told about, never in the foreground of an agen
 Claude Code agent (`claude/agents/`, installed by `install.sh`) uses this: it plans the
 slice once, runs the chain, and checks the result once.
 
+**The repo's gate: `"gate": "CMD"` on the plan.** The one command the repo's own docs name as
+the worker's full gate (`make check-sandbox`, `npm test`, …). Every step's verify must contain it
+character for character, or the plan is refused at load (`--check` and run alike), so a step can
+neither skip nor re-type the gate. `--check` prints each step's verify exactly as stored: read
+those lines when reviewing a plan, not the design's description of them. Why: a design task's
+script once generated every verify with a blanket `replace("N", n)`, turning `PYTHON` into
+`PYTHO2` and `SDKCONFIG` into `SDKCO2FIG`; each still ran, weaker, and no review read the stored
+text. A plan without `"gate"` is not checked.
+
 **Step scopes: `"scope": [...]` on a step.** Each entry is a repo-relative pattern for a path the
 step may change: `path/to/file.py` (that exact file), `path/to/dir/` (anything under that
 directory), or a pattern with `*`, `?`, `**` — where `*` and `?` never cross a `/` and `**` matches

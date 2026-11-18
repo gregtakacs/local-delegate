@@ -3,7 +3,9 @@
 
   delegate chain PLAN.json            run (or resume) the chain
   delegate chain PLAN.json --check    lint the plan (each step's "scope" vs the files its spec
-                                      owns) and exit: nothing starts, no state is written, no hook
+                                      owns; every verify runs the plan's "gate"), print each
+                                      step's verify as stored, and exit: nothing starts, no state
+                                      is written, no hook
   delegate chain PLAN.json --status   where the chain is, without running anything
   delegate chain PLAN.json --clean    remove the chain's tasks (worktrees, sidecars; branches kept)
   delegate chain PLAN.json --on-done CMD
@@ -328,6 +330,24 @@ def spec_text(s):
         return ""
 
 
+def lint_gate(plan):
+    """A plan's "gate" is the repo's own gate command (e.g. `make check-sandbox`), named once.
+    Every step's verify must run it, character for character: the full gate lives in the repo,
+    under its own tests, never re-typed (or generated) per step. A generated verify once turned
+    PYTHON into PYTHO2 and SDKCONFIG into SDKCO2FIG in four steps: each still ran, weaker, and
+    no review saw it. A plan with no gate is not checked (older plans)."""
+    gate = plan.get("gate")
+    if gate is None:
+        return
+    if not isinstance(gate, str) or not gate.strip():
+        die("plan 'gate' must be the repo's gate command, a non-empty string", 2)
+    gate = gate.strip()
+    bad = [s["name"] for s in plan["steps"] if gate not in s["verify"]]
+    if bad:
+        die("these steps' verify does not run the plan's gate (%s) exactly as written: %s"
+            % (gate, ", ".join(bad)), 2)
+
+
 def lint_plan(plan):
     """Every path a step's spec owns must be inside that step's scope; a step with no 'scope' is
     not linted. Refuses (exit 2) before any state is written and before any step starts."""
@@ -347,13 +367,19 @@ def lint_plan(plan):
 
 
 def check_plan(plan):
-    """`delegate chain PLAN --check`: the lint's verdict for every step, and nothing else."""
+    """`delegate chain PLAN --check`: the lint's verdict for every step, and each step's verify
+    exactly as the chain will run it (minus the scope gate it adds), so the reviewer reads the
+    stored text, not a design's description of it."""
+    if plan.get("gate"):
+        print(f"  gate: {plan['gate'].strip()}  (every step runs it)")
     for i, s in enumerate(plan["steps"], 1):
         if s.get("scope"):
             print(f"  {i}. {s['name']}  scope: {len(s['scope'])} entries, "
                   f"owned: {len(s.get('_owned') or [])} (all covered)")
         else:
             print(f"  {i}. {s['name']}  no scope")
+        for line in s["verify"].splitlines() or [""]:
+            print(f"       verify: {line}")
 
 
 def scope_violations(tid, n):
@@ -480,6 +506,7 @@ def load_plan(path, lint=False):
         die(f"plan base {plan['base']!r}: a scoped step diffs against it; use A-Za-z0-9 . _ / @ + -", 2)
     if lint:
         lint_plan(plan)
+        lint_gate(plan)
     return plan
 
 

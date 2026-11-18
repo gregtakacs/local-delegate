@@ -26,6 +26,11 @@ workers will run step by step. Write no product code.
   They're binding, like the design doc's rulings. Where a note and the code disagree, the
   note is the owner's decision: say so in the design, don't follow the code.
 
+## The repo's gate
+
+`<the ONE command the repo's own docs name as the worker's full gate, e.g. make check-sandbox>`.
+Every step's verify ends with it, exactly as written here.
+
 ## Fixed requirements
 
 <Anything not open to the worker's judgement: security rules, limits, names already decided,
@@ -46,15 +51,22 @@ bidi characters, root escapes, `$` vs `\Z`, concurrency, one bad record among go
 2. One spec per step, `docs/specs/<slice>-<n>-<slug>.md`, following the template. Use 2–5
    steps. Each step is one coherent change, under ~1500 lines and ~90 minutes.
 3. `docs/specs/<slice>-chain.json`:
-   `{"name":"<slice>","repo":"../..","base":"<BASE>","retries":2,"steps":[…]}`.
+   `{"name":"<slice>","repo":"../..","base":"<BASE>","gate":"<the repo's gate>","retries":2,"steps":[…]}`.
    - A step gets `"hard": true` when it has real algorithmic content **or** guards a security
      boundary: validating untrusted input, building commands or paths from it, auth or tokens,
      sandboxing, permission checks, crypto. Every other step gets `"hard": false`.
    - Every step gets `"scope"`: the path patterns it may change — exactly the files its own spec
      lists under "Files owned", plus that step's test fixture directories. `delegate chain PLAN
      --check` refuses a step whose scope misses one of them.
-   - Every verify runs the real toolchain and the repo's full gate, plus the step's own tests.
-     Use `set -o pipefail` when it pipes. A chain verify carries no scope gate of its own: the
+   - Every verify is the step's own tests (its suite, and its `--mutations` run when the repo has
+     them), then the repo's gate, exactly as "The repo's gate" names it. Nothing else: no
+     toolchain setup, no build flags, no copy of what the gate already runs. The gate lives in
+     the repo under its own tests; a verify that re-types it (or a step that weakens it) is the
+     bug. The chain refuses a plan whose verify does not contain the plan's `"gate"`.
+   - Write each verify by hand, literally, in the chain file. Do not generate the plan with a
+     script: one generator's blanket `replace("N", n)` turned `PYTHON` into `PYTHO2` and
+     `SDKCONFIG` into `SDKCO2FIG` in every step, and each still ran, weaker, unseen.
+   - Use `set -o pipefail` when it pipes. A chain verify carries no scope gate of its own: the
      chain runs each step's `"scope"` first, against the branch that step itself starts from.
    - A plan for a different repo uses an absolute `"repo"` and bare spec file names.
 

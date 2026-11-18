@@ -95,7 +95,13 @@ and runs the chain itself.
 - Spec paths resolve: the chain looks in the repo first, then next to the plan file, so a plan
   for another repo uses bare file names.
 - Nothing in the plan contradicts the design's rulings.
-- Run `delegate chain PLAN --check`: it refuses a step whose scope misses a file its spec owns.
+- Run `delegate chain PLAN --check`: it refuses a step whose scope misses a file its spec owns,
+  or whose verify does not run the plan's `"gate"`, and it prints every step's verify exactly as
+  stored. **Read those printed lines**, not the design's description of them: they are what runs.
+- **The brief names the repo's gate, never its shell.** Give the design task the one command the
+  repo's docs name as the worker's full gate (`make check-sandbox`, `npm test`, …) and nothing
+  more; a brief that dictates toolchain setup gets it re-typed in every step, which is where
+  generated typos hide.
   Also look for existing tests that pin behaviour a step changes, and put them in that step's
   spec and scope.
 - **Every step that guards a boundary runs `"hard": true`:** validating untrusted input,
