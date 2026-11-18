@@ -77,8 +77,8 @@ Release installs pin a tag instead of installing whatever a working copy happens
 - `--release TAG` — `git clone --depth 1 --branch TAG`, verify the clone's `VERSION` file says TAG
   (minus a leading `v`), install it under `~/.local/share/delegate/TAG`, and point `current` at it.
   An existing version dir is reused only when its own `.delegate-version` stamp names it.
-- `--repo URL` — clone source (default `https://github.com/<owner>/local-delegate`; the `<owner>` is a
-  literal placeholder until there is a public repo, so pass this explicitly).
+- `--repo URL` — clone source (default `https://github.com/gregtakacs/local-delegate`, the public
+  repo; name your fork or a mirror here).
 - `--from DIR` — clone from this existing local git clone; wins over `--repo`. Only the tag's commit
   installs — a dirty working copy in DIR is not an error and not installed.
 

@@ -49,7 +49,7 @@ base_url="" model="" model_hard="" key_file="" key_stdin=0 runner="" context="" 
 # Claude profile: "" = default (on when ~/.claude exists), 1/0 = explicit flag. Permissions
 # default off (design Q2): the static arrays are the owner's call, not the installer's.
 claude_profile="" claude_permissions=0
-release="" repo="https://github.com/<owner>/local-delegate" from="" uninstall=0 purge=0
+release="" repo="https://github.com/gregtakacs/local-delegate" from="" uninstall=0 purge=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --base-url) base_url=$2; shift 2 ;;
