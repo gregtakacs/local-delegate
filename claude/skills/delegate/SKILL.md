@@ -318,6 +318,8 @@ too big — fix the remaining issues yourself in the worktree, or re-scope into 
 A `blocked` status means it needs a decision: answer its QUESTIONS (ask the user if it is
 genuinely their call) and continue.
 
+**A step you get past is accepted, with how.** "Blocked" means only one thing to the person watching: *they* are needed. When you move a task or a chain past a round that did not end `done` (partial, blocked, done-but-verify-failed, timeout, no-status) because you answered it, fixed it yourself, or verified it by hand, record that before you resume: `delegate accept ID -m "<what was wrong, what you decided or fixed, what verified it>"`. The work view then shows it as done* with your reason, not as blocked. If the person is genuinely needed, stop and ask instead; never accept to make a status look better.
+
 ## Watching and stopping
 
 **Do not watch a running round.** Its output costs your context and you cannot act on it
