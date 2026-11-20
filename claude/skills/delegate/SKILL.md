@@ -121,6 +121,10 @@ and runs the chain itself.
   step always runs the full gate. A local design marks steps by algorithmic
   difficulty only: in one measured slice it ran the command runner and the security step on
   the normal model, and every bug that reached review sat in exactly those two steps.
+  Everything else runs on the normal model: UI plumbing, tests, docs and pattern-following steps
+  are not hard. When in doubt about a boundary, mark it hard; when in doubt about difficulty,
+  don't. `delegate chain PLAN --check` warns when a plan of 2+ steps marks every one of them
+  hard: that is a design that stopped reading its own steps.
 - Accept each owner question or change it, and log the call. Fix the plan in place, and commit
   it to the design branch.
 

@@ -3,7 +3,9 @@
 # then an ordinary step's verify may run either one — while a "hard" step and the plan's LAST step
 # must still run the gate, character for character. `--check` lints both levels, prints both, and a
 # refusal says which of the two a step is missing. A plan with no "step_gate" is refused, worded
-# and behaved exactly as before. No docker, no network, temp dirs only.
+# and behaved exactly as before. `--check` also WARNS, without refusing, when a plan of 2+ steps
+# marks every step hard — and the skill and the design template must carry the hard-rule sentence
+# that warning quotes. No docker, no network, temp dirs only.
 set -u
 here=$(cd "$(dirname "$0")/.." && pwd)
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
@@ -160,5 +162,49 @@ splan ',"gate":"make check","step_gate":"make check-sandbox"' \
      "$(st a a "make check-sandbox" ''),$(st b b "make check" '')"
 chk
 check "a step_gate that already runs the gate is a full-gate verify, not a refusal" '[ $RC = 0 ]'
+
+# 8. --check warns when a 2+-step plan marks EVERY step hard (a warning: never a refusal)
+splan "$(gsk)" "$(st a a "$GATE" ',"hard":true'),$(st b b "$GATE" ',"hard":true'),$(st c c "$GATE" ',"hard":true')"
+chk
+check "every step hard in a 3-step plan: --check still exits 0" '[ $RC = 0 ]'
+check "…and prints the warning, worded as the skill words it" \
+  'grep -q "^  warning: every step is marked hard: hard is for steps that guard a boundary or carry real algorithmic difficulty; routine steps (UI plumbing, tests, docs, pattern-following) run on the normal model$" $T/o'
+check "…and the warning does not hide the rest of --check" \
+  'grep -q "^  gate: make check-sandbox" $T/o && grep -q "^  3. c  no scope" $T/o'
+check "…and --check still starts nothing and writes no chain state" 'quiet'
+splan "$(gsk)" "$(st a a "$GATE" ',"hard":true'),$(st b b "$GATE" ',"hard":true')"
+chk
+check "two steps, both hard: the warning fires at the smallest plan it can" '[ $RC = 0 ] && grep -q "every step is marked hard" $T/o'
+splan "$(gsk)" "$(st a a "$GATE" ',"hard":true'),$(st b b "$GATE" ',"hard":false'),$(st c c "$GATE" ',"hard":true')"
+chk
+check "one step that is not hard: no warning" '[ $RC = 0 ] && ! grep -q "every step is marked hard" $T/o'
+splan "$(gsk)" "$(st a a "$GATE" ',"hard":true'),$(st b b "$GATE" ''),$(st c c "$GATE" '')"
+chk
+check "…nor when steps simply carry no hard key at all" '[ $RC = 0 ] && ! grep -q "every step is marked hard" $T/o'
+splan "$(gsk)" "$(st a a "$GATE" ',"hard":true')"
+chk
+check "a 1-step plan marked hard: no warning (a single risky step is not a plan of only hard work)" \
+  '[ $RC = 0 ] && ! grep -q "every step is marked hard" $T/o'
+splan '' "$(st a a "true" ',"hard":true'),$(st b b "true" ',"hard":true')"
+chk
+check "the warning is about the plan's marking, not the gate: no gate, same warning, same exit 0" \
+  '[ $RC = 0 ] && grep -q "every step is marked hard" $T/o && ! grep -q "^  gate:" $T/o'
+fresh
+splan "$(gsk)" "$(st a a "$SGATE" ''),$(st b b "$GATE" ',"hard":true')"
+python3 $here/lib/chain.py $T/plan.json > $T/r8 2>&1; rc=$?
+check "a run says nothing about hard marking: the warning is --check's" \
+  "[ \$rc = 0 ] && ! grep -q 'every step is marked hard' \$T/r8"
+
+# 9. the method carries the same rule the warning speaks: one sentence, in the skill (Phase 2's
+#    hard bullet) and in the design template (where it asks the design to mark hard steps). The
+#    files wrap prose at ~80 columns, so match the sentence with its line folds folded back.
+SENT='Everything else runs on the normal model: UI plumbing, tests, docs and pattern-following steps are not hard. When in doubt about a boundary, mark it hard; when in doubt about difficulty, don'"'"'t.'
+flat() { tr -s '[:space:]' ' ' < "$1"; }
+flat "$here/claude/skills/delegate/SKILL.md" > $T/skill.flat
+flat "$here/claude/skills/delegate/design-template.md" > $T/template.flat
+check "SKILL.md says it, in Phase 2's bullet about steps that guard a boundary" \
+  'grep -qF "$SENT" $T/skill.flat && awk "/Every step that guards a boundary/{f=1} f&&/runs on the normal model/{print}" '"$here"'/claude/skills/delegate/SKILL.md | grep -q "Everything else"'
+check "…and the design template says it where it asks the design to mark hard steps" \
+  'grep -qF "$SENT" $T/template.flat && awk "/A step gets/{f=1} f&&/runs on the normal model/{print}" '"$here"'/claude/skills/delegate/design-template.md | grep -q "Everything else"'
 
 exit $fail

@@ -65,6 +65,9 @@ bidi characters, root escapes, `$` vs `\Z`, concurrency, one bad record among go
      boundary: validating untrusted input, building commands or paths from it, auth or tokens,
      sandboxing, permission checks, crypto. Every other step gets `"hard": false`. `"hard"` picks
      the model *and* the verify level: a hard step runs the full gate, never the quick check.
+     Everything else runs on the normal model: UI plumbing, tests, docs and pattern-following
+     steps are not hard. When in doubt about a boundary, mark it hard; when in doubt about
+     difficulty, don't.
    - Every step gets `"scope"`: the path patterns it may change — exactly the files its own spec
      lists under "Files owned", plus that step's test fixture directories. `delegate chain PLAN
      --check` refuses a step whose scope misses one of them.

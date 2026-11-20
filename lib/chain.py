@@ -5,9 +5,10 @@
   delegate chain PLAN.json --check    lint the plan (each step's "scope" vs the files its spec
                                       owns; every verify runs the plan's "gate" — or its
                                       "step_gate" when the plan names one and the step is
-                                      neither "hard" nor the last), print each
-                                      step's verify as stored, and exit: nothing starts, no state
-                                      is written, no hook
+                                      neither "hard" nor the last; and a plan whose 2+ steps are
+                                      all "hard": true gets a warning, never a refusal), print
+                                      each step's verify as stored, and exit: nothing starts, no
+                                      state is written, no hook
   delegate chain PLAN.json --status   where the chain is, without running anything
   delegate chain PLAN.json --clean    remove the chain's tasks (worktrees, sidecars; branches kept)
   delegate chain PLAN.json --on-done CMD
@@ -419,7 +420,15 @@ def lint_plan(plan):
 def check_plan(plan):
     """`delegate chain PLAN --check`: the lint's verdict for every step, and each step's verify
     exactly as the chain will run it (minus the scope gate it adds), so the reviewer reads the
-    stored text, not a design's description of it."""
+    stored text, not a design's description of it. A plan that marks every one of its 2+ steps
+    hard gets a warning line: hard is a claim about a boundary or real algorithmic difficulty,
+    and a plan that hard-marks all of its own work is not reading its own steps. It is a warning
+    only: `--check`'s exit code does not change, and nothing is refused."""
+    steps = plan["steps"]
+    if len(steps) > 1 and all(bool(s.get("hard")) for s in steps):
+        print("  warning: every step is marked hard: hard is for steps that guard a boundary or "
+              "carry real algorithmic difficulty; routine steps (UI plumbing, tests, docs, "
+              "pattern-following) run on the normal model")
     if plan.get("gate"):
         quick = step_gate(plan)
         if quick:
