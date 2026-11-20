@@ -198,6 +198,7 @@ delegate rm app-add-handles --delete-branch
 |---|---|
 | `--base REF` | branch the worktree from REF (default: the repo's current branch). Chain dependent steps by basing on the previous task's `delegate/<slug>` |
 | `--verify CMD` | run after every round in the worker environment. The exit code and log tail go into the report, and the worker is told to run it first |
+| `--verify-retries N` | re-runs a failed harness verify gets when the worker said `done` (default 1, env `DELEGATE_VERIFY_RETRIES`, plan key `verify_retries`; 0 = never re-run). A passing re-run is still `done` — see *Flaky verifies* below |
 | `--copy PATH` | copy an untracked file (e.g. `.env`) from the main checkout. It is never committed |
 | `--read PATH` | mount another checkout read-only, for reference (e.g. code to port). Secret-looking files in it (`.env*`, `*.pem`, `*.key`, `credentials*`, `*token*`, `secrets/`, `.ssh/`...) are blanked. Refused inside the repository under `DELEGATE_UNTRUSTED_REPO=1` (see [Untrusted repositories](#untrusted-repositories)) |
 | `--github` | let the worker clone private GitHub repos and call the API with `DELEGATE_GITHUB_TOKEN_FILE`. Use a fine-grained **read-only** token |
@@ -219,6 +220,29 @@ partial work is still committed, and the round reports as `aborted`.
 `continue --verify CMD` replaces the task's verify from then on (later rounds, `delegate verify`, and a chain's retries), and a chain retry always runs the plan's current verify, so editing a step's verify in the plan and re-running the chain takes effect. A plain `continue` (no `--verify`) of a chain step does the same: it rebuilds the step's verify, scope gate included, from the plan the chain state names, so a scope widened in the plan applies to that round too. A step the plan no longer has, or a chain with no state, keeps the recorded verify.
 
 **Flagged rounds are kept.** When a worker's closing message reports planted instructions, a prompt injection or an exfiltration attempt, `delegate rm` (and `prune`, `chain --clean`) copies that round's events, report and prompt to `$DELEGATE_STATE/quarantine/<id>-<time>/` before removing the task, so the source can still be traced. Nothing else is kept.
+
+### Flaky verifies: the re-run and the flake ledger
+
+A suite can be flaky: the worker says `done`, the harness verify reds, and re-running the
+exact same command passes. The harness takes that at face value — once. When a round's worker
+reported `done` and the verify then fails, the harness re-runs the same command up to
+`--verify-retries` extra times (default 1; a worker that said `partial` or `blocked` gets no
+re-run at all, and neither does `delegate verify`). A passing re-run **is a pass**: the round
+closes `done`, `report.json` carries `"verify_flaky": {"failed_runs": k, "first_rc": rc}`, and
+report.md's verify section says so. Every failed run keeps its own log beside the final one
+(`verify-1.log`, `verify-2.log`, …; `verify.log` is always the last run), and each flake
+appends one line to `$DELEGATE_STATE/flakes.jsonl` (0600 — it holds command output):
+
+    {"at", "repo", "task", "round", "verify_sha256", "failed_rc", "tail"}
+
+`delegate flakes [--repo PATH] [--json]` prints that ledger, newest first, grouped by repo,
+each row with the first failing line of its tail. The rule that goes with it is the one
+AGENTS.md already states for tests that flake: **a repo whose verify flakes twice gets its own
+fix-at-source task** — never another retry, never a skip, never a loosened test. The ledger
+exists to say which verifies belong in such a task; the re-run exists so one bad second doesn't
+cost a whole round. `verify_retries` is a plan key too (a step may set its own, overriding the
+plan's), so a chain can decide per slice; `--verify-retries` on `continue` replaces the task's
+value the way `--verify` does.
 
 ### The telemetry ledger (`delegate ledger`)
 

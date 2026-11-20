@@ -176,6 +176,12 @@ the bugs that mattered were all found here.
 - **When you fix something,** add a test and prove it fails without the fix.
 - **A red test you didn't expect:** run it many times on the untouched base before blaming the
   slice. If it's flaky there too, file it, don't fix it in the slice.
+- **A verify the harness had to re-run is the same signal, softened.** When the worker said
+  `done` and the verify reded, the harness re-runs it once (`--verify-retries`, default 1); a
+  passing re-run still closes the round `done`, and the round records the flake instead. Check
+  `delegate flakes` for the round: `verify-1.log` keeps what the failed run actually said.
+  The rule is the one above applied twice: **a repo whose verify flakes twice gets its own
+  fix-at-source task** — never a bigger retry budget, never a skip, never a loosened test.
 - **Deploy gaps:** check compose files that list env vars one by one. A new setting that isn't
   in the list never reaches the app.
 

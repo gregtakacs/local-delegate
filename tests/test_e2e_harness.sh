@@ -170,10 +170,11 @@ check "failing harness probe: the config files were still written (not aborted m
 # ============================================================================
 # 7. hygiene: the run created no stray files in the repo. A temp dir leaked into the checkout or a
 #    file written at the repo root would show up as an untracked entry; the test's own fixtures
-#    (test_e2e_harness.sh, e2e-rig.sh) and any tracked edits are not litter, so they are allowed.
+#    (test_e2e_harness.sh, e2e-rig.sh), the verify-flake feature's sources awaiting their commit
+#    (lib/flakes.py, tests/test_verify_retry.sh), and any tracked edits are not litter.
 # ============================================================================
 litter=$(git -C "$here" status --porcelain 2>/dev/null \
-         | grep -E '^\?\?' | grep -vE '^(\?\? )?tests/(test_e2e_harness|e2e-rig)\.sh$' || true)
+         | grep -E '^\?\?' | grep -vE '^(\?\? )?(tests/(test_e2e_harness|e2e-rig|test_verify_retry)\.sh|lib/flakes\.py)$' || true)
 check "test leaves no stray untracked files in the repo" "[ -z \"\$litter\" ]"
 
 if [ "$fail" = 0 ]; then echo "PASS test_e2e_harness"; else echo "FAIL test_e2e_harness"; fi

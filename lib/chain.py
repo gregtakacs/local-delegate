@@ -62,6 +62,10 @@ PLAN.json (written by the orchestrator, normally next to the specs):
     "grants": ["orb-desk"],                     # optional: named access profiles (docs/grants.md);
     "allow": ["flash"],                         #   a step may set its own "grants"/"allow" too
     "retries": 2,                               # extra in-session rounds per step on failure
+    "verify_retries": 1,                        # optional: re-runs a failed harness verify gets when
+                                                #   the worker said done (a pass on a re-run is done, and
+                                                #   the flake is logged). A step may set its own.
+                                                #   Default 1; 0 keeps the old one-and-only verify.
     "timeout": 5400,                            # optional, per round
     "here": false,                              # optional: in place, see below
     "steps": [
@@ -646,6 +650,13 @@ def step_access(plan, s):
     return out
 
 
+def step_verify_retries(plan, s):
+    """`--verify-retries` for this step: the step's key wins over the plan's; absent, the flag is
+    not passed and `delegate run` resolves it from the environment, then from the default of 1."""
+    v = s.get("verify_retries", plan.get("verify_retries"))
+    return ["--verify-retries", str(int(v))] if isinstance(v, int) and not isinstance(v, bool) else []
+
+
 def run(plan):
     retries = int(plan.get("retries", 2))
     common = []
@@ -709,7 +720,7 @@ def run(plan):
             note(f"{label}: starting " + ("in place" if here else f"from {base}"))
             r = subprocess.run([DELEGATE, "run", s["_spec"], "--repo", plan["repo"], "--name", s["name"],
                                 *([] if here else ["--base", base]), "--verify", verify, *common,
-                                *step_access(plan, s), *hard],
+                                *step_access(plan, s), *hard, *step_verify_retries(plan, s)],
                                stdout=subprocess.DEVNULL)
             if r.returncode not in (0,):
                 n, rep = last_report(tid)
@@ -753,7 +764,8 @@ def run(plan):
             msg_file.write_text(retry_message(rep or {}, tid, n, scope_paths))
             # the plan's verify, not the one the task was started with: an edited plan takes effect
             subprocess.run([DELEGATE, "continue", tid, str(msg_file),
-                            "--verify", step_verify(s, None if here else base)],
+                            "--verify", step_verify(s, None if here else base),
+                            *step_verify_retries(plan, s)],
                            stdout=subprocess.DEVNULL)
         base = f"delegate/{s['name']}"
 

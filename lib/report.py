@@ -303,7 +303,15 @@ def cmd_report(a):
         status = "no-status"  # finished without the §13 block: treat as partial
 
     verify_rc = None if a.verify_rc in ("", None) else int(a.verify_rc)
-    if status == "done" and verify_rc not in (None, 0):
+    # A flaked verify (see --verify-retries in bin/delegate): the caller normalized rc to 0 and
+    # hands us the record of the failed runs. The round is done; the flake goes beside it.
+    flaky = None
+    if getattr(a, "verify_flaky", ""):
+        try:
+            flaky = json.loads(a.verify_flaky)
+        except ValueError:
+            flaky = None
+    if status == "done" and verify_rc not in (None, 0) and not flaky:
         status = "done-but-verify-failed"
 
     stderr_tail = clip(read_text(a.stderr), 15)
@@ -362,6 +370,10 @@ def cmd_report(a):
         L.append("```")
         L.append(clip(verify_log, VERIFY_TAIL_LINES, "tail"))
         L.append("```")
+        if flaky:
+            L.append("")
+            L.append(f"VERIFY FLAKE: run 1 failed (exit {flaky.get('first_rc')}), "
+                     f"run {int(flaky.get('failed_runs', 0)) + 1} passed — logged to flakes.jsonl")
     if "SECURITY:" in read_text(a.stderr):
         L.insert(4, "**SECURITY: the worker modified the worktree's .git pointer (restored). Review this round's diff with suspicion.**")
     nudges = re.findall(r"^nudge: (\S+)(?:\s|$)", read_text(a.stderr), re.M)
@@ -392,6 +404,7 @@ def cmd_report(a):
         json.dump({**s, "id": a.id, "round": int(a.round), "status": status,
                    "worker_status": worker_status, "exit": exit_code,
                    "duration_s": int(a.duration), "verify_rc": verify_rc,
+                   **({"verify_flaky": flaky} if flaky else {}),
                    "commit": a.commit, "model": a.model,
                    # what the round row's `todos` and `worker_report` are built from, kept here so
                    # `delegate ledger import` rebuilds the same two fields from a stored round
@@ -441,7 +454,7 @@ def main():
     ap.add_argument("cmd", choices=["report"])
     for k in ("id", "round", "events", "stderr", "exit", "duration", "model", "worktree",
               "branch", "base", "base-sha", "commit", "diffstat", "evidence", "verify-cmd",
-              "verify-rc", "verify-log", "out-md", "out-json", "aborted", "access"):
+              "verify-rc", "verify-log", "verify-flaky", "out-md", "out-json", "aborted", "access"):
         ap.add_argument("--" + k, default="")
     cmd_report(ap.parse_args())
 

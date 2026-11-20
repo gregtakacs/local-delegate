@@ -432,6 +432,8 @@ lock_task() {
 # never from a repo: a worker must not be able to grant itself anything. `--orb FILE` is the
 # built-in orb grant. A task from before grants is resolved from its saved --orb/--egress.
 grants_py() { python3 "$DELEGATE_HOME/lib/grants.py" "$@"; }
+# the flake ledger (lib/flakes.py): failed-then-passed harness verifies, and the plan's retry key
+flakes_py() { python3 "$DELEGATE_HOME/lib/flakes.py" "$@"; }
 grants_file() { printf '%s/grants.json' "$TASK_DIR"; }
 grants_resolve_args() { # the resolve flags for this task's saved state
   local g out=()
@@ -1099,16 +1101,48 @@ finalize_round() { # N RD VERIFY RC START END
   fi
   echo "$commit" > "$rd/commit"
 
+  local FLAKE_RC="" vdone=0               # FLAKE_RC: exit of the FIRST run when a re-run saved the round
   if [ -n "$verify" ] && [ "$was_aborted" = 0 ]; then
     phase "$rd" verifying
     note "round $n: running verify: $(verify_shown "$verify")"
-    printf '$ %s\n' "$(verify_shown "$verify")" > "$rd/verify.log"
     local keep="$TASK_DIR/evidence/verify-r$n"
     rm -rf "$keep"
-    run_limited "$DELEGATE_VERIFY_TIMEOUT" "v$n" run_worker "v$n" bash -lc "$(verify_wrapped "$verify" "$keep")" >> "$rd/verify.log" 2>&1 || vrc=$?
+    # a done round whose gate reds once may meet a flaky suite, not broken work: re-run the
+    # same command up to VRETRIES extra times. verify.log stays the FINAL run; every failed
+    # run that led to a re-run is kept beside it as verify-<run>.log, whatever the outcome —
+    # that evidence is what the fix-at-source task will read.
+    local vtries vrun=1 vlog i
+    vtries=${VERIFY_RETRIES:-${DELEGATE_VERIFY_RETRIES:-1}}
+    [[ "$vtries" =~ ^[0-9]+$ ]] || vtries=0
+    while :; do
+      vrc=""; vlog="$rd/verify-run-$vrun.log"
+      printf '$ %s\n' "$(verify_shown "$verify")" > "$vlog"
+      run_limited "$DELEGATE_VERIFY_TIMEOUT" "v$n" run_worker "v$n" bash -lc "$(verify_wrapped "$verify" "$keep")" >> "$vlog" 2>&1 || vrc=$?
+      vrc=${vrc:-0}
+      [ "$vrc" = 0 ] && break                       # green: this run is the round's verdict
+      [ "${status_line:-}" = "STATUS: done" ] || break   # only a done round may be re-run
+      [ "$vrun" -lt "$((vtries + 1))" ] || break         # the re-run budget is spent
+      [ "$vrun" = 1 ] && FLAKE_RC=$vrc
+      vrun=$((vrun + 1))
+      note "round $n: verify failed (exit $vrc); re-running ($vrun of $((vtries + 1))) — only because the worker said done"
+    done
+    # the runs before the final one all failed: each keeps its own log; verify.log is the final run
+    for ((i = 1; i < vrun; i++)); do mv -f "$rd/verify-run-$i.log" "$rd/verify-$i.log"; done
+    mv -f "$vlog" "$rd/verify.log"
     reap_leftovers "verify $n" "$rd/verify.log"
-    vrc=${vrc:-0}
     verify_keep_note "$rd/verify.log" "$keep" "$vrc"
+    if [ -n "$FLAKE_RC" ] && [ "$vrc" = 0 ]; then
+      vdone=1
+      note "round $n: verify flaked — run 1 exit $FLAKE_RC, run $vrun passed; still done, the flake is logged (delegate flakes)"
+    fi
+  fi
+
+  # a passing re-run is a PASS: report.py gets rc 0 and the flake flag, so the round closes
+  # `done` with verify_flaky in its record; a red final run needs nothing here.
+  local flaky=""
+  if [ "$vdone" = 1 ]; then
+    flaky="{\"failed_runs\": $((vrun - 1)), \"first_rc\": $FLAKE_RC}"
+    vrc=0
   fi
 
   wgit diff --no-ext-diff --stat=120 "$BASE_SHA" "$commit" > "$rd/diffstat" || true
@@ -1117,7 +1151,7 @@ finalize_round() { # N RD VERIFY RC START END
     --exit "$rc" --duration "$((end - start))" --model "$MODEL" \
     --worktree "$WORKTREE" --branch "$BRANCH" --base "$BASE_REF" --base-sha "$BASE_SHA" \
     --commit "$commit" --diffstat "$rd/diffstat" --evidence "$TASK_DIR/evidence" \
-    --verify-cmd "$verify" --verify-rc "$vrc" --verify-log "$rd/verify.log" \
+    --verify-cmd "$verify" --verify-rc "$vrc" --verify-log "$rd/verify.log" --verify-flaky "$flaky" \
     --aborted "$was_aborted" --access "$(grants_py summary "$(grants_file)" 2>/dev/null)" \
     --out-md "$rd/report.md" --out-json "$rd/report.json" > "$rd/.report-stdout"
   if [ "${RAW:-0}" = 1 ]; then
@@ -1131,6 +1165,20 @@ finalize_round() { # N RD VERIFY RC START END
   # The ledger rows for this round (t-2): after report.json exists, before anything that ends
   # the round. ledger_record_round cannot fail us — worst case it is one `warn:` line.
   ledger_record_round "$n" "$rd" "$rc" "$start" "$end" || true
+  # the flake ledger: one line per failed-then-passed round, never fatal (a round's value is
+  # its own); the file is created 0600 by flakes.py and re-tightened here in the same spirit
+  # as the ledger. The tail is read from verify-1.log, the first failed run.
+  if [ "$vdone" = 1 ]; then
+    if flakes_py append --file "$DELEGATE_STATE/flakes.jsonl" --repo "$REPO" --task "$ID" \
+        --round "$n" --verify "$verify" --rc "$FLAKE_RC" --log "$rd/verify-1.log" \
+        >"$rd/.flake-line" 2>&1; then
+      chmod 600 "$DELEGATE_STATE/flakes.jsonl" 2>/dev/null || true
+      mv -f "$rd/.flake-line" "$rd/flake.line"
+    else
+      warn "round $n: the flake ledger line was not written: $(head -c 200 "$rd/.flake-line" 2>/dev/null || true)"
+      rm -f "$rd/.flake-line"
+    fi
+  fi
   rm -f "$TASK_DIR/.abort"
   grant_unlock
   progress_stop "$rd" "$(python3 -I -c 'import json,sys;print(json.load(open(sys.argv[1]))["status"])' "$rd/report.json" 2>/dev/null || echo finished)"
@@ -1138,7 +1186,7 @@ finalize_round() { # N RD VERIFY RC START END
 
 # ---------------------------------------------------------------- commands ---------
 cmd_run() {
-  local spec="" repo="" name="" base="" model="" verify="" service="" secs=$DELEGATE_TIMEOUT
+  local spec="" repo="" name="" base="" model="" verify="" service="" secs=$DELEGATE_TIMEOUT vretries=""
   local copies=() reads=() github=0 egress=$DELEGATE_EGRESS orbfile="" orbflash=0 here=0 raw=0
   local grants=() allows=()
   local effort=normal          # the row records this, never the CLI (spec t-2 §Effort)
@@ -1159,6 +1207,7 @@ cmd_run() {
       --model) model=$2; shift 2 ;;
       --hard) model=$DELEGATE_MODEL_HARD; effort=hard; shift ;;
       --verify) verify=$2; shift 2 ;;
+      --verify-retries) vretries=$2; shift 2 ;;
       --copy) copies+=("$2"); shift 2 ;;
       --service) service=$2; shift 2 ;;
       --timeout) secs=$2; shift 2 ;;
@@ -1171,6 +1220,22 @@ cmd_run() {
   [ -n "$spec" ] || die "usage: delegate run SPEC.md [--repo DIR] [--name SLUG] [--base REF] [--verify CMD] ..."
   [ "$spec" = - ] && { spec=$(mktemp); cat > "$spec"; }
   [ -s "$spec" ] || die "spec file is empty or missing: $spec"
+  # how many re-runs a failed harness verify gets when the worker said done (see
+  # finalize_round): --verify-retries > plan key verify_retries > DELEGATE_VERIFY_RETRIES > 1.
+  # Persisted into meta.env below, so `finish`, a bare `continue` and the chain's own
+  # retries keep the same N as the round that started it.
+  if [ -z "$vretries" ]; then
+    # a JSON arg must stay one word; a chain passes the flag explicitly, this path is for a
+    # direct caller (or a wrapper) that exports the plan as PLAN_JSON or PLAN_JSON_FILE
+    if [ -n "${PLAN_JSON:-}" ]; then
+      vretries=$(flakes_py plan-retries --plan-json "$PLAN_JSON" 2>/dev/null || true)
+    elif [ -n "${PLAN_JSON_FILE:-}" ]; then
+      vretries=$(flakes_py plan-retries --plan-file "$PLAN_JSON_FILE" 2>/dev/null || true)
+    fi
+  fi
+  vretries=${vretries:-${DELEGATE_VERIFY_RETRIES:-1}}
+  [[ "$vretries" =~ ^[0-9]+$ ]] || die "--verify-retries / DELEGATE_VERIFY_RETRIES: expected a non-negative integer, got: $vretries"
+  VERIFY_RETRIES=$vretries
   case "$service" in ""|postgres) ;; *) die "--service: only 'postgres' is supported" ;; esac
   if [ "$here" = 1 ]; then
     # Supervised, in place: the worker edits YOUR checkout, natively, as you. No worktree, no
@@ -1341,7 +1406,7 @@ cmd_run() {
   SERVICE=$service
   {
     printf 'ID=%q\nSLUG=%q\nREPO=%q\nWORKTREE=%q\nBRANCH=%q\n' "$ID" "$SLUG" "$repo" "$WORKTREE" "$BRANCH"
-    printf 'BASE_REF=%q\nBASE_SHA=%q\nGIT_COMMON=%q\nMODEL=%q\nVERIFY=%q\n' "$BASE_REF" "$BASE_SHA" "$GIT_COMMON" "$MODEL" "$verify"
+    printf 'BASE_REF=%q\nBASE_SHA=%q\nGIT_COMMON=%q\nMODEL=%q\nVERIFY=%q\nVERIFY_RETRIES=%q\n' "$BASE_REF" "$BASE_SHA" "$GIT_COMMON" "$MODEL" "$verify" "$VERIFY_RETRIES"
     printf 'SERVICE=%q\nCOPIED=%q\nSESSION=\nCREATED=%q\nWT_GITDIR=%q\n' "$SERVICE" "$COPIED" "$(date -Is)" "$WT_GITDIR"
     printf 'READS=%q\nGITHUB=%q\nEGRESS=%q\nHERE=%q\nRUNNER=%q\nRAW=%q\n' "$READS" "$GITHUB" "$EGRESS" "$HERE" "$DELEGATE_RUNNER" "$raw"
     printf 'ORB_FILE=%q\nORB_LABEL=%q\nORB_BASE_MAC=%q\nORB_SERIAL=%q\nORB_IP=%q\nORB_FLASH=%q\n' \
@@ -1424,13 +1489,14 @@ cmd_continue() {
   local id=${1:-}
   [ -n "$id" ] || die "usage: delegate continue ID (FEEDBACK.md | - | -m \"text\"...) [--verify CMD] [--model M | --hard] [--timeout S]"
   shift
-  local fb="" msgs=() verify_set=0 verify="" secs=$DELEGATE_TIMEOUT model="" raw_flag="" effort=normal
+  local fb="" msgs=() verify_set=0 verify="" secs=$DELEGATE_TIMEOUT model="" raw_flag="" effort=normal vretries=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --raw) raw_flag=1; shift ;;
       --grant|--allow|--orb|--orb-flash|--egress) die "continue: $1 can't change a task's access; a task keeps the grants it was run with (start a new task for different access)" ;;
       -m|--message) msgs+=("$2"); shift 2 ;;
       --verify) verify=$2; verify_set=1; shift 2 ;;
+      --verify-retries) vretries=$2; shift 2 ;;
       --model) model=$2; shift 2 ;;
       --hard) model=$DELEGATE_MODEL_HARD; effort=hard; shift ;;
       --timeout) secs=$2; shift 2 ;;
@@ -1458,6 +1524,12 @@ cmd_continue() {
     if [ -n "${CHAIN:-}" ] && now=$(chain_step_verify); then
       [ "$now" = "$VERIFY" ] || { meta_set VERIFY "$now"; verify=$now; note "verify for $id follows the chain plan's current step"; }
     fi
+  fi
+  # the retry count, like the verify command, is the task's from now on (finish and later
+  # rounds keep the N this round was told to use)
+  if [ -n "$vretries" ]; then
+    [[ "$vretries" =~ ^[0-9]+$ ]] || die "--verify-retries: expected a non-negative integer, got: $vretries"
+    meta_set VERIFY_RETRIES "$vretries"; VERIFY_RETRIES=$vretries
   fi
   [ -n "$model" ] && MODEL=$model
   # `--hard` on continue upgrades the recorded effort; without it the record stands (t-2 §Effort).
@@ -2945,19 +3017,22 @@ usage() {
 delegate — hand implementation work to a self-hosted coding model, then review it.
 
   delegate run SPEC.md [--here] [--raw] [--repo DIR] [--name SLUG] [--base REF] [--verify CMD]
+                       [--verify-retries N]
                        [--copy PATH]... [--read PATH]... [--github] [--service postgres] [--grant NAME]... [--allow GUARD]...
                        [--orb .orb-target [--orb-flash]]
                        [--egress filtered|open] [--model M | --hard] [--timeout S]
       New worktree + branch delegate/SLUG from REF (default: current branch), the worktree filed
       under its project at <DELEGATE_WORKTREES>/<project>/<slug>; run the worker on the spec,
       commit its work, run CMD, print the report. ('-' reads the spec from stdin.)
+      A failed CMD re-runs up to N extra times when the worker reported done (default 1): a
+      passing re-run is still done, the flake is logged (see `delegate flakes`).
       --here: supervised, in place — the worker edits your checkout directly, natively and
       unsandboxed (no worktree, branch, container, proxy or commits); rounds are snapshots
       under refs/delegate/SLUG/, so diff/report/continue work as usual. For when you watch it.
       --raw: the spec text IS the prompt, verbatim (no task header, no spec wrapper), and the
       output is the worker's last message, verbatim, instead of the report (which stays on
       disk). `continue ID --raw -` (or -m) sends a follow-up verbatim the same way.
-  delegate continue ID (FEEDBACK.md | - | -m "text" [-m "text"]...) [--verify CMD] [--model M | --hard]
+  delegate continue ID (FEEDBACK.md | - | -m "text" [-m "text"]...) [--verify CMD] [--verify-retries N] [--model M | --hard]
       Send review feedback into the same worker session; one more round, one more commit.
       Each -m becomes one numbered item.
   delegate stop ID                 abort the running round; its work so far is committed + reported
@@ -3038,6 +3113,10 @@ delegate — hand implementation work to a self-hosted coding model, then review
                                    --release installs; a dev checkout is updated with git):
                                    `delegate update --help`
   delegate doctor [--quick]        check config, image, endpoint, and tool calling
+  delegate flakes [--repo DIR] [--json]
+                                   rounds whose FIRST harness verify failed and a re-run passed
+                                   (a flaky verify is still done — the flake is what gets logged),
+                                   newest first, grouped by repo; --json prints the raw ledger rows
 EOF
 }
 
@@ -3079,6 +3158,9 @@ main() {
     rm) cmd_rm "$@" ;;
     grant) cmd_grant "$@" ;;
     ledger) cmd_ledger "$@" ;;
+    # the flake ledger is task-independent (a repo-level file), so this reads the state dir
+    # directly; --repo and --json belong to flakes.py, which knows how to group and clip
+    flakes) flakes_py list --file "$DELEGATE_STATE/flakes.jsonl" "$@" ;;
     stats) cmd_stats "$@" ;;
     build) cmd_build "$@" ;;
     update) cmd_update "$@" ;;
