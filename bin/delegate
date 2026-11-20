@@ -632,6 +632,13 @@ ensure_egress() {
   img=$(docker image inspect -f '{{.Id}}' "$DELEGATE_EGRESS_IMAGE" 2>/dev/null) \
     || die "egress proxy image $DELEGATE_EGRESS_IMAGE missing — run: delegate build"
   want=$(printf '%s|%s|%s' "$allow" "${hargs[*]}" "$img" | sha256sum | cut -c1-16)
+  # One check-and-recreate at a time: tasks started together all saw an outdated proxy and each
+  # ran `rm -f` + `run`, and the second died on "removal of container delegate-egress is already
+  # in progress" (2026-11-20). The lock is held to the end of this function; `have` is read after
+  # taking it, so a waiter sees the proxy the first one made.
+  local lockfd
+  exec {lockfd}>"$DELEGATE_STATE/.egress.lock"
+  flock "$lockfd"
   have=$(docker inspect -f '{{index .Config.Labels "delegate.egress.cfg"}}' "$EGRESS_NAME" 2>/dev/null || true)
   if [ -n "$have" ] && [ "$have" != "$want" ] && \
      [ -n "$(docker ps -q --filter label=delegate.task --filter name='^delegate-.*-(r|v|x)[0-9]')" ]; then
@@ -653,6 +660,7 @@ ensure_egress() {
   for n in $(docker network ls --filter label=delegate.task --format '{{.Name}}'); do
     docker network connect "$n" "$EGRESS_NAME" 2>/dev/null || true
   done
+  exec {lockfd}>&-
 }
 
 # A grant with network.mode = "allow": this task's own squid, the same image, allowing the
