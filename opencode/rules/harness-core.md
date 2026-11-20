@@ -126,13 +126,15 @@ check.
 failure, then reproduce it *away* with one named change to the environment; without that pair, treat
 it as real and investigate it.
 
-## 7a. Run your step's scope; verify with the full gate
+## 7a. Run your step's scope; verify with the check your plan assigns
 
-A worker changes only what its step's scope names — nothing outside it. The step's verify command
-runs the repo's **full gate** (the whole test set, not only the tests for this change), so a passing
-verify is proof the change broke nothing else. Do not run just your own step's tests and stop: the
-full gate is the contract, and an interactive reviewer writes it into each step for exactly this
-reason. If the gate fails on something genuinely outside your scope, report it rather than editing it.
+A worker changes only what its step's scope names — nothing outside it. The step's verify runs the
+check its plan assigns: an ordinary step may run the plan's quick `step_gate` (its own tests plus a
+scope guard); a step marked `hard`, and the last step of a chain, run the repo's **full gate** (the
+whole test set, not only the tests for this change), so a passing verify there is proof the change
+broke nothing else; the orchestrator runs the full gate once more on the finished slice. Run the
+check your step's verify names — not less, and not the whole suite on every edit while you work. If
+a check fails on something genuinely outside your scope, report it rather than editing it.
 
 ## 8. Boundaries
 
