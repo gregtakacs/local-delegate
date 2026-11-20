@@ -741,7 +741,16 @@ VERIFY_KEEP_SIZE=2048k      # find -size bound: a stage log, not a build tree
 verify_wrapped() { # VERIFY KEEP — the command the worker container runs for this verify
   local v=$1 keep=$2
   [ "$DELEGATE_RUNNER" = docker ] || { printf '%s' "$v"; return 0; }
-  printf '__dvk=%q\n__dvm=$(mktemp /tmp/.delegate-verify.XXXXXX)\n(\n%s\n)\n__dvrc=$?\n' "$keep" "$v"
+  # The verify runs like the host the work will meet (DELEGATE_VERIFY_MIRROR_HOST=1, the default):
+  # the host's umask, and XDG_CONFIG_HOME set when the host sets one (to the worker's own config
+  # dir, never the host's). Tests that inherit a group-writable umask or an XDG path then fail here,
+  # in the verify, instead of only on the host after the task was accepted.
+  local mirror=""
+  if [ "${DELEGATE_VERIFY_MIRROR_HOST:-1}" = 1 ]; then
+    mirror="umask $(umask)"
+    [ -n "${XDG_CONFIG_HOME:-}" ] && mirror="$mirror; export XDG_CONFIG_HOME=\"\$HOME/.config\""
+  fi
+  printf '__dvk=%q\n__dvm=$(mktemp /tmp/.delegate-verify.XXXXXX)\n(\n%s\n%s\n)\n__dvrc=$?\n' "$keep" "$mirror" "$v"
   printf 'mkdir -p "$__dvk" 2>/dev/null && find /tmp -xdev -maxdepth 3 -type f -name "*.log" -newer "$__dvm" -size -%s 2>/dev/null | head -n %s | while IFS= read -r __f; do cp -p "$__f" "$__dvk/$(printf %%s "${__f#/tmp/}" | tr / _)" 2>/dev/null; done\n' "$VERIFY_KEEP_SIZE" "$VERIFY_KEEP_MAX"
   printf 'rm -f "$__dvm"\nexit $__dvrc\n'
 }
