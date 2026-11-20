@@ -1155,17 +1155,18 @@ finalize_round() { # N RD VERIFY RC START END
   fi
 
   wgit diff --no-ext-diff --stat=120 "$BASE_SHA" "$commit" > "$rd/diffstat" || true
-  # The round's ADDED paths, for the new-tests check (lib/newtests.py): report.py warns when a
-  # test file the round added appears in neither the verify command nor its log. A warning
+  # The round's ADDED-OR-MODIFIED paths, for the new-tests check (lib/newtests.py): report.py
+  # warns when a test file the round added OR changed appears in neither the verify command nor
+  # its log — a new test method in an existing module is the same miss as a new file. A warning
   # channel only — an unfetchable list stays empty and never touches the round's verdict.
-  wgit diff --no-ext-diff --diff-filter=A --name-only --no-renames \
-    "$BASE_SHA" "$commit" > "$rd/added" 2>/dev/null || : > "$rd/added"
+  wgit diff --no-ext-diff --diff-filter=AM --name-only --no-renames \
+    "$BASE_SHA" "$commit" > "$rd/added_or_changed" 2>/dev/null || : > "$rd/added_or_changed"
   python3 "$DELEGATE_HOME/lib/report.py" report \
     --id "$ID" --round "$n" --events "$rd/events.jsonl" --stderr "$rd/stderr.log" \
     --exit "$rc" --duration "$((end - start))" --model "$MODEL" \
     --worktree "$WORKTREE" --branch "$BRANCH" --base "$BASE_REF" --base-sha "$BASE_SHA" \
     --commit "$commit" --diffstat "$rd/diffstat" --evidence "$TASK_DIR/evidence" \
-    --added "$rd/added" \
+    --added-or-changed "$rd/added_or_changed" \
     --verify-cmd "$verify" --verify-rc "$vrc" --verify-log "$rd/verify.log" --verify-flaky "$flaky" \
     --aborted "$was_aborted" --access "$(grants_py summary "$(grants_file)" 2>/dev/null)" \
     --out-md "$rd/report.md" --out-json "$rd/report.json" > "$rd/.report-stdout"

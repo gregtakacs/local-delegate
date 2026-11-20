@@ -14,6 +14,17 @@ APIPID=""
 trap 'rig_cleanup' EXIT
 rig_init
 
+# The repo's untracked set BEFORE this run: those files belong to whoever is working in the
+# checkout (a feature awaiting its commit, notes, a scratch dir), and this test did not create
+# them. §7 compares against this snapshot, so litter is only what APPEARED during the run and no
+# feature ever needs adding to an allowlist here.
+UNTRACKED0=$T/untracked-before
+git -C "$here" status --porcelain 2>/dev/null | grep -E '^\?\? ' | sed -n 's/^?? //p' | sort > "$UNTRACKED0"
+litter_now() {
+  git -C "$here" status --porcelain 2>/dev/null | grep -E '^\?\? ' | sed -n 's/^?? //p' | sort \
+    | comm -13 "$UNTRACKED0" -
+}
+
 # The real ~ must never be observed: HOME is swapped before every installer/doctor call. Prove the
 # rig does that and that a pre-existing ~/.claude, ~/.config/opencode in the caller's HOME is a
 # decoy the run cannot reach (it lives under the ORIGINAL $HOME, which no helper passes through).
@@ -169,13 +180,17 @@ check "failing harness probe: the config files were still written (not aborted m
 
 # ============================================================================
 # 7. hygiene: the run created no stray files in the repo. A temp dir leaked into the checkout or a
-#    file written at the repo root would show up as an untracked entry; the test's own fixtures
-#    (test_e2e_harness.sh, e2e-rig.sh), a feature's sources awaiting their commit (lib/flakes.py,
-#    tests/test_verify_retry.sh, lib/newtests.py, tests/test_new_tests_check.sh), and any tracked
-#    edits are not litter.
+#    file written at the repo root shows up as an untracked entry that was not there before the
+#    run; the comparison is the before/after set (see litter_now at the top), so the checkout's
+#    own pending files and any tracked edits are not litter. The probe first PROVES the check
+#    bites: a file appearing now must be listed, and the tree must read clean once it is removed.
 # ============================================================================
-litter=$(git -C "$here" status --porcelain 2>/dev/null \
-         | grep -E '^\?\?' | grep -vE '^(\?\? )?(tests/(test_e2e_harness|e2e-rig|test_verify_retry|test_new_tests_check)\.sh|lib/(flakes|newtests)\.py)$' || true)
+PROBE=$here/e2e-stray-probe.txt
+printf 'probe\n' > "$PROBE"
+check "the stray-files check bites: a file left during the run is listed" \
+  'litter_now | grep -qxF e2e-stray-probe.txt'
+rm -f "$PROBE"
+litter=$(litter_now)
 check "test leaves no stray untracked files in the repo" "[ -z \"\$litter\" ]"
 
 if [ "$fail" = 0 ]; then echo "PASS test_e2e_harness"; else echo "FAIL test_e2e_harness"; fi

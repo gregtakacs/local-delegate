@@ -1,14 +1,15 @@
 #!/bin/bash
-# spec: new-tests-check. A round that ADDED a test file its harness verify never ran gets a
-# warning line, nowhere else: report.json's "new_tests_unrun", the same line in report.md's
-# verify section (so in the round's printed summary), and the chain prints it for the step.
-# lib/newtests.py answers the list — covered by the path, the dotted module, the file name, a
-# path or dotted package prefix token, a Go package dir or `./...` run from an ancestor, or a
-# bare runner (one invoked with no file/module argument at all); non-test added files never
-# appear; the status and the exit code never move. No docker, no model, no network: the rules
-# run through the module CLI; the report through a fake round (the test_verify_retry pattern:
-# finalize_round extracted, git and report.py real); the chain print through a fake delegate
-# (the test_step_gate pattern).
+# spec: new-tests-check. A round that ADDED OR CHANGED a test file its harness verify never ran
+# gets a warning line, nowhere else: report.json's "new_or_changed_tests_unrun", the same line
+# ("TESTS NOT IN VERIFY (added or changed): …") in report.md's verify section — so in the
+# round's printed summary — and the chain's line for the step. lib/newtests.py answers the list:
+# covered by the path, the dotted module, the file name, a path or dotted package prefix token,
+# a Go package dir or `./...` run from an ancestor, or a bare runner (one invoked with no
+# file/module argument at all); non-test changed files never appear; the status and the exit
+# code never move. No docker, no model, no network: the rules run through the module CLI; the
+# report through report.py directly and through one fake real round (the test_verify_retry
+# pattern: finalize_round extracted, git and report.py real); the chain print through a fake
+# delegate (the test_step_gate pattern).
 set -u
 here=$(cd "$(dirname "$0")/.." && pwd)
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
@@ -18,13 +19,15 @@ export DELEGATE_VERIFY_TIMEOUT=60
 mkdir -p $DELEGATE_STATE
 
 # ---------------------------------------------------------------- 1. the rules -------------
-# uncovered(added, cmd, ""): the module CLI is the test seam; the answer lands in $T/unc.out.
-unc() { # unc <verify-cmd> <log (a $'..' string, "-" for none)> <added paths...>
+# uncovered(paths, cmd, log): the module CLI is the test seam; the answer lands in $T/unc.out.
+# A path is one the round added OR changed — the rules do not care which, only its shape and
+# whether the verify reached it.
+unc() { # unc <verify-cmd> <log (a $'..' string, "-" for none)> <changed paths...>
   local cmd=$1 log=$2 logf=/dev/null
   if [ "$log" != "-" ]; then printf '%s\n' "$log" > "$T/vlog"; logf="$T/vlog"; fi
   shift 2
   : > "$T/added"; for p in "$@"; do printf '%s\n' "$p" >> "$T/added"; done
-  python3 "$here/lib/newtests.py" uncovered --added "$T/added" --verify-cmd "$cmd" --verify-log "$logf" > "$T/unc.out"
+  python3 "$here/lib/newtests.py" uncovered --added-or-changed "$T/added" --verify-cmd "$cmd" --verify-log "$logf" > "$T/unc.out"
 }
 cov() { local p=$2; unc "$1" - "$p"; check "covered: $p by [$1]" '[ ! -s "$T/unc.out" ]'; }
 unr() { local p=$2; unc "$1" - "$p"; check "uncovered: $p by [$1]" "[ \"\$(cat '$T/unc.out')\" = '$p' ]"; }
@@ -49,7 +52,8 @@ cov "bash -c 'pytest -q'" tests/test_gate.sh                              # runn
 cov "make test" tests/test_gate.sh
 cov "cargo test -q" rust/crate/tests/x_test.rs                            # (not a shape: ignored anyway)
 cov "go test ./..." cmd/srv/x_test.go
-unr "pytest hub/tests/test_old.py" hub/tests/test_wv43_page.py            # the measured miss
+unr "pytest hub/tests/test_old.py" hub/tests/test_wv43_page.py            # the measured miss (added)
+unr "pytest hub/tests/test_other.py" hub/tests/test_c1a1_browser.py        # the second shape (changed)
 unr "cd app/cmd/api && go test ./..." app/pkg/x_test.go                   # ./... from a SIBLING
 unr "pytest tests/test_other.sh" tests/test_gate.sh                       # a different shell test
 unr "python3 tools/run_tests.py tests/test_gate.sh" docs/x_test.py        # scoped script run (token `tests`)
@@ -70,42 +74,51 @@ unc "pytest hub/tests/test_old.py" $'collected 1 item\n.                    [100
 check "log dots are not a run receipt" '[ "$(cat "$T/unc.out")" = hub/tests/test_new.py ]'
 
 # ------------------------------------------------- 2. the report: key and line -------------
-# report.py stands on its own: one fake round's events, verify cmd/log and added list.
-run_report() { # run_report <verify-cmd> <added path> — sets RC and writes $T/r.md/.json, stdout to $T/r.out
-  printf '%s\n' "$2" > "$T/added"
-  local nl=$'\n' hdr=${1#*'# delegate chain: end of the scope gate'}   # the real verify.log header is stripped
-  if [ "$hdr" != "$1" ]; then hdr="[scope gate] ${hdr#$nl}"; fi
+# report.py stands on its own: one fake round's events, verify cmd/log and changed-path list.
+run_report() { # run_report <verify-cmd> <changed path>... — sets RC; writes $T/r.md/.json/.out
+  local cmd=$1; shift
+  printf '%s\n' "$@" > "$T/changed"
+  local nl=$'\n' hdr=${cmd#*'# delegate chain: end of the scope gate'}   # the real verify.log header is stripped
+  if [ "$hdr" != "$cmd" ]; then hdr="[scope gate] ${hdr#$nl}"; fi
   printf '$ %s\nRESULT ok\n' "$hdr" > "$T/v.log"
   printf '{"type":"text","timestamp":9000,"part":{"type":"text","text":"STATUS: done\\n\\nthe work"}}\n' > "$T/ev.jsonl"
   : > "$T/err"
   python3 "$here/lib/report.py" report --id t-nt --round 1 --events "$T/ev.jsonl" --stderr "$T/err" \
     --exit 0 --duration 5 --model m --worktree /wt --branch b --base main --base-sha abc \
-    --commit deadbeef --diffstat /dev/null --evidence "$T/ev" --verify-cmd "$1" --verify-rc 0 \
-    --verify-log "$T/v.log" --added "$T/added" --out-md "$T/r.md" --out-json "$T/r.json" \
+    --commit deadbeef --diffstat /dev/null --evidence "$T/ev" --verify-cmd "$cmd" --verify-rc 0 \
+    --verify-log "$T/v.log" --added-or-changed "$T/changed" --out-md "$T/r.md" --out-json "$T/r.json" \
     > "$T/r.out" 2>&1
   RC=$?
 }
-LINE='NEW TESTS NOT IN VERIFY: hub/tests/test_new.py — the verify never ran them'
+LINE='TESTS NOT IN VERIFY (added or changed): hub/tests/test_new.py — the verify never ran them'
 run_report "pytest hub/tests/test_old.py" hub/tests/test_new.py
 check "the warning never changes the exit code (report.py still exits $RC)" '[ "$RC" = 0 ]'
-check "report.json gains new_tests_unrun" 'grep -q "\"new_tests_unrun\"" "$T/r.json" && grep -q "\"hub/tests/test_new.py\"" "$T/r.json"'
+check "report.json gains new_or_changed_tests_unrun" 'grep -q "\"new_or_changed_tests_unrun\"" "$T/r.json" && grep -q "\"hub/tests/test_new.py\"" "$T/r.json"'
 check "report.md verify section gains the line" 'grep -qxF "$LINE" "$T/r.md"'
 check "the printed summary carries the line" 'grep -qxF "$LINE" "$T/r.out"'
 check "the line sits in the verify section, under its heading" \
-  'awk "/^## Verify/{v=1} v && /^NEW TESTS NOT IN VERIFY/{f=1} END{exit !f}" "$T/r.md"'
+  'awk "/^## Verify/{v=1} v && /^TESTS NOT IN VERIFY/{f=1} END{exit !f}" "$T/r.md"'
 check "status stays done despite the warning" 'grep -q "\"status\": \"done\"" "$T/r.json" && grep -q "STATUS (harness): \*\*done\*\*" "$T/r.md"'
+# the second miss shape: a CHANGED test module the verify never ran (a new method inside it)
+LINE2='TESTS NOT IN VERIFY (added or changed): hub/tests/test_c1a1_browser.py — the verify never ran them'
+run_report "pytest hub/tests/test_other.py" hub/tests/test_c1a1_browser.py
+check "a changed test module the verify skipped is listed" 'grep -q "\"new_or_changed_tests_unrun\"" "$T/r.json"'
+check "…and its line reads the same" 'grep -qxF "$LINE2" "$T/r.md"'
+run_report "pytest -q hub/tests/test_c1a1_browser.py" hub/tests/test_c1a1_browser.py
+check "a changed module the verify DID run: no key, no line" \
+  '! grep -q new_or_changed "$T/r.json" && ! grep -q "TESTS NOT IN VERIFY" "$T/r.md"'
 run_report "pytest hub/tests" hub/tests/test_new.py
-check "a covering verify: no key in report.json" '! grep -q new_tests_unrun "$T/r.json"'
-check "a covering verify: no line in report.md" '! grep -q "NEW TESTS NOT IN VERIFY" "$T/r.md"'
+check "a covering verify: no key in report.json" '! grep -q new_or_changed "$T/r.json"'
+check "a covering verify: no line in report.md" '! grep -q "TESTS NOT IN VERIFY" "$T/r.md"'
 run_report "pytest hub/tests/test_old.py" docs/plan.md
-check "a non-test added file: no key, no line" '! grep -q new_tests "$T/r.json" && ! grep -q "NEW TESTS" "$T/r.md"'
+check "a non-test changed file: no key, no line" '! grep -q new_or_changed "$T/r.json" && ! grep -q "TESTS NOT IN VERIFY" "$T/r.md"'
 # a chain step's verify: the scope gate carries the step's paths — listing them is not running them
 SGATE_FAKE=$(printf '# delegate chain: this step scope gate\n__dsc_re='\''^(hub/tests/test_new.py|hub/tests/test_old.py)$'\''\n# delegate chain: end of the scope gate\npytest hub/tests/test_old.py')
 run_report "$SGATE_FAKE" hub/tests/test_new.py
-check "a scope gate naming the file does not fake coverage" 'grep -q new_tests_unrun "$T/r.json"'
+check "a scope gate naming the file does not fake coverage" 'grep -q new_or_changed "$T/r.json"'
 SGATE_BARE=$(printf '# delegate chain: this step scope gate\n__dsc_re='\''^(hub/tests/test_new.py)$'\''\n# delegate chain: end of the scope gate\npytest -q')
 run_report "$SGATE_BARE" hub/tests/test_new.py
-check "a bare runner behind the gate covers (marker stripped)" '! grep -q new_tests_unrun "$T/r.json"'
+check "a bare runner behind the gate covers (marker stripped)" '! grep -q new_or_changed "$T/r.json"'
 
 # ------------------------------------------- 3. the round end: a fake real round ------------
 # finalize_round extracted (the test_verify_retry pattern): the added list, the verify, the
@@ -143,10 +156,13 @@ grep -q 'finalize_round() {' "$T/driver.sh" || { echo "FAIL extraction found no 
 
 R=$T/repo; mkdir -p $R/hub/tests; export DELEGATE_WT=$R
 git -C $R init -q -b main
-printf 'base\n' > $R/README.md; : > $R/hub/tests/test_old.py
+printf 'base\n' > $R/README.md
+printf 'def test_old_a(): assert True\n' > $R/hub/tests/test_old.py
 git -C $R add -A; git -C $R -c user.name=t -c user.email=t commit -qm initial
 BASE_SHA=$(git -C $R rev-parse HEAD)
-printf 'def test_page(): assert True\n' > $R/hub/tests/test_new.py    # what the round adds
+# what the round does: ADDS one test file and CHANGES another (the two measured miss shapes)
+printf 'def test_page(): assert True\n' > $R/hub/tests/test_new.py
+printf 'def test_old_a(): assert True\ndef test_old_b(): assert True\n' > $R/hub/tests/test_old.py
 git -C $R add -A; git -C $R -c user.name=t -c user.email=t commit -qm round
 TD=$T/state/t-round; mkdir -p "$TD/rounds/1"
 { printf 'ID=%q\nSLUG=%q\nREPO=%q\nWORKTREE=%q\nBRANCH=%q\n' t-round t-round "$R" "$R" delegate/t-round
@@ -163,15 +179,20 @@ round_over() { # round_over <verify-cmd> — one finalize_round over the fixture
     finalize_round 1 "$TD/rounds/1" "$1" 0 1 2 > "$T/finalize.out" 2>&1 )
   FR=$?
 }
-round_over "test -f hub/tests/test_old.py && echo RESULT ok"
+LINE3='TESTS NOT IN VERIFY (added or changed): hub/tests/test_new.py, hub/tests/test_old.py — the verify never ran them'
+round_over "test -f README.md && echo RESULT ok"          # touches neither test file
 check "the round ends 0 with the warning present" '[ "$FR" = 0 ]'
-check "the round records its added paths" 'grep -qx hub/tests/test_new.py "$TD/rounds/1/added"'
-check "the live report.json carries new_tests_unrun" 'grep -q "\"new_tests_unrun\"" "$TD/rounds/1/report.json"'
-check "the live report.md carries the line" 'grep -qxF "$LINE" "$TD/rounds/1/report.md"'
-check "the line reaches the printed round summary" 'grep -qxF "$LINE" "$T/finalize.out"'
-round_over "true hub/tests && echo RESULT ok"
-check "a covering verify: live report has no key" '! grep -q new_tests_unrun "$TD/rounds/1/report.json"'
-check "…and no line" '! grep -q "NEW TESTS NOT IN VERIFY" "$TD/rounds/1/report.md"'
+check "the round records its added AND changed paths" \
+  'grep -qx hub/tests/test_new.py "$TD/rounds/1/added_or_changed" && grep -qx hub/tests/test_old.py "$TD/rounds/1/added_or_changed"'
+check "a file the round did not touch is not listed" '! grep -qx README.md "$TD/rounds/1/added_or_changed"'
+check "the live report.json carries new_or_changed_tests_unrun" \
+  'grep -q "\"new_or_changed_tests_unrun\"" "$TD/rounds/1/report.json"'
+check "the live report.md lists both shapes on one line" 'grep -qxF "$LINE3" "$TD/rounds/1/report.md"'
+check "the line reaches the printed round summary" 'grep -qxF "$LINE3" "$T/finalize.out"'
+check "the round's status stayed done" 'grep -q "\"status\": \"done\"" "$TD/rounds/1/report.json"'
+round_over "pytest hub/tests/test_new.py hub/tests/test_old.py && echo RESULT ok"
+check "a verify naming both modules: live report has no key" '! grep -q new_or_changed "$TD/rounds/1/report.json"'
+check "…and no line" '! grep -q "TESTS NOT IN VERIFY" "$TD/rounds/1/report.md"'
 
 # ------------------------------------------------------- 4. the chain prints the line -------
 # The test_step_gate pattern: a fake delegate answers run/_round-diff and writes each step's
@@ -184,7 +205,7 @@ case "$cmd" in
     name=""
     while [ $# -gt 0 ]; do case "$1" in --name) name=$2; shift 2;; *) shift;; esac; done
     d=$DELEGATE_STATE/repo-nt-$name/rounds/1; mkdir -p "$d"
-    printf '{"status":"done","verify_rc":0,"new_tests_unrun":["hub/tests/test_new.py"]}\n' > "$d/report.json" ;;
+    printf '{"status":"done","verify_rc":0,"new_or_changed_tests_unrun":["hub/tests/test_new.py"]}\n' > "$d/report.json" ;;
   _round-diff) exit 0 ;;
 esac
 exit 0
@@ -199,10 +220,10 @@ DELEGATE_CHAIN_BIN=$T/fake-delegate python3 "$here/lib/chain.py" $T/plan-nt.json
 CRC=$?
 check "the chain accepts the step (exit $CRC)" '[ "$CRC" = 0 ]'
 check "the chain prints the step line for the accepted round" \
-  'grep -qF "step 1/1 s1: NEW TESTS NOT IN VERIFY: hub/tests/test_new.py — the verify never ran them" $T/chain.out'
+  'grep -qF "step 1/1 s1: TESTS NOT IN VERIFY (added or changed): hub/tests/test_new.py — the verify never ran them" $T/chain.out'
 DELEGATE_CHAIN_BIN=$T/fake-delegate python3 "$here/lib/chain.py" $T/plan-nt.json > $T/chain2.out 2>&1
 check "a resumed chain prints it on the already-done step too" \
-  'grep -qF "already done, skipping" $T/chain2.out && grep -qF "NEW TESTS NOT IN VERIFY" $T/chain2.out'
+  'grep -qF "already done, skipping" $T/chain2.out && grep -qF "TESTS NOT IN VERIFY (added or changed)" $T/chain2.out'
 # the same step with no key in the report: no line anywhere
 cat > $T/fake-delegate2 <<'F'
 #!/bin/bash
@@ -216,7 +237,7 @@ F
 chmod +x $T/fake-delegate2
 rm -rf $DELEGATE_STATE/repo-nt-s1 "$DELEGATE_STATE/chains"
 DELEGATE_CHAIN_BIN=$T/fake-delegate2 python3 "$here/lib/chain.py" $T/plan-nt.json > $T/chain3.out 2>&1
-check "a step without the key prints no line" '! grep -q "NEW TESTS" $T/chain3.out'
+check "a step without the key prints no line" '! grep -q "TESTS NOT IN VERIFY" $T/chain3.out'
 
 echo
 [ "$fail" = 0 ] && echo PASS || echo FAIL

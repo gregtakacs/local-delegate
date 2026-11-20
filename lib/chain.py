@@ -938,8 +938,8 @@ def run(plan):
         n, rep = last_report(tid)
         if rep and rep.get("status") == "done":
             note(f"{label}: already done, skipping")
-            if rep.get("new_tests_unrun"):
-                note(f"{label}: {newtests.summary_line(rep['new_tests_unrun'])}")
+            if rep.get("new_or_changed_tests_unrun"):
+                note(f"{label}: {newtests.summary_line(rep['new_or_changed_tests_unrun'])}")
             if here:
                 commit_step(plan, s, st)
             base = f"delegate/{s['name']}"
@@ -995,10 +995,11 @@ def run(plan):
                 save_state(plan, st)
                 if verdict == "pass":
                     note(f"{label}: accepted in the rebuilt image")
-            if (rep or {}).get("new_tests_unrun"):
-                # the round added test files its verify never ran: the same warning line the
-                # report shows (a warning only — it moves no status, no acceptance, no exit code)
-                note(f"{label}: {newtests.summary_line(rep['new_tests_unrun'])}")
+            if (rep or {}).get("new_or_changed_tests_unrun"):
+                # the round added or changed test files its verify never ran: the same warning
+                # line the report shows (a warning only — it moves no status, no acceptance, no
+                # exit code)
+                note(f"{label}: {newtests.summary_line(rep['new_or_changed_tests_unrun'])}")
             if stt == "done" and not s.get("image"):
                 # A step without the key that touched .delegate/ is refused AT ACCEPTANCE, like any
                 # out-of-scope file: its round changed the build context every later worker runs

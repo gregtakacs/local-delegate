@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """The new-tests check: a round's report warns when its verify never ran a test file the
-round added.
+round ADDED OR CHANGED.
 
-The measured miss: a round added hub/tests/test_wv43_page.py, the orchestrator's verify ran
+The measured misses: a round added hub/tests/test_wv43_page.py, the orchestrator's verify ran
 other modules only, the harness said "verify exit 0", the round was accepted — and the full
-gate later showed errors in exactly that new file. Nothing in the report said the new tests
-had never run. `uncovered(added_paths, verify_cmd, verify_log)` answers which of a round's
-added test files neither its verify command nor its verify log names or covers.
+gate later showed errors in exactly that new file. Same day, the second shape: a new test
+method inside an existing module (hub/tests/test_c1a1_browser.py) whose module the verify never
+ran. Nothing in the report said those tests had never run.
+`uncovered(added_paths, verify_cmd, verify_log)` answers which of a round's added-or-changed
+test files neither its verify command nor its verify log names or covers.
 
 A path counts as a TEST FILE when its file name has one of the shapes repos use:
 `test_*.py`, `*_test.py`, `*_test.go`, `tests/test_*.sh` (or `test/test_*.sh`),
@@ -26,7 +28,9 @@ A test file is COVERED when the verify command or the verify log holds any of:
 
 The check is a warning channel: it changes no status and no exit code.
 
-  newtests.py uncovered --added FILE --verify-cmd CMD [--verify-log FILE]   print uncovered paths
+  newtests.py uncovered --added-or-changed FILE --verify-cmd CMD [--verify-log FILE]
+        print the test paths the verify never ran, one per line. A or AM is the caller's diff,
+        not this rule's: the answer depends on a path's shape and on the verify text alone.
 """
 import argparse
 import re
@@ -178,8 +182,10 @@ def _bare_runner(text):
 
 
 def uncovered(added_paths, verify_cmd, verify_log):
-    """The added paths that are test files and that neither the verify command nor the verify
-    log runs or covers (rules in the module docstring), in the order given, without repeats."""
+    """The paths that are test files and that neither the verify command nor the verify log
+    runs or covers (rules in the module docstring), in the order given, without repeats.
+    `added_paths` is the round's added-or-changed list (bin/delegate's `diff-filter=AM` diff);
+    the check is about a path's shape and whether the verify reached it, not how it changed."""
     text = (verify_cmd or "") + "\n" + (verify_log or "")
     tok_cmd = _TOKEN.findall(verify_cmd or "")
     tok_log = _TOKEN.findall(verify_log or "")
@@ -203,19 +209,20 @@ def uncovered(added_paths, verify_cmd, verify_log):
 def summary_line(paths):
     """The one line every surface shows for an uncovered round (report.md, its printed summary,
     the chain's note for the step): same words, same order, same em dash."""
-    return "NEW TESTS NOT IN VERIFY: " + ", ".join(paths) + " — the verify never ran them"
+    return "TESTS NOT IN VERIFY (added or changed): " + ", ".join(paths) + " — the verify never ran them"
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["uncovered"])
-    ap.add_argument("--added", default="", help="file with one added path per line")
+    ap.add_argument("--added-or-changed", default="",
+                    help="file with one added-or-changed path per line")
     ap.add_argument("--verify-cmd", default="")
     ap.add_argument("--verify-log", default="", help="file; - reads stdin")
     a = ap.parse_args()
     try:
-        added = sys.stdin.read().splitlines() if a.added == "-" \
-            else open(a.added, encoding="utf-8", errors="replace").read().splitlines()
+        added = sys.stdin.read().splitlines() if a.added_or_changed == "-" \
+            else open(a.added_or_changed, encoding="utf-8", errors="replace").read().splitlines()
     except FileNotFoundError:
         added = []
     try:

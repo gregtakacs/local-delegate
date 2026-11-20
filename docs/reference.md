@@ -262,12 +262,14 @@ cost a whole round. `verify_retries` is a plan key too (a step may set its own, 
 plan's), so a chain can decide per slice; `--verify-retries` on `continue` replaces the task's
 value the way `--verify` does.
 
-### New tests the verify never ran
+### Tests the verify never ran
 
-A round that ADDS a test file can pass a verify that never touched it: the command names other
-modules, the harness prints `verify exit 0`, the step is accepted — and the full gate later reds
-in exactly that new file. So after each round's verify the harness diffs the round's added files
-(`diff-filter=A` against the task's base) and asks `lib/newtests.py` which added test files
+A round that ADDS a test file — or a test method inside an existing module — can pass a verify
+that never touched it: the command names other modules, the harness prints `verify exit 0`, the
+step is accepted, and the full gate later reds in exactly that file. Both shapes were measured
+the same day (`hub/tests/test_wv43_page.py` added; `hub/tests/test_c1a1_browser.py` changed).
+So after each round's verify the harness diffs the round's added **and** changed files
+(`diff-filter=AM` against the task's base) and asks `lib/newtests.py` which of those test files
 neither the verify command nor its log covers. A test file counts as COVERED when either text
 holds its repo path, its dotted module (`hub/tests/test_x.py` → `hub.tests.test_x`), or its file
 name; or a verify token that is a path prefix (`hub/`, `hub/tests`) or a dotted package prefix
@@ -276,12 +278,12 @@ an ancestor directory; or a test runner invoked with no file or module argument 
 `pytest`, `npm test`, `go test ./...`, `python3 tools/run_tests.py`) — that runs everything. A
 chain step's scope gate never counts: it lists the step's paths without running them.
 
-When any added test file is uncovered, `report.json` gains `"new_tests_unrun": [paths]` and
+When any of them is uncovered, `report.json` gains `"new_or_changed_tests_unrun": [paths]` and
 report.md's verify section (so the printed round summary, and `delegate chain`'s line for the
 step) gains:
 
 ```
-NEW TESTS NOT IN VERIFY: hub/tests/test_x.py — the verify never ran them
+TESTS NOT IN VERIFY (added or changed): hub/tests/test_x.py — the verify never ran them
 ```
 
 This is a warning channel: it never changes the round's status or exit code. Read the line.
