@@ -8,7 +8,7 @@
 set -euo pipefail
 
 DELEGATE_HOME=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)
-VERSION=0.9.8
+VERSION=0.9.9
 
 die()  { echo "delegate: $*" >&2; exit 1; }
 warn() { echo "delegate: $*" >&2; }
