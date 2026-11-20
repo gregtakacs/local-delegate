@@ -144,6 +144,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import taskstate                                                      # the task states top/list use
 import ledger                                                         # the chain row (T2-F)
 import launch                                                         # the launch fingerprint
+import newtests                                                       # the line printed for unrun new tests
 
 ME = Path(__file__).resolve()
 DELEGATE = os.environ.get("DELEGATE_CHAIN_BIN") or str(ME.parent.parent / "bin" / "delegate")   # override: tests
@@ -937,6 +938,8 @@ def run(plan):
         n, rep = last_report(tid)
         if rep and rep.get("status") == "done":
             note(f"{label}: already done, skipping")
+            if rep.get("new_tests_unrun"):
+                note(f"{label}: {newtests.summary_line(rep['new_tests_unrun'])}")
             if here:
                 commit_step(plan, s, st)
             base = f"delegate/{s['name']}"
@@ -992,6 +995,10 @@ def run(plan):
                 save_state(plan, st)
                 if verdict == "pass":
                     note(f"{label}: accepted in the rebuilt image")
+            if (rep or {}).get("new_tests_unrun"):
+                # the round added test files its verify never ran: the same warning line the
+                # report shows (a warning only — it moves no status, no acceptance, no exit code)
+                note(f"{label}: {newtests.summary_line(rep['new_tests_unrun'])}")
             if stt == "done" and not s.get("image"):
                 # A step without the key that touched .delegate/ is refused AT ACCEPTANCE, like any
                 # out-of-scope file: its round changed the build context every later worker runs

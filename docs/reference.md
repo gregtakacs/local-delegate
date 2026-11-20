@@ -262,6 +262,32 @@ cost a whole round. `verify_retries` is a plan key too (a step may set its own, 
 plan's), so a chain can decide per slice; `--verify-retries` on `continue` replaces the task's
 value the way `--verify` does.
 
+### New tests the verify never ran
+
+A round that ADDS a test file can pass a verify that never touched it: the command names other
+modules, the harness prints `verify exit 0`, the step is accepted — and the full gate later reds
+in exactly that new file. So after each round's verify the harness diffs the round's added files
+(`diff-filter=A` against the task's base) and asks `lib/newtests.py` which added test files
+neither the verify command nor its log covers. A test file counts as COVERED when either text
+holds its repo path, its dotted module (`hub/tests/test_x.py` → `hub.tests.test_x`), or its file
+name; or a verify token that is a path prefix (`hub/`, `hub/tests`) or a dotted package prefix
+(`hub`, `hub.tests`) of it; or, for Go, its package directory, or `./...` in a command run from
+an ancestor directory; or a test runner invoked with no file or module argument at all (bare
+`pytest`, `npm test`, `go test ./...`, `python3 tools/run_tests.py`) — that runs everything. A
+chain step's scope gate never counts: it lists the step's paths without running them.
+
+When any added test file is uncovered, `report.json` gains `"new_tests_unrun": [paths]` and
+report.md's verify section (so the printed round summary, and `delegate chain`'s line for the
+step) gains:
+
+```
+NEW TESTS NOT IN VERIFY: hub/tests/test_x.py — the verify never ran them
+```
+
+This is a warning channel: it never changes the round's status or exit code. Read the line.
+A step's verify must name or cover the test modules it adds — when the line shows, run those
+files yourself before accepting the step, or send feedback widening the verify.
+
 ### The telemetry ledger (`delegate ledger`)
 
 One append-only JSONL file — `$DELEGATE_LEDGER`, default `$DELEGATE_STATE/ledger/events.jsonl` —

@@ -187,6 +187,10 @@ the bugs that mattered were all found here.
 - **Diffstat:** look for files outside the slice, especially files another branch or a fix of
   yours already changed. A worker may copy a fix it found on `main`; byte-identical copies drop
   out in the squash.
+- **`NEW TESTS NOT IN VERIFY:`** — when a round's report or the chain's line for a step shows
+  it, that round added test files its harness verify never ran (the miss is measured: the gate
+  later reds in exactly those files). Run them yourself before accepting the step, or send
+  feedback making the step's verify name or cover the test modules it adds.
 - **The risky code, line by line:** auth, tokens, permission checks, anything parsing an
   upload or untrusted input (size caps that ignore chunked bodies, unbounded unpacking), CI
   workflows (a step's own `env` isn't visible to its `if:`), and router or edge-auth changes.

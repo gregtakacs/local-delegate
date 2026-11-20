@@ -16,6 +16,9 @@ import re
 import sys
 from collections import Counter
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import newtests                                                       # the new-tests check (warning only)
+
 FINAL_TEXT_MAX_LINES = 220
 DIFFSTAT_MAX_LINES = 60
 VERIFY_TAIL_LINES = 40
@@ -317,6 +320,17 @@ def cmd_report(a):
     stderr_tail = clip(read_text(a.stderr), 15)
     diffstat = read_text(a.diffstat).rstrip()
     verify_log = read_text(a.verify_log)
+    # The new-tests check (lib/newtests.py): a test file this round ADDED that neither the
+    # verify command nor its log names or covers. The scope gate is stripped first — it embeds
+    # the step's scope paths, and a gate that merely lists a file is not a verify that ran it.
+    # A warning channel: it never moves the status or the exit code.
+    new_tests_unrun = []
+    if a.verify_cmd:
+        added = [ln.strip() for ln in read_text(a.added).splitlines() if ln.strip()]
+        vcmd = shown_verify(a.verify_cmd)
+        if vcmd.startswith("[scope gate] "):        # the marker is harness text, not verify text
+            vcmd = vcmd[len("[scope gate] "):]
+        new_tests_unrun = newtests.uncovered(added, vcmd, verify_log)
 
     mins, secs = divmod(int(a.duration), 60)
     L = []
@@ -374,6 +388,10 @@ def cmd_report(a):
             L.append("")
             L.append(f"VERIFY FLAKE: run 1 failed (exit {flaky.get('first_rc')}), "
                      f"run {int(flaky.get('failed_runs', 0)) + 1} passed — logged to flakes.jsonl")
+        if new_tests_unrun:
+            L.append("")
+            L.append(newtests.summary_line(new_tests_unrun))
+
     if "SECURITY:" in read_text(a.stderr):
         L.insert(4, "**SECURITY: the worker modified the worktree's .git pointer (restored). Review this round's diff with suspicion.**")
     nudges = re.findall(r"^nudge: (\S+)(?:\s|$)", read_text(a.stderr), re.M)
@@ -405,6 +423,7 @@ def cmd_report(a):
                    "worker_status": worker_status, "exit": exit_code,
                    "duration_s": int(a.duration), "verify_rc": verify_rc,
                    **({"verify_flaky": flaky} if flaky else {}),
+                   **({"new_tests_unrun": new_tests_unrun} if new_tests_unrun else {}),
                    "commit": a.commit, "model": a.model,
                    # what the round row's `todos` and `worker_report` are built from, kept here so
                    # `delegate ledger import` rebuilds the same two fields from a stored round
@@ -454,7 +473,7 @@ def main():
     ap.add_argument("cmd", choices=["report"])
     for k in ("id", "round", "events", "stderr", "exit", "duration", "model", "worktree",
               "branch", "base", "base-sha", "commit", "diffstat", "evidence", "verify-cmd",
-              "verify-rc", "verify-log", "verify-flaky", "out-md", "out-json", "aborted", "access"):
+              "verify-rc", "verify-log", "verify-flaky", "added", "out-md", "out-json", "aborted", "access"):
         ap.add_argument("--" + k, default="")
     cmd_report(ap.parse_args())
 
