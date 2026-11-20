@@ -96,17 +96,29 @@ and runs the chain itself.
   for another repo uses bare file names.
 - Nothing in the plan contradicts the design's rulings.
 - Run `delegate chain PLAN --check`: it refuses a step whose scope misses a file its spec owns,
-  or whose verify does not run the plan's `"gate"`, and it prints every step's verify exactly as
-  stored. **Read those printed lines**, not the design's description of them: they are what runs.
+  or whose verify does not run the plan's `"gate"` — or its `"step_gate"`, when the plan names one
+  and the step is neither `"hard"` nor the last (see below) — and it prints every step's verify
+  exactly as stored. **Read those printed lines**, not the design's description of them: they are
+  what runs.
+- **Two verify levels; the design names both commands.** Running the full suite inside every step
+  is the measured waste: ~6 min per step on codehub, three steps per change, for the same gate a
+  slice gets once more at the end anyway. So a plan carries `"gate"` (the repo's full gate) and may
+  carry `"step_gate"`: the quick check for one step — that step's own modules, plus a scope guard.
+  An **ordinary** step's verify runs either one; a **`"hard": true`** step and the plan's **last**
+  step must run the full gate; and you run the full gate yourself, once, on a clean squash of the
+  slice (Phase 4) — which is what makes the step-level skip a saving rather than a hole. A plan
+  with no `"step_gate"` is one level, as before: every step runs the gate.
 - **The brief names the repo's gate, never its shell.** Give the design task the one command the
   repo's docs name as the worker's full gate (`make check-sandbox`, `npm test`, …) and nothing
   more; a brief that dictates toolchain setup gets it re-typed in every step, which is where
-  generated typos hide.
+  generated typos hide. Name the quick step check too, the same way: one command the repo's own
+  docs can point at, never a per-step invention.
   Also look for existing tests that pin behaviour a step changes, and put them in that step's
   spec and scope.
 - **Every step that guards a boundary runs `"hard": true`:** validating untrusted input,
   building commands or paths from it, auth or tokens, sandboxing, permission checks, crypto.
-  Set it yourself when the plan doesn't. A local design marks steps by algorithmic
+  Set it yourself when the plan doesn't. `"hard"` picks the model *and* the verify level: a hard
+  step always runs the full gate. A local design marks steps by algorithmic
   difficulty only: in one measured slice it ran the command runner and the security step on
   the normal model, and every bug that reached review sat in exactly those two steps.
 - Accept each owner question or change it, and log the call. Fix the plan in place, and commit
@@ -152,7 +164,9 @@ the bugs that mattered were all found here.
   upload or untrusted input (size caps that ignore chunked bodies, unbounded unpacking), CI
   workflows (a step's own `env` isn't visible to its `if:`), and router or edge-auth changes.
 - **The full gate**, on a clean squash of the slice onto its real base, not the worker's
-  word: typecheck, lint, every test, build.
+  word: typecheck, lint, every test, build. This is the slice's one full-gate run by you: the
+  plan's `"step_gate"` may have let its ordinary steps skip theirs (the hard steps and the last
+  one did not), so nothing here is redundant and nothing here was covered earlier.
 - **One live check with real binaries and real inputs**, not only stubs. Example: build the
   real tool and feed it a real artifact made by the real SDK.
 - **When you fix something,** add a test and prove it fails without the fix.

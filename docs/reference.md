@@ -483,13 +483,24 @@ each), so the report and a chain's retry both show the stage that failed, not ju
 code. The native runner runs a verify as written: its `/tmp` is the host's.
 
 **The repo's gate: `"gate": "CMD"` on the plan.** The one command the repo's own docs name as
-the worker's full gate (`make check-sandbox`, `npm test`, …). Every step's verify must contain it
+the worker's full gate (`make check-sandbox`, `npm test`, …). A step's verify must contain it
 character for character, or the plan is refused at load (`--check` and run alike), so a step can
-neither skip nor re-type the gate. `--check` prints each step's verify exactly as stored: read
+neither skip nor re-type the gate — with the one exception below, the plan's `"step_gate"`.
+`--check` prints each step's verify exactly as stored: read
 those lines when reviewing a plan, not the design's description of them. Why: a design task's
 script once generated every verify with a blanket `replace("N", n)`, turning `PYTHON` into
 `PYTHO2` and `SDKCONFIG` into `SDKCO2FIG`; each still ran, weaker, and no review read the stored
 text. A plan without `"gate"` is not checked.
+
+**The quick step check: `"step_gate": "CMD"` on the plan.** The second level of the same rule, and
+optional: the one command that checks a single step and nothing else — that step's own modules plus
+a scope guard. Name it when the full gate costs minutes; without it, every step of a three-step
+change pays the whole suite and the slice pays it once more at the end. With it, an **ordinary**
+step's verify runs `"gate"` **or** `"step_gate"` (the one it runs must appear character for
+character), while a step with `"hard": true` and the plan's **last** step must run `"gate"` — the
+orchestrator runs the full gate once more, itself, on a clean squash of the slice, which is what
+makes the step-level skip a saving rather than a hole. A refusal names which of the two the step is
+missing. A plan with no `"step_gate"` is one level, exactly as before: every step runs `"gate"`.
 
 **Step scopes: `"scope": [...]` on a step.** Each entry is a repo-relative pattern for a path the
 step may change: `path/to/file.py` (that exact file), `path/to/dir/` (anything under that

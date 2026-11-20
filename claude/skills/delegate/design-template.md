@@ -29,7 +29,16 @@ workers will run step by step. Write no product code.
 ## The repo's gate
 
 `<the ONE command the repo's own docs name as the worker's full gate, e.g. make check-sandbox>`.
-Every step's verify ends with it, exactly as written here.
+A step's verify ends with it, exactly as written here — always, for a `"hard": true` step and for
+the plan's last step.
+
+**The quick step check** (optional, but name it if the repo has one):
+`<the ONE command that checks one step and nothing else: its own modules plus a scope guard, e.g.
+make check-step>`. Any other step may end its verify with this instead of the full gate, so a
+three-step change does not pay the whole suite three times: the gate still runs on the hard steps,
+on the last step, and once by the orchestrator on the squashed slice. The plan names both commands
+(`"gate"`, `"step_gate"`); where the repo names no such quick check, name none and every step runs
+the gate. Either way, one command from the repo's own docs, never a verify you invented per step.
 
 ## Fixed requirements
 
@@ -51,18 +60,22 @@ bidi characters, root escapes, `$` vs `\Z`, concurrency, one bad record among go
 2. One spec per step, `docs/specs/<slice>-<n>-<slug>.md`, following the template. Use 2–5
    steps. Each step is one coherent change, under ~1500 lines and ~90 minutes.
 3. `docs/specs/<slice>-chain.json`:
-   `{"name":"<slice>","repo":"../..","base":"<BASE>","gate":"<the repo's gate>","retries":2,"steps":[…]}`.
+   `{"name":"<slice>","repo":"../..","base":"<BASE>","gate":"<the repo's gate>","step_gate":"<the quick step check, or leave it out>","retries":2,"steps":[…]}`.
    - A step gets `"hard": true` when it has real algorithmic content **or** guards a security
      boundary: validating untrusted input, building commands or paths from it, auth or tokens,
-     sandboxing, permission checks, crypto. Every other step gets `"hard": false`.
+     sandboxing, permission checks, crypto. Every other step gets `"hard": false`. `"hard"` picks
+     the model *and* the verify level: a hard step runs the full gate, never the quick check.
    - Every step gets `"scope"`: the path patterns it may change — exactly the files its own spec
      lists under "Files owned", plus that step's test fixture directories. `delegate chain PLAN
      --check` refuses a step whose scope misses one of them.
    - Every verify is the step's own tests (its suite, and its `--mutations` run when the repo has
-     them), then the repo's gate, exactly as "The repo's gate" names it. Nothing else: no
-     toolchain setup, no build flags, no copy of what the gate already runs. The gate lives in
-     the repo under its own tests; a verify that re-types it (or a step that weakens it) is the
-     bug. The chain refuses a plan whose verify does not contain the plan's `"gate"`.
+     them), then the repo's gate, exactly as "The repo's gate" names it — except that an ordinary
+     step (not `"hard"`, not the plan's last step) may end with the plan's `"step_gate"` instead:
+     the quick check for one step, its own modules plus the scope guard. Nothing else: no
+     toolchain setup, no build flags, no copy of what the gate already runs. Both commands live in
+     the repo under its own tests; a verify that re-types either one (or a step that weakens it)
+     is the bug. The chain refuses a plan whose verify does not contain its `"gate"` — or, for an
+     ordinary step when the plan names one, its `"step_gate"`; the refusal says which.
    - Write each verify by hand, literally, in the chain file. Do not generate the plan with a
      script: one generator's blanket `replace("N", n)` turned `PYTHON` into `PYTHO2` and
      `SDKCONFIG` into `SDKCO2FIG` in every step, and each still ran, weaker, unseen.

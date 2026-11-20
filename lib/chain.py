@@ -3,7 +3,9 @@
 
   delegate chain PLAN.json            run (or resume) the chain
   delegate chain PLAN.json --check    lint the plan (each step's "scope" vs the files its spec
-                                      owns; every verify runs the plan's "gate"), print each
+                                      owns; every verify runs the plan's "gate" — or its
+                                      "step_gate" when the plan names one and the step is
+                                      neither "hard" nor the last), print each
                                       step's verify as stored, and exit: nothing starts, no state
                                       is written, no hook
   delegate chain PLAN.json --status   where the chain is, without running anything
@@ -46,6 +48,12 @@ PLAN.json (written by the orchestrator, normally next to the specs):
     "name": "w4-handles",                       # chain id; state lives under DELEGATE_STATE/chains/
     "repo": ".",                                # relative to the plan file's directory
     "base": "w4",                               # branch the first step starts from
+    "gate": "make check-sandbox",               # the repo's full gate, named once; a step's verify
+                                                #   must contain it character for character, unless
+                                                #   the step_gate below covers that step
+    "step_gate": "make check-step",             # optional: the quick check an ordinary step may
+                                                #   run instead (see below); never a reason to skip
+                                                #   the gate on a hard or the last step
     "service": "postgres",                      # optional, every step
     "read": ["/path/to/another/checkout"],      # optional, every step
     "copy": [".env"],                           # optional, every step
@@ -61,6 +69,13 @@ PLAN.json (written by the orchestrator, normally next to the specs):
       {"name": "w4-2-publish", "spec": "docs/specs/w4-2.md", "verify": "...", "hard": false}
     ]
   }
+
+There are two verify levels, and the plan names both commands. `"gate"` is the repo's full gate;
+`"step_gate"` is the quick check for one step — that step's own modules plus a scope guard. An
+ordinary step's verify runs the gate **or** the step_gate; a step marked `"hard": true` and the
+plan's **last** step must run the full gate, because that is where a skipped suite hides. The gate
+still runs once more where it counts: the orchestrator runs it on a clean squash of the slice. A
+plan with no `"step_gate"` is one level, as before: every step runs `"gate"`.
 
 Each step runs on the previous step's branch, so the last step's branch holds the whole
 slice, one commit per round. A step is accepted only when the harness status is `done`
@@ -330,22 +345,57 @@ def spec_text(s):
         return ""
 
 
+def step_gate(plan):
+    """The plan's quick step check, or None when it names none. A plan may pair its full "gate"
+    with a `"step_gate"`: the cheap command an ORDINARY step's verify may run instead of the whole
+    suite — that step's own modules, plus a scope guard — so a three-step change stops paying the
+    full gate once per step. It never replaces the gate where the gate is what the step is for: a
+    `"hard": true` step and the plan's last step still run it (and the orchestrator runs the full
+    gate once more on the squashed slice). Validated whenever the key is present; a plan with no
+    `"step_gate"` is exactly as before: every step runs `"gate"`."""
+    sg = plan.get("step_gate")
+    if sg is None:
+        return None
+    if not isinstance(sg, str) or not sg.strip():
+        die("plan 'step_gate' must be an ordinary step's quick check command, a non-empty string", 2)
+    return sg.strip()
+
+
 def lint_gate(plan):
     """A plan's "gate" is the repo's own gate command (e.g. `make check-sandbox`), named once.
     Every step's verify must run it, character for character: the full gate lives in the repo,
     under its own tests, never re-typed (or generated) per step. A generated verify once turned
     PYTHON into PYTHO2 and SDKCONFIG into SDKCO2FIG in four steps: each still ran, weaker, and
-    no review saw it. A plan with no gate is not checked (older plans)."""
+    no review saw it. A plan with no gate is not checked (older plans).
+
+    When the plan names a `"step_gate"` too, an ordinary step may run that instead — but a
+    `"hard": true` step and the plan's last step must still run "gate". Both commands are matched
+    character for character, and a refusal says which of the two the step is missing."""
     gate = plan.get("gate")
+    quick = step_gate(plan)                     # validated even when the plan has no gate at all
     if gate is None:
         return
     if not isinstance(gate, str) or not gate.strip():
         die("plan 'gate' must be the repo's gate command, a non-empty string", 2)
     gate = gate.strip()
-    bad = [s["name"] for s in plan["steps"] if gate not in s["verify"]]
-    if bad:
-        die("these steps' verify does not run the plan's gate (%s) exactly as written: %s"
-            % (gate, ", ".join(bad)), 2)
+    last = len(plan["steps"]) - 1
+    full, either = [], []
+    for i, s in enumerate(plan["steps"]):
+        if gate in s["verify"]:
+            continue
+        must = bool(s.get("hard")) or i == last        # these run the full gate, as today
+        if quick and not must and quick in s["verify"]:
+            continue                                   # an ordinary step ran the quick check
+        (full if (must or not quick) else either).append(s["name"])
+    msgs = []
+    if full:                                        # the sentence a plan with no step_gate gets
+        msgs.append("these steps' verify does not run the plan's gate (%s) exactly as written: %s"
+                    % (gate, ", ".join(full)))
+    if either:
+        msgs.append("these steps' verify does not run the plan's gate (%s) or its step_gate (%s) "
+                    "exactly as written: %s" % (gate, quick, ", ".join(either)))
+    if msgs:
+        die("\n".join(msgs), 2)
 
 
 def lint_plan(plan):
@@ -371,7 +421,12 @@ def check_plan(plan):
     exactly as the chain will run it (minus the scope gate it adds), so the reviewer reads the
     stored text, not a design's description of it."""
     if plan.get("gate"):
-        print(f"  gate: {plan['gate'].strip()}  (every step runs it)")
+        quick = step_gate(plan)
+        if quick:
+            print(f"  gate: {plan['gate'].strip()}  (every hard step and the last one run it)")
+            print(f"  step_gate: {quick}  (every other step runs the gate or this)")
+        else:
+            print(f"  gate: {plan['gate'].strip()}  (every step runs it)")
     for i, s in enumerate(plan["steps"], 1):
         if s.get("scope"):
             print(f"  {i}. {s['name']}  scope: {len(s['scope'])} entries, "
