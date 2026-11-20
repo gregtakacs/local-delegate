@@ -84,6 +84,7 @@ install_line() {
 export DELEGATE_BASE_IMAGE=${DELEGATE_BASE_IMAGE:-$DELEGATE_IMAGE}
 : "${DELEGATE_IMAGE_STALE:=error}"      # error | warn | rebuild — what an image built from another tree costs you
 : "${DELEGATE_IMAGE_ALLOW_STALE:=0}"    # 1: keep this image whatever the stamp says (deliberate hot-patch)
+: "${DELEGATE_PINLINT:=error}"          # error | warn — what an unpinned add in a repo's .delegate/Dockerfile costs `build --repo`
 : "${DELEGATE_WORKTREES:=$HOME/delegate-worktrees}"
 : "${DELEGATE_STATE:=${XDG_STATE_HOME:-$HOME/.local/state}/delegate}"
 : "${DELEGATE_LEDGER:=}"                 # append-only telemetry ledger (JSONL). Empty = $DELEGATE_STATE/ledger/events.jsonl,
@@ -1891,6 +1892,25 @@ cmd_build() { # [--repo DIR] [docker build args] — the base images, then DIR's
       *) pass+=("$1"); shift ;;
     esac
   done
+  # A repo's own Dockerfile is linted BEFORE anything is built: an unpinned add makes its tag
+  # non-reproducible — a silent rebuild can change the bytes the repo's own gates compare — and
+  # the fix is a source edit, not a rebuild. DELEGATE_PINLINT=warn downgrades the refusal.
+  if [ -n "$repo" ]; then
+    repo=$(git -C "$repo" rev-parse --show-toplevel 2>/dev/null) || die "build --repo: not a git repository: $repo"
+    [ -f "$repo/.delegate/Dockerfile" ] || die "build --repo: $repo has no .delegate/Dockerfile"
+    [ "$DELEGATE_UNTRUSTED_REPO" = 1 ] && die "build --repo: DELEGATE_UNTRUSTED_REPO=1: a repository you do not trust does not get its Dockerfile built"
+    local pl rc=0
+    pl=$(python3 "$DELEGATE_HOME/lib/pinlint.py" "$repo/.delegate/Dockerfile" 2>&1) || rc=$?
+    if [ "$rc" != 0 ]; then
+      if [ "${DELEGATE_PINLINT:-error}" = warn ]; then
+        note "build --repo: $repo/.delegate/Dockerfile has unpinned installs (DELEGATE_PINLINT=error refuses):"; printf '%s\n' "$pl" >&2
+      else
+        printf '%s\n' "$pl" >&2
+        echo "delegate: build --repo: $repo/.delegate/Dockerfile is not fully pinned — pin every add, or add a '# delegate: unpinned-ok <reason>' line; DELEGATE_PINLINT=warn builds anyway" >&2
+        exit 2
+      fi
+    fi
+  fi
   local stamp; stamp=$(context_stamp)
   DELEGATE_IMAGE=$DELEGATE_BASE_IMAGE
   docker build --label "io.delegate.stamp=$stamp" -t "$DELEGATE_IMAGE" -f "$DELEGATE_HOME/worker/Dockerfile" "${pass[@]}" "$DELEGATE_HOME"
@@ -1902,9 +1922,6 @@ cmd_build() { # [--repo DIR] [docker build args] — the base images, then DIR's
     docker run --rm --user 0 --entrypoint chmod -v "$v:/v" "$DELEGATE_IMAGE" 1777 /v
   done
   [ -n "$repo" ] || return 0
-  repo=$(git -C "$repo" rev-parse --show-toplevel 2>/dev/null) || die "build --repo: not a git repository: $repo"
-  [ -f "$repo/.delegate/Dockerfile" ] || die "build --repo: $repo has no .delegate/Dockerfile"
-  [ "$DELEGATE_UNTRUSTED_REPO" = 1 ] && die "build --repo: DELEGATE_UNTRUSTED_REPO=1: a repository you do not trust does not get its Dockerfile built"
   local tag; tag=$(repo_image_name "$repo")
   docker build --label "io.delegate.stamp=$stamp" --label "io.delegate.layer=$(repo_layer_stamp "$repo")" \
     --build-arg "BASE=$DELEGATE_BASE_IMAGE" -t "$tag" -f "$repo/.delegate/Dockerfile" "$repo/.delegate"
@@ -2238,7 +2255,9 @@ cmd_doctor() {
     if docker image inspect "$DELEGATE_IMAGE" >/dev/null 2>&1; then
       local fresh; fresh=$(image_freshness "$DELEGATE_IMAGE")
       echo "image:    $DELEGATE_IMAGE ok ($(docker run --rm --entrypoint opencode "$DELEGATE_IMAGE" --version) opencode, $fresh)"
-      if [ "$fresh" != fresh ]; then
+      if [ "$DELEGATE_IMAGE" != "$DELEGATE_BASE_IMAGE" ] && [ -z "$(image_layer "$DELEGATE_IMAGE")" ]; then
+        echo "          repo image built by hand: move its Dockerfile to .delegate/Dockerfile and run: delegate build --repo DIR"; ok=0
+      elif [ "$fresh" != fresh ]; then
         echo "          built from a different tree than $DELEGATE_HOME — run: delegate build"; ok=0
       fi
       docker run --rm --entrypoint delegate-shot "$DELEGATE_IMAGE" --probe | sed 's/^/          /'

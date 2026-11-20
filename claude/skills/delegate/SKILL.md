@@ -156,7 +156,13 @@ and runs the chain itself.
   terminal exit, a killed one never fires, and a failing hook is a warning line, never a changed
   outcome — so the hook says *when to look* and `--status` stays the source of truth.
 - Base each chain on the design branch, so the `Plan:` commit travels with the slice.
-- Steps that need a special toolchain run with `DELEGATE_IMAGE=<image>` exported.
+- Steps that need a special toolchain run with `DELEGATE_IMAGE=<image>` exported. A toolchain a
+  *project* needs does not get installed by hand: put it in the repo's `.delegate/Dockerfile`, pin
+  every add exactly (apt `name=version`, pip `==`, `npm -g pkg@x.y.z`, a versioned or sha256-checked
+  `curl`/`wget`, a `git clone --branch <tag>`/`git checkout <sha>`, a base or `@sha256` `FROM`), and
+  build it with `delegate build --repo DIR` — never `docker build`. The build runs `lib/pinlint.py`
+  first and refuses any unpinned add; a thing that truly cannot be pinned gets an explicit
+  `# delegate: unpinned-ok <why>` on its line, which you review like any other decision.
 - Don't watch. You act on the end-of-chain report.
 
 **Phase 4: verify, yourself, once per slice.** This is where the value is. On the project this was measured on,
