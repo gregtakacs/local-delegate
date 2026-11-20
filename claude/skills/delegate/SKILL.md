@@ -125,6 +125,15 @@ and runs the chain itself.
   are not hard. When in doubt about a boundary, mark it hard; when in doubt about difficulty,
   don't. `delegate chain PLAN --check` warns when a plan of 2+ steps marks every one of them
   hard: that is a design that stopped reading its own steps.
+- **The step that grows the project's worker image is its own step, `"image": true` (and so
+  `"hard": true`):** anything that edits `.delegate/Dockerfile`. The key is the plan saying the
+  toolchain changes: the worker's round verifies in the OLD image, and the chain then rebuilds
+  on the host from the step's tree and re-runs the step's verify inside the NEW image — that
+  verdict decides the step — and pins every later step of the chain to that tag. So it runs the
+  full gate: a broken pin takes the rest of the chain with it. `--check` enforces both halves:
+  a scope entry reaching `.delegate/` without the key, and the key without `"hard"`, are each
+  refused, naming the step. Plan it before the steps that need what it installs. A step without
+  the key that touches `.delegate/` anyway is refused at acceptance, like any out-of-scope file.
 - Accept each owner question or change it, and log the call. Fix the plan in place, and commit
   it to the design branch.
 
@@ -163,6 +172,14 @@ and runs the chain itself.
   build it with `delegate build --repo DIR` — never `docker build`. The build runs `lib/pinlint.py`
   first and refuses any unpinned add; a thing that truly cannot be pinned gets an explicit
   `# delegate: unpinned-ok <why>` on its line, which you review like any other decision.
+- A chain grows that image through an `"image": true` step (Phase 2), not by hand: the chain
+  rebuilds after the step's round, re-verifies the step in the new image, and pins the tag it built
+  for every later step. If a chain stops with a step `image-refused`, the rebuild's pin-lint found
+  an unpinned add: the lint lines are in that step's report (`delegate report <ID>`), and the fix
+  is a source edit, so resume the step (`delegate continue <ID> -m "pin it"`), never the retry
+  budget. A step that ends `done` after an image pass still deserves the usual Phase 4 read of its
+  `.delegate/Dockerfile` diff: the chain proves the image builds and the gate passes in it; whether
+  the pin is the right version is still a reviewer's call.
 - Don't watch. You act on the end-of-chain report.
 
 **Phase 4: verify, yourself, once per slice.** This is where the value is. On the project this was measured on,

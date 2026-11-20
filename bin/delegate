@@ -1735,6 +1735,51 @@ cmd_repo_git() {
   fi
 }
 
+# Internal (lib/chain.py): `delegate _layer-stamp DIR` — the layer stamp a build of DIR's .delegate/
+# carries (the same hash cmd_build stamps the tag with). The chain reads it back after an image
+# step's rebuild to confirm the build it just ran is the one it is pinning. Host-side: reads a tree
+# the chain already named; refused for an untrusted repo, where an image step is refused at load.
+cmd_layer_stamp() {
+  local d=${1:-}; [ -n "$d" ] || die "usage: delegate _layer-stamp DIR"
+  [ "$DELEGATE_UNTRUSTED_REPO" = 1 ] && die "_layer-stamp: DELEGATE_UNTRUSTED_REPO=1: refused"
+  [ -d "$d/.delegate" ] || die "_layer-stamp: no .delegate/ under $d"
+  repo_layer_stamp "$d"
+}
+
+# Internal (lib/chain.py): `delegate _image-name DIR` — the tag DIR's own layer builds under. The
+# chain cannot derive it (repo_image_name is this file's), and an image step must name the tag it
+# just rebuilt to pin its own re-verify and its retries to it.
+cmd_image_name() {
+  local d=${1:-}; [ -n "$d" ] || die "usage: delegate _image-name DIR"
+  repo_image_name "$d"
+}
+
+# Internal (lib/chain.py): `delegate _base-image` — the base every repo image builds FROM, as this
+# binary resolves it (config included). A chain that pins DELEGATE_IMAGE exports this alongside
+# it, because bin/delegate fixes DELEGATE_BASE_IMAGE from the caller's DELEGATE_IMAGE when the
+# environment does not say it, and a pinned repo tag is never the base.
+cmd_base_image() { printf '%s\n' "$DELEGATE_BASE_IMAGE"; }
+
+# Internal (lib/chain.py): `delegate _round-diff ID [N]` — the paths that round (the last, by
+# default) changed against the task's base, one per line, through the task's own git (the sandbox
+# git for an untrusted task, exactly as `delegate diff` runs it). The chain asks it to catch a
+# step without the "image" key that touched .delegate/ anyway. It exits nonzero — and the chain
+# refuses nothing on a guess — when the round has no commit file: the same best-effort rule as
+# `delegate diff`'s.
+cmd_round_diff() {
+  local id=${1:-}; [ -n "$id" ] || die "usage: delegate _round-diff ID [ROUND]"
+  local n=${2:-}
+  load_task "$id"
+  if untrusted; then untrusted_task_check; fi
+  check_gitlink
+  if [ -z "$n" ]; then n=$(last_round); fi
+  local f="$TASK_DIR/rounds/$n/commit"
+  [ -n "$n" ] && [ -f "$f" ] || die "no round $n commit for $id"
+  local to; to=$(cat "$f")
+  [[ "$to" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || die "round $n: unexpected commit id"
+  wgit --no-pager diff --name-only --no-renames "$BASE_SHA" "$to"
+}
+
 cmd_list() {
   # The states are lib/taskstate.py's, the single definition: `interrupted` (a round whose harness
   # died before its report) and `verifying` show here too, not just on `delegate top`.
@@ -3091,6 +3136,10 @@ main() {
     report) cmd_report "$@" ;;
     diff) cmd_diff "$@" ;;
     _repo-git) cmd_repo_git "$@" ;;
+    _layer-stamp) cmd_layer_stamp "$@" ;;
+    _image-name) cmd_image_name "$@" ;;
+    _base-image) cmd_base_image ;;
+    _round-diff) cmd_round_diff "$@" ;;
     verify) cmd_verify "$@" ;;
     accept) cmd_accept "$@" ;;
     exec) cmd_exec "$@" ;;

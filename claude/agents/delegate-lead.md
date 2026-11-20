@@ -46,6 +46,13 @@ the repo path, and the branch to build on. If any of these is missing, ask once,
    a migration against `$DATABASE_URL`. The verify gate replaces your per-step review. Use
    `"service": "postgres"` for database work, `"read": [...]` for code to port from another
    repo, `"hard": true` only for steps with real algorithmic content, `"retries": 2`.
+   If a step needs a tool the project's worker image (`.delegate/Dockerfile`) lacks, make it
+   an **image step**: `"image": true` requires `"hard": true`; the step edits the Dockerfile
+   and installs what it needs itself, and its verify checks the tool is there (`command -v`).
+   After that step's round the chain rebuilds the image on the host and re-verifies the step
+   in it; a later step that needs the new tool gets `"image": true` too so it runs on the
+   rebuilt image. Say in the spec that vendoring or downloading the missing thing at run time
+   is off the table — the worker stops and asks under QUESTIONS instead.
    **"Don't touch" guards compare against the previous step, never the slice base.** Each step
    runs on the previous step's branch, so `git diff --exit-code <slice-base> -- PATHS` in step N
    also sees what steps 1..N-1 changed on purpose and can never pass (this broke G4, A1, H4 and

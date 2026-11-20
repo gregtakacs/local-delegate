@@ -58,3 +58,7 @@ sandbox: a worker facing a gate it cannot pass in its environment patches the te
 ## Notes
 
 <Constraints, gotchas you already know, decisions already made and their reasons.>
+
+Put this line in every spec's Notes verbatim: "If you need a tool or library the image lacks,
+stop and ask under QUESTIONS; never vendor or download it at runtime as a workaround." Growing
+the image is the plan's job (a step with `"image": true`), never a round's.
