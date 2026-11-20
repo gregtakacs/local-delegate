@@ -128,19 +128,37 @@ whole build context:
 ```dockerfile
 ARG BASE=delegate-worker:local
 FROM ${BASE}
-RUN …the toolchain, pinned to the versions the repo's CI uses…
+RUN …the toolchain, pinned EXACTLY to the versions the repo's CI uses…
 RUN go version && clang --version   # fail the build, not the first task
 ```
+
+**Pin everything it adds.** The project image is part of the toolchain contract: a rebuild that
+silently changes a compiler changes the bytes the repo's own gates compare (gorb-os pinned
+`clang-21` to only its major while its shelf check is byte-for-byte on clang's output). So every
+add is an exact pin — apt `name=version`, pip `==` (or a `#sha256=` URL), `npm -g pkg@x.y.z`, a
+`curl`/`wget` URL with a version token or a following `sha256sum -c`, a `git clone --branch <tag>`
+(not `main`/`master`/`HEAD`) or a later `git checkout <sha>`, and a `FROM` that is the base or is
+`@sha256`-pinned. An `ARG NAME=1.27.2` whose `${NAME}` carries the version counts as pinned.
+`delegate build --repo` runs `lib/pinlint.py` on the Dockerfile **first** and refuses (exit 2, the
+findings on stderr) if anything is unpinned; `DELEGATE_PINLINT=warn` downgrades that to a warning.
+When a thing genuinely cannot be pinned exactly, write it as an explicit, reviewed exception on the
+line: `# delegate: unpinned-ok <why it cannot be pinned>` — the reason is required. `delegate
+doctor` flags a repo image built by hand (not the base, no repo-layer stamp): its fix is always to
+move the Dockerfile to `.delegate/Dockerfile` and build it with `delegate build --repo DIR`.
 
 `delegate build --repo DIR` builds it as `delegate-worker-<repo>:local`. Every task on that repo
 then runs in it: `run` chooses it and records it in the task (`IMAGE` in `meta.env`), and
 `continue`, `exec`, `verify` and every chain step reuse that record, so no command lands in
 the wrong image for want of an export. It is stale (and refused, naming the build that fixes
 it) when the base changed or anything under `.delegate/` did. An explicit `DELEGATE_IMAGE`
-still overrides it, and an untrusted repository's Dockerfile is never built or used.
+still overrides it, and an untrusted repository's Dockerfile is never built or used. A chain
+step can *change* the Dockerfile and get the image rebuilt for it: a step marked
+`"image": true` (see [Chains](#chains-a-whole-slice-unattended)) — the rebuild stays on the
+host, in the chain's hands, never in the worker's. Under `DELEGATE_UNTRUSTED_REPO=1` a plan
+with any image step is refused at load.
 
-What belongs there: the toolchains the repo's CI installs, at CI's versions; the rule is that
-what CI runs, the worker can run. What does not: project dependencies (modules, packages from
+What belongs there: the toolchains the repo's CI installs, at CI's exact versions (pinned as the
+block above requires); the rule is that what CI runs, the worker can run. What does not: project dependencies (modules, packages from
 the repo's own lockfiles), which the worker fetches itself through the egress proxy into the
 shared caches, and anything only a person or the host has (a device, a GUI browser on the
 host, a signing key), which stays with the orchestrator. A worker may propose a change to
@@ -558,6 +576,28 @@ bug**: when the gate names a file the step's own spec mentions, no round can fix
 at once (exit 3) and says to fix the plan and re-check it. A gate failure on any other path gets one
 targeted retry, whose message lists the paths and tells the worker to revert them or stop as blocked.
 A step with no `scope` is untouched by all of this: the same verify, the same retries as before.
+
+**Image steps: `"image": true` on a step.** The repo image (`.delegate/Dockerfile`, see
+[Runners](#runners)) is normally rebuilt by a human after review. A slice whose work needs a tool
+the image lacks can rebuild it as one of its own steps: mark that step `"image": true`, and it
+must also be `"hard": true` — an image step is by definition a load-bearing one. The step edits
+`.delegate/Dockerfile` and installs what it needs itself; its verify must check the tool is there
+(`command -v`), so the image change has to survive verification. When the step's round ends — done
+or verify-failed, since the Dockerfile is written either way — the chain runs
+`delegate build --repo <step worktree>` on the host: pin-lint first, and a refusal stops the chain
+with the step reported `image-refused` (exit 3) and the findings in the step's report. A successful
+build is followed by a re-verify of the step in the fresh image (`delegate verify`): pass keeps the
+step `done`, fail takes the normal retry path — and a retry after an image verify failure is told
+the `image-build.log` tail, not the stale previous verify. The build and re-verify log to the
+round directory as `image-build.log`, and the step's report grows an IMAGE section (layer stamp,
+pin-lint result, re-verify verdict). A later step that needs the new tool gets `"image": true` too
+so it runs **on the rebuilt image**: the chain pins every later step to the tag and base it just
+built (exported as `DELEGATE_IMAGE`/`DELEGATE_BASE_IMAGE`, recorded in the task's `meta.env`, so
+`continue`, `exec` and re-verify stay on it), and the chain's rebuild is the fresh-enough proof —
+the staleness refusal stays untouched for every other path. A step **without** the key whose diff
+touches `.delegate/` is refused at acceptance (the worker changed the image contract without
+declaring it), and a chain plan with image steps is refused at load under
+`DELEGATE_UNTRUSTED_REPO=1` — rebuilding runs the repo's Dockerfile on the host.
 
 ### Watching locally: `delegate top`
 

@@ -5,7 +5,9 @@
   delegate chain PLAN.json --check    lint the plan (each step's "scope" vs the files its spec
                                       owns; every verify runs the plan's "gate" — or its
                                       "step_gate" when the plan names one and the step is
-                                      neither "hard" nor the last; and a plan whose 2+ steps are
+                                      neither "hard" nor the last; and an "image" step that is
+                                      not "hard", or a scope reaching .delegate/ without the
+                                      "image" key; and a plan whose 2+ steps are
                                       all "hard": true gets a warning, never a refusal), print
                                       each step's verify as stored, and exit: nothing starts, no
                                       state is written, no hook
@@ -71,7 +73,9 @@ PLAN.json (written by the orchestrator, normally next to the specs):
     "steps": [
       {"name": "w4-1-handles", "spec": "docs/specs/w4-1.md", "verify": "npm ci && npm test",
        "scope": ["src/handles/", "tests/fixtures/handles/"]},
-      {"name": "w4-2-publish", "spec": "docs/specs/w4-2.md", "verify": "...", "hard": false}
+      {"name": "w4-2-publish", "spec": "docs/specs/w4-2.md", "verify": "...", "hard": false},
+      {"name": "w4-3-image", "spec": "docs/specs/w4-3.md", "verify": "...",
+       "scope": [".delegate/Dockerfile"], "image": true, "hard": true}   # grows the worker image
     ]
   }
 
@@ -102,6 +106,21 @@ branch that step itself begins from. A gate failure naming a file the spec owns 
 chain stops at once (exit 3) rather than spending retries on it, because no round can fix the plan.
 A failure on any other path gets one targeted retry, to revert it. A step with no `scope` behaves
 exactly as before.
+
+A step may carry `"image": true` when it grows the project's worker image (it edits
+`.delegate/Dockerfile`): such a step must also be `"hard": true`, and a step whose scope names
+anything under `.delegate/` must carry the key (`--check` refuses both rules' breaches, naming the
+step; an untrusted plan is refused for the key outright, since the rebuild runs the repo's own
+Dockerfile on the host). When such a step's round ends (its verify passed in the OLD image or
+failed), the chain rebuilds the image on the host — `delegate build --repo <the step's worktree>`,
+pin-lint first: a refusal stops the chain with the step `image-refused` and the findings in its
+report — and re-runs the step's verify through `delegate verify` in the NEW image: its verdict
+decides the step, not the old image's. The build and re-verify log to the round's image-build.log
+and the report gains an IMAGE section. The chain then pins that tag (DELEGATE_IMAGE, bin/delegate's
+caller's-image rule) for every later call, so later steps run on the rebuilt image without a
+rebuild of their own; the freshness check is untouched, and a stale image outside this path still
+refuses. A step without the key whose diff touches `.delegate/` is refused at acceptance, like any
+out-of-scope file: the chain stops at once.
 
 In place ("here": true, no "base"): every step runs `delegate run --here` in the plan's repo
 checkout itself, natively, in sequence, so the user watches the edits land live. The checkout
@@ -162,25 +181,61 @@ def last_report(tid):
     return (rounds[-1] if rounds else None), None
 
 
-def verify_tail(tid, n, lines=40):
+def verify_tail(tid, n, lines=40, name="verify.log"):
     try:
-        t = (STATE / tid / "rounds" / str(n) / "verify.log").read_text(errors="replace").splitlines()
+        t = (STATE / tid / "rounds" / str(n) / name).read_text(errors="replace").splitlines()
         return "\n".join(t[-lines:])
     except OSError:
         return "(no verify log)"
+
+
+def task_meta(tid):
+    """A task's meta.env as a dict — the naive read (split on the first '=') for the few plain
+    fields the chain names (REPO, WORKTREE, BASE_SHA); meta.env is shell-quoted, and a value
+    needing ANSI-C quoting is not something these fields ever hold."""
+    meta = {}
+    try:
+        for line in (STATE / tid / "meta.env").read_text().splitlines():
+            if "=" in line:
+                k, v = line.split("=", 1)
+                meta[k] = v.strip("'\"")
+    except OSError:
+        pass
+    return meta
+
+
+def round_files(tid, n):
+    """The paths the round's commit changed, name-only, through the delegate binary (which
+    sandboxes git for an untrusted task's repo — the chain runs no plain host git on a plan repo).
+    None when it cannot say: an unknown command, a round without a recorded commit."""
+    r = sh([DELEGATE, "_round-diff", tid, str(n)])
+    if r.returncode:
+        return None
+    return [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]
+
+
+def touched_image_dir(paths):
+    """The changed paths that reach .delegate/ — what the worker image is built from."""
+    return [p for p in (paths or []) if p == ".delegate" or p.startswith(".delegate/")]
 
 
 CONTRADICTION = ("If the spec contradicts itself, an existing test or the verify command, do not keep "
                  "trying: end with STATUS: blocked and state the contradiction under QUESTIONS.")
 
 
-def retry_message(rep, tid, n, scope_paths=()):
+def retry_message(rep, tid, n, scope_paths=(), log="verify.log"):
     st = rep.get("status")
     if st == "done-but-verify-failed":
         msg = (f"The harness ran this step's verify command after your round and it FAILED (exit "
-               f"{rep.get('verify_rc')}). Here is the tail of its output:\n\n```\n{verify_tail(tid, n)}\n```\n\n"
+               f"{rep.get('verify_rc')}). Here is the tail of its output:\n\n```\n{verify_tail(tid, n, name=log)}\n```\n\n"
                "Find the cause and fix it in the code (never by weakening a test or the check), run the "
                "verify command yourself until it passes, then finish with the closing block.")
+        if log == "image-build.log":
+            msg += ("\n\nThis step is an image step: the chain rebuilt the project's worker image from "
+                    "your `.delegate/` change on the host and re-ran this verify inside the new image; "
+                    "the tail above is that re-verify and its build log. The failure is in the new "
+                    "image — fix the code (or the Dockerfile's pin) so it passes there, and keep the "
+                    "`.delegate/` change: it is this step's job.")
         if scope_paths:
             msg += ("\n\nThe scope gate refused this step before its verify ran: these changed paths are "
                     "outside this step's scope:\n"
@@ -403,6 +458,28 @@ def lint_gate(plan):
         die("\n".join(msgs), 2)
 
 
+def lint_image(plan):
+    """The two plan rules for `"image": true` (the step key that grows the project's worker
+    image): a step whose scope names anything under `.delegate/` must carry the key — that
+    directory is the build context every later worker runs — and a step with the key must be
+    `"hard": true`, because what it lands changes the toolchain of the whole rest of the chain.
+    Refused at lint (exit 2, one line per breach, each naming its step) — `--check` and run alike."""
+    msgs = []
+    for s in plan["steps"]:
+        if s.get("scope") and not s.get("image"):
+            for e in s["scope"]:
+                if e.split("/")[0] == ".delegate":
+                    msgs.append(f"step {s['name']}: scope entry {e!r} reaches .delegate/, the "
+                                f"project's worker-image build context: the step must carry "
+                                f"\"image\": true (which also requires \"hard\": true)")
+                    break
+        if s.get("image") and not s.get("hard"):
+            msgs.append(f"step {s['name']}: \"image\": true rebuilds the image every later step "
+                        f"runs in: the step must also be \"hard\": true")
+    if msgs:
+        die("\n".join(msgs), 2)
+
+
 def lint_plan(plan):
     """Every path a step's spec owns must be inside that step's scope; a step with no 'scope' is
     not linted. Refuses (exit 2) before any state is written and before any step starts."""
@@ -443,19 +520,28 @@ def check_plan(plan):
     for i, s in enumerate(plan["steps"], 1):
         if s.get("scope"):
             print(f"  {i}. {s['name']}  scope: {len(s['scope'])} entries, "
-                  f"owned: {len(s.get('_owned') or [])} (all covered)")
+                  f"owned: {len(s.get('_owned') or [])} (all covered)"
+                  + ("  [image: the chain rebuilds .delegate/ and re-verifies in the new image]"
+                     if s.get("image") else ""))
         else:
-            print(f"  {i}. {s['name']}  no scope")
+            print(f"  {i}. {s['name']}  no scope"
+                  + ("  [image: the chain rebuilds .delegate/ and re-verifies in the new image]"
+                     if s.get("image") else ""))
         for line in s["verify"].splitlines() or [""]:
             print(f"       verify: {line}")
 
 
 def scope_violations(tid, n):
-    """The paths the scope gate refused in this round's verify.log, in order ([] if it said nothing)."""
-    try:
-        lines = (STATE / tid / "rounds" / str(n) / "verify.log").read_text(errors="replace").splitlines()
-    except OSError:
-        return []
+    """The paths the scope gate refused in this round's logs, in order ([] if it said nothing).
+    An image step's re-verify prints the gate's lines into image-build.log, so both logs are read
+    when the round has them."""
+    rd = STATE / tid / "rounds" / str(n)
+    lines = []
+    for name in ("verify.log", "image-build.log"):
+        try:
+            lines += (rd / name).read_text(errors="replace").splitlines()
+        except OSError:
+            pass
     out = []
     for line in lines:
         rest = line[len("DELEGATE-SCOPE:"):].strip() if line.startswith("DELEGATE-SCOPE:") else ""
@@ -488,6 +574,145 @@ def print_step_verify(plan, name, base):
             sys.stdout.write(step_verify(s, base or None))
             return
     die(f"{plan['_path']} has no step {name!r}", 2)
+
+
+# --------------------------------------------------------------------- image steps ----
+# A step with "image": true changes what every later worker runs: it edits the project's own
+# image context, .delegate/. Its own round can only verify in the OLD image, so when the round
+# ends the chain rebuilds on the host (`delegate build --repo <the step's worktree>`; pin-lint
+# first, and a refusal stops the chain — an unpinned add is a source edit away, not a retry
+# away) and re-runs the step's verify in the NEW image: that verdict decides the step. The chain
+# then PINS that tag (exports DELEGATE_IMAGE, bin/delegate's caller's-image rule) for every later
+# call of the chain, so every later step's task records it and cannot land in another image. The
+# freshness check itself is untouched: a caller that names its image has chosen its own risk, and
+# outside a chain that pins, a tag that does not match the tree still refuses exactly as before.
+
+IMAGE_ENV = "DELEGATE_IMAGE"
+IMAGE_BASE_ENV = "DELEGATE_BASE_IMAGE"
+
+
+def pin_image(plan, st, tag):
+    """Pin this chain's later delegate calls to the tag it just built: the caller's-image rule
+    (DELEGATE_IMAGE_CALLER, bin/delegate line 32) records it in every later step's meta.env, so
+    run/continue/exec/verify and a retry all use it. DELEGATE_BASE_IMAGE goes along: bin/delegate
+    would otherwise fix the base AT the caller's image, and a repo tag is never the base."""
+    base = sh([DELEGATE, "_base-image"])
+    base = base.stdout.strip().splitlines()[0] if base.returncode == 0 and base.stdout.strip() else ""
+    if not base:
+        note("image step: this binary would not name its base image; the chain pins the tag but "
+             "not the base, so a later `delegate build` in this chain may retarget it")
+    os.environ[IMAGE_ENV] = tag                       # this process's later calls: retries included
+    if base:
+        os.environ[IMAGE_BASE_ENV] = base
+    st["image_tag"] = tag                             # and a resumed run re-exports both
+    st["image_base"] = base or None
+    save_state(plan, st)
+
+
+def image_report(rd, info):
+    """The round's report after an image pass: an IMAGE section in report.md, an "image" block in
+    report.json, and the step's status rewritten to what the pass decided — `image-refused` on a
+    pin-lint refusal, the re-verify's outcome otherwise (done, or done-but-verify-failed even when
+    the old image said done: the new image is the environment this step lands in). What the round
+    itself said is kept under status_before_image; nothing is rewritten silently."""
+    rj = rd / "report.json"
+    try:
+        rep = json.loads(rj.read_text())
+    except (OSError, ValueError):
+        rep = {}
+    refused = info.get("build_rc", 0) != 0
+    final = "image-refused" if refused else ("done" if info.get("reverify_rc") == 0
+                                            else "done-but-verify-failed")
+    if rep.get("status") != final:
+        rep["status_before_image"] = rep.get("status")
+        rep["status"] = final
+    rep["image"] = {"build": info.get("worktree"), "build_rc": info.get("build_rc"),
+                    "pinlint": info.get("pinlint"), "layer_stamp": info.get("stamp"),
+                    "tag": info.get("tag"), "reverify_rc": info.get("reverify_rc")}
+    try:
+        rj.write_text(json.dumps(rep, indent=2))
+    except OSError:
+        pass
+    lines = ["", "## IMAGE", "",
+             f"- `delegate build --repo {info.get('worktree')}`: exit {info.get('build_rc')}"
+             f" (pinlint: {info.get('pinlint')})"]
+    if info.get("stamp"):
+        lines.append(f"- new image layer stamp: `{info['stamp']}`")
+    if info.get("reverify_rc") is not None:
+        lines.append(f"- re-verified in the new image (`delegate verify`): exit "
+                     f"{info['reverify_rc']} — step status: {final}")
+    if refused:
+        lines += ["", "Not accepted: the rebuild was refused, so nothing ran in a new image. Pin "
+                  "every add (or carry the reviewed `# delegate: unpinned-ok <why>` line), then "
+                  "resume the step.", "", "The build said:"]
+        lines += ["    " + ln for ln in (info.get("lines") or [])[-15:]]
+    elif info.get("reverify_rc") != 0:
+        lines += ["", "The step's verify failed **inside the rebuilt image**: the tail of the build "
+                  "and re-verify is in `image-build.log` beside this report."]
+    md = rd / "report.md"
+    try:
+        text = md.read_text(errors="replace") if md.exists() else ""
+        if "## IMAGE" not in text:
+            with md.open("a") as fh:
+                fh.write("\n".join(lines) + "\n")
+    except OSError:
+        pass
+
+
+def image_step(plan, s, tid, n, base, here, st):
+    """One image step's round ending (the contract): rebuild the project's image from the step's
+    tree on the host, pin this chain to the tag that build wrote, re-run the step's verify inside
+    it, and record all of it in the round (image-build.log + the report's IMAGE section). Returns
+    ("pass" | "fail" | "refused", info).
+
+    The pin, not a loosened freshness rule: `build --repo` names the tag after the tree it built
+    (a step's worktree, not the main checkout), so later steps could not find this tag on their
+    own, and a chain that exports DELEGATE_IMAGE is a chain that says which image its steps run
+    in. It lands in each step's meta.env (IMAGE), so continue/exec/verify reuse it and a later
+    step's round cannot drift. The check itself is untouched: outside a chain that pins, an old
+    tag for a changed .delegate/ still refuses exactly as today."""
+    worktree = task_meta(tid).get("WORKTREE") or plan["repo"]
+    rd = STATE / tid / "rounds" / str(n)
+    log = [f"$ delegate build --repo {worktree}",
+           "delegate chain: an image step: the round ended in the old image; rebuilding on the "
+           "host from the step's tree, then re-running the verify inside the new image"]
+    r = subprocess.run([DELEGATE, "build", "--repo", worktree], text=True, capture_output=True)
+    log += (r.stdout or "").splitlines() + (r.stderr or "").splitlines()
+    info = {"worktree": worktree, "build_rc": r.returncode, "stamp": None, "reverify_rc": None}
+    if r.returncode:
+        info.update({"pinlint": "refused", "lines": log})
+        log.append(f"(build exited {r.returncode})")
+        rd.mkdir(parents=True, exist_ok=True)
+        (rd / "image-build.log").write_text("\n".join(log) + "\n")
+        image_report(rd, info)
+        return "refused", info
+    info["pinlint"] = "clean"
+    stamp, tag = "", ""
+    rs = sh([DELEGATE, "_layer-stamp", worktree])
+    if rs.returncode == 0:
+        stamp = rs.stdout.strip()
+    rn = sh([DELEGATE, "_image-name", worktree])
+    if rn.returncode == 0:
+        tag = rn.stdout.strip().splitlines()[0] if rn.stdout.strip() else ""
+    if re.fullmatch(r"[0-9a-f]{64}", stamp or "") and tag.startswith("delegate-worker-"):
+        pin_image(plan, st, tag)
+    else:
+        note("image step: the rebuilt image's tag and stamp could not be read back from the "
+             "binary; this chain will not pin a later step's image (an old tag then refuses as "
+             "it always has)")
+    info["stamp"] = stamp or None
+    info["tag"] = tag or None
+    log += ["", "$ delegate verify " + tid + " '<the step verify>'",
+            "delegate chain: re-verifying the step inside the rebuilt image",
+            f"pinned to: {tag or '(no tag read back)'}"]
+    rv = subprocess.run([DELEGATE, "verify", tid, step_verify(s, None if here else base)],
+                        text=True, capture_output=True)
+    log += (rv.stdout or "").splitlines() + (rv.stderr or "").splitlines()
+    info["reverify_rc"] = rv.returncode
+    log.append(f"(re-verify exited {rv.returncode})")
+    (rd / "image-build.log").write_text("\n".join(log) + "\n")
+    image_report(rd, info)
+    return ("pass" if rv.returncode == 0 else "fail"), info
 
 
 # The gate's last line. Reports and logs show everything up to it as "[scope gate]" (bin/delegate
@@ -540,6 +765,11 @@ def load_plan(path, lint=False):
         # Refused here, at load: no step starts and no chain state is written for this plan.
         die('DELEGATE_UNTRUSTED_REPO=1: an in-place plan runs git in the checkout on the host; '
             'use an isolated plan (a "base", no "here")', 2)
+    if UNTRUSTED and any(s.get("image") for s in plan.get("steps") or []):
+        # Same reason, same place: an image step builds the repo's .delegate/Dockerfile on the
+        # host, which is exactly what the untrusted flag exists to keep the repo from doing.
+        die('DELEGATE_UNTRUSTED_REPO=1: an "image": true step builds the repository\'s own '
+            'Dockerfile on the host; refused', 2)
     for k in ("name", "steps") + (() if here else ("base",)):
         if not plan.get(k):
             die(f"plan is missing '{k}'")
@@ -575,6 +805,7 @@ def load_plan(path, lint=False):
     if lint:
         lint_plan(plan)
         lint_gate(plan)
+        lint_image(plan)
     return plan
 
 
@@ -683,6 +914,12 @@ def run(plan):
     st["steps"] = st.get("steps") or {}
     st["plan"] = plan["_path"]              # so `delegate top` can name the command that resumes it
     st["pid"] = os.getpid()                 # so `delegate wait` can tell a live runner from a dead one
+    if st.get("image_tag"):
+        # an image step already rebuilt the project's image on this chain: re-export the pin so
+        # every delegate call from here on (a resumed run included) runs in that tag.
+        os.environ[IMAGE_ENV] = st["image_tag"]
+        if st.get("image_base"):
+            os.environ[IMAGE_BASE_ENV] = st["image_base"]
     save_state(plan, st)
     if here:
         common += ["--here"]
@@ -730,10 +967,45 @@ def run(plan):
         while True:
             n, rep = last_report(tid)
             stt = (rep or {}).get("status")
-            st["steps"].setdefault(s["name"], {}).update({"status": stt, "rounds": n})
+            rec = st["steps"].setdefault(s["name"], {})
+            rec.update({"status": stt, "rounds": n})
             save_state(plan, st)
+            if s.get("image") and stt in ("done", "done-but-verify-failed") and rec.get("image_round") != n:
+                # The round's contract, stated above: its verify passed (or failed) in the OLD
+                # image; rebuild on the host from the step's tree and re-run the verify inside the
+                # new one. Once per round, whatever it said (the round's commit file is the base
+                # the next step branches from, so this pass decides the round that produced it).
+                rec["image_round"] = n
+                note(f"{label}: image step — rebuilding on the host from the step's tree")
+                verdict, info = image_step(plan, s, tid, n, base, here, st)
+                if verdict == "refused":
+                    rec["status"] = "image-refused"
+                    save_state(plan, st)
+                    print_status(plan)
+                    die(f"{label}: the rebuild was REFUSED (pin-lint): the .delegate/Dockerfile is "
+                        f"not fully pinned, and the chain does not run on an image it refused. "
+                        f"`delegate report {tid}` names the lines; fix them (delegate continue "
+                        f"{tid} -m \"pin it\"), then re-run the chain.", 3)
+                n, rep = last_report(tid)                       # the report now says what the pass decided
+                stt = (rep or {}).get("status")
+                rec.update({"status": stt, "image_verdict": verdict})
+                save_state(plan, st)
+                if verdict == "pass":
+                    note(f"{label}: accepted in the rebuilt image")
+            if stt == "done" and not s.get("image"):
+                # A step without the key that touched .delegate/ is refused AT ACCEPTANCE, like any
+                # out-of-scope file: its round changed the build context every later worker runs
+                # from, and no rebuild happened for it. Best-effort: a chain whose delegate binary
+                # has no _round-diff, or a round with no commit file, is not refused on a guess.
+                bad = touched_image_dir(round_files(tid, n))
+                if bad:
+                    print_status(plan)
+                    die(f"{label}: its round changed {', '.join(bad)} — .delegate/ is the "
+                        f"project's worker-image build context, and a step without \"image\": "
+                        f"true cannot rebuild it: give the step the key in {plan['_path']} "
+                        f"(which requires \"hard\": true), or send feedback to revert the path. "
+                        f"Nothing was branched from this round.", 3)
             if stt == "done":
-                note(f"{label}: done in {n} round(s)")
                 if here:
                     commit_step(plan, s, st)
                 if plan.get("_on_step"):
@@ -761,7 +1033,9 @@ def run(plan):
             tries += 1
             note(f"{label}: {stt} — retry {tries}/{retries} in the same session")
             msg_file = STATE / tid / "chain-retry.md"
-            msg_file.write_text(retry_message(rep or {}, tid, n, scope_paths))
+            # an image step whose RE-verify failed gets that tail, not the old image's verify.log
+            log = "image-build.log" if rec.get("image_verdict") == "fail" else "verify.log"
+            msg_file.write_text(retry_message(rep or {}, tid, n, scope_paths, log))
             # the plan's verify, not the one the task was started with: an edited plan takes effect
             subprocess.run([DELEGATE, "continue", tid, str(msg_file),
                             "--verify", step_verify(s, None if here else base),
