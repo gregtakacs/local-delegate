@@ -73,7 +73,7 @@ When the chain stops early (exit 3), read **only** the failing step's report
 
 Then re-run the same `delegate chain` command. It resumes from the failed step.
 
-**A step you get past is accepted, with how.** "Blocked" means only one thing to the person watching: *they* are needed. When you move a task or a chain past a round that did not end `done` (partial, blocked, done-but-verify-failed, timeout, no-status) because you answered it, fixed it yourself, or verified it by hand, record that before you resume: `delegate accept ID -m "<what was wrong, what you decided or fixed, what verified it>"`. The work view then shows it as done* with your reason, not as blocked. If the person is genuinely needed, stop and ask instead; never accept to make a status look better.
+**A step you get past is accepted, with how.** "Blocked" means only one thing to the person watching: *they* are needed. When you move a task or a chain past a round that did not end `done` (partial, blocked, done-but-verify-failed, timeout, no-status) because you answered it, fixed it yourself, or verified it by hand, record that before you resume, before you land or squash it, and always before any `delegate rm` / `chain --clean` (cleanup deletes the task, and an acceptance can't be recorded after that) — the last step of a chain included: `delegate accept ID -m "<what was wrong, what you decided or fixed, what verified it>"`. The work view then shows it as done* with your reason, not as blocked. If the person is genuinely needed, stop and ask instead; never accept to make a status look better.
 
 ## Phase 3: one check of the whole slice
 
