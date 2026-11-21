@@ -214,10 +214,10 @@ r = [x for x in r if x['kind'] == 'round' and x['slug'] == 'lvl-launch']
 assert len(r) == 1 and r[0]['launch_sha256'] == sys.argv[2] and r[0]['schema'] == 4, r
 PY"
 
-# a chain step with "hard": true: the hard level, and every round of it carries the chain's launch
+# a chain step with "xhigh": true (since 0.9.11 "hard" alone sets the gate, not the model): the hard level, and every round of it carries the chain's launch
 mkdir -p "$T/plan"; cp "$T/spec.md" "$T/plan/spec.md"
 printf '{"name": "lvlchain", "repo": "%s", "base": "main", "retries": 1,
- "steps": [{"name": "lvl-chain", "spec": "spec.md", "verify": "true", "hard": true}]}\n' "$R" > "$T/plan/plan.json"
+ "steps": [{"name": "lvl-chain", "spec": "spec.md", "verify": "true", "hard": true, "xhigh": true}]}\n' "$R" > "$T/plan/plan.json"
 { printf 'exec env -i'; printf ' %q' "${base_env[@]}" "${cfg[@]}" "$here/bin/delegate" chain "$T/plan/plan.json"; printf '\n'; } > "$T/chain-launch.sh"
 CC="bash $T/chain-launch.sh"
 : > "$T/logs/N.log"; : > "$T/logs/H.log"

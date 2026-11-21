@@ -3,7 +3,7 @@
 <!-- The Phase 1 brief. Give pointers and fixed rules, never your own plan: the worker designs.
      First move any ruling that binds this slice from memory into the design doc; mount the
      remaining relevant memory notes with one --read each (never the whole memory folder).
-     Run it as: delegate run THIS.md --repo REPO --name <slice>-design --base BASE --hard
+     Run it as: delegate run THIS.md --repo REPO --name <slice>-design-N --base BASE   (twice, N=1 and 2: the orchestrator keeps the better)
        [--read OTHER_REPO] [--read MEMORY_NOTE …] --read ~/.claude/skills/delegate --verify "<the Acceptance command>"
      Then review the plan (Phase 2) and run the chain. -->
 
@@ -63,9 +63,9 @@ bidi characters, root escapes, `$` vs `\Z`, concurrency, one bad record among go
    `{"name":"<slice>","repo":"../..","base":"<BASE>","gate":"<the repo's gate>","step_gate":"<the quick step check, or leave it out>","retries":2,"steps":[…]}`.
    - A step gets `"hard": true` when it has real algorithmic content **or** guards a security
      boundary: validating untrusted input, building commands or paths from it, auth or tokens,
-     sandboxing, permission checks, crypto. Every other step gets `"hard": false`. `"hard"` picks
-     the model *and* the verify level: a hard step runs the full gate, never the quick check.
-     Everything else runs on the normal model: UI plumbing, tests, docs and pattern-following
+     sandboxing, permission checks, crypto. Every other step gets `"hard": false`. `"hard"` sets
+     the verify level, not the model: a hard step runs the full gate, never the quick check.
+     Every step runs on the normal model. UI plumbing, tests, docs and pattern-following
      steps are not hard. When in doubt about a boundary, mark it hard; when in doubt about
      difficulty, don't.
    - Every step gets `"scope"`: the path patterns it may change — exactly the files its own spec

@@ -45,7 +45,7 @@ the repo path, and the branch to build on. If any of these is missing, ask once,
    Give every step a **verify command that really exercises it**: tests, typecheck, a build,
    a migration against `$DATABASE_URL`. The verify gate replaces your per-step review. Use
    `"service": "postgres"` for database work, `"read": [...]` for code to port from another
-   repo, `"hard": true` only for steps with real algorithmic content, `"retries": 2`.
+   repo, `"hard": true` for steps that guard a boundary or have real algorithmic content (it sets the full gate, not the model: every step runs the normal model and escalates once to the hard one when its retries are spent), `"retries": 2`.
    If a step needs a tool the project's worker image (`.delegate/Dockerfile`) lacks, make it
    an **image step**: `"image": true` requires `"hard": true`; the step edits the Dockerfile
    and installs what it needs itself, and its verify checks the tool is there (`command -v`).

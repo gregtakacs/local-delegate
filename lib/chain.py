@@ -90,7 +90,11 @@ Each step runs on the previous step's branch, so the last step's branch holds th
 slice, one commit per round. A step is accepted only when the harness status is `done`
 (the worker said done AND the verify command passed). Otherwise the chain sends the failure
 back into the same session (verify output tail, or what went wrong) up to `retries` times.
-It stops — exit 3 — when a step is still failing, or at once on `blocked` (a decision only
+A step still failing after its retries gets one last round in the same session on the hard model
+(`delegate continue --hard`), unless the plan sets `"escalate": false` or the two models are one;
+then the chain stops — exit 3. Every step starts on the normal model: `"hard": true` sets the verify
+level, not the model; `"xhigh": true` on a step or the plan starts it on the hard model. The chain
+also stops at once on `blocked` (a decision only
 the orchestrator can make). Re-running the same command resumes from the failed step:
 fix its spec or answer its question first, then run again. A step whose last round was
 interrupted (its harness died before writing the report) is finished first, with
@@ -889,6 +893,24 @@ def step_verify_retries(plan, s):
     return ["--verify-retries", str(int(v))] if isinstance(v, int) and not isinstance(v, bool) else []
 
 
+def step_model(plan, s):
+    """The model level a step's rounds start on. `"hard": true` is about the gate and the care a
+    boundary step gets, not the model: every step starts on the normal model unless the step (or
+    the plan) sets `"xhigh": true`. Measured (LLM-Stats 2026-11-effort-medium-vs-xhigh): on hard
+    work the xhigh level matched medium on quality and took 25-70% longer."""
+    return ["--hard"] if s.get("xhigh", plan.get("xhigh", False)) is True else []
+
+
+def escalation_left(plan, s, escalated):
+    """One last round on the hard model after a normal-model step spends its retries: true when
+    this run has not escalated the step yet, the step did not already run on it, the plan allows
+    it (`"escalate": false` turns it off), and the hard model is a different model."""
+    if escalated or step_model(plan, s) or plan.get("escalate", True) is False:
+        return False
+    nm, hm = os.environ.get("DELEGATE_MODEL"), os.environ.get("DELEGATE_MODEL_HARD")
+    return not (nm and hm and nm == hm)
+
+
 def run(plan):
     retries = int(plan.get("retries", 2))
     common = []
@@ -961,7 +983,8 @@ def run(plan):
             if rep is None:
                 die(f"{label}: finishing round {n} produced no report (exit {r.returncode}): "
                     f"`delegate finish {tid}` (then `delegate report {tid}`)", 2)
-        hard = ["--hard"] if s.get("hard") else []
+        hard = step_model(plan, s)
+        escalated = False
         verify = step_verify(s, None if here else base)
         if n is None:
             note(f"{label}: starting " + ("in place" if here else f"from {base}"))
@@ -1041,12 +1064,21 @@ def run(plan):
                                  f"plan's scope is wrong. Fix the step's \"scope\" in {plan['_path']} "
                                  f"(delegate chain {plan['_path']} --check), then re-run the chain."
                                  for p in named), 3)
+            escalate = False
             if tries >= retries:
-                print_status(plan)
-                die(f"{label} still '{stt}' after {tries} retr{'y' if tries == 1 else 'ies'}: "
-                    f"`delegate report {tid}`. Fix the spec or send feedback, then re-run the chain.", 3)
-            tries += 1
-            note(f"{label}: {stt} — retry {tries}/{retries} in the same session")
+                if not escalation_left(plan, s, escalated):
+                    print_status(plan)
+                    die(f"{label} still '{stt}' after {tries} retr{'y' if tries == 1 else 'ies'}"
+                        f"{' and one round on the hard model' if escalated else ''}: "
+                        f"`delegate report {tid}`. Fix the spec or send feedback, then re-run the chain.", 3)
+                escalated = escalate = True
+                rec["escalated_round"] = n + 1
+                save_state(plan, st)
+                note(f"{label}: {stt} after {tries} retr{'y' if tries == 1 else 'ies'} — one last "
+                     f"round on the hard model, in the same session")
+            else:
+                tries += 1
+                note(f"{label}: {stt} — retry {tries}/{retries} in the same session")
             msg_file = STATE / tid / "chain-retry.md"
             # an image step whose RE-verify failed gets that tail, not the old image's verify.log
             log = "image-build.log" if rec.get("image_verdict") == "fail" else "verify.log"
@@ -1054,7 +1086,7 @@ def run(plan):
             # the plan's verify, not the one the task was started with: an edited plan takes effect
             subprocess.run([DELEGATE, "continue", tid, str(msg_file),
                             "--verify", step_verify(s, None if here else base),
-                            *step_verify_retries(plan, s)],
+                            *step_verify_retries(plan, s), *(["--hard"] if escalate else hard)],
                            stdout=subprocess.DEVNULL)
         base = f"delegate/{s['name']}"
 

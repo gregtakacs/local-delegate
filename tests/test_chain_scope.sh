@@ -368,8 +368,8 @@ check "…and the changed set is that merge-base diff, which is what makes it tr
 step_json() { # step_json NAME SPEC '<scope json>' → one step object ('' = no scope)
   local extra=""; [ -n "${3:-}" ] && extra=',"scope":'"$3"
   printf '{"name":"%s","spec":"%s","verify":"true"%s}' "$1" "$2" "$extra"; }
-cplan() { # cplan '<steps json>' [retries]
-  printf '{"name":"c","repo":"%s","base":"main","retries":%s,"steps":[%s]}\n' "$T/repo" "${2:-2}" "$1" > $T/plan.json; }
+cplan() { # cplan '<steps json>' [retries]   (budget tests: no hard-model escalation round)
+  printf '{"name":"c","repo":"%s","base":"main","retries":%s,"escalate":false,"steps":[%s]}\n' "$T/repo" "${2:-2}" "$1" > $T/plan.json; }
 fresh() { rm -rf $DELEGATE_STATE; mkdir -p $DELEGATE_STATE; rm -f $SCRIPT/*.log; }
 fresh; printf 'done\n' > $SCRIPT/a; printf 'done\n' > $SCRIPT/b
 cplan "$(step_json a docs/specs/a.md '["hub/app.py"]'),$(step_json b docs/specs/b.md '')"

@@ -13,10 +13,12 @@ cat > $T/fake-delegate <<'F'
 # statuses from $SCRIPT/<name> (one per round)
 cmd=$1; shift
 if [ "$cmd" = run ]; then
+  case " $* " in *" --hard "*) echo "run" >> "$DELEGATE_STATE/hard-runs";; esac
   while [ $# -gt 0 ]; do case "$1" in --name) name=$2; shift 2;; --base) echo "$2" >> "$DELEGATE_STATE/bases"; shift 2;; --here) touch "$DELEGATE_STATE/saw-here"; shift;; *) shift;; esac; done
   id="repo-$name"
   [ -n "${EDIT:-}" ] && echo "$name" >> "$EDIT"     # in-place tests: the "worker" edits the checkout
 elif [ "$cmd" = continue ]; then id=$1; name=${id#repo-}; cp "$2" "$DELEGATE_STATE/last-retry-$name"
+  case " $* " in *" --hard "*) echo "$id" >> "$DELEGATE_STATE/hard-continues";; esac
   [ "${3:-}" = --verify ] && printf '%s\n' "$4" >> "$DELEGATE_STATE/retry-verify-$name"
 elif [ "$cmd" = finish ]; then id=$1; name=${id#repo-}; echo "$id" >> "$DELEGATE_STATE/finished"
   # plays `delegate finish`: the round dir already exists; write the report the dead harness owes
@@ -34,7 +36,8 @@ printf '{"status":"%s","verify_rc":%s}\n' "$st" "$([ "$st" = done-but-verify-fai
 echo "boom: assertion failed in test_x" > $d/$n/verify.log
 F
 chmod +x $T/fake-delegate
-plan() { printf '{"name":"t","repo":"%s","base":"main","retries":%s,"steps":[{"name":"a","spec":"docs/a.md","verify":"true"},{"name":"b","spec":"docs/b.md","verify":"true"}]}' "$T/repo" "$1" > $T/plan.json; }
+# the retry-budget tests below predate the hard-model escalation (5c): they turn it off
+plan() { printf '{"name":"t","repo":"%s","base":"main","retries":%s,"escalate":false,"steps":[{"name":"a","spec":"docs/a.md","verify":"true"},{"name":"b","spec":"docs/b.md","verify":"true"}]}' "$T/repo" "$1" > $T/plan.json; }
 fail=0; check(){ if eval "$2"; then echo "ok   $1"; else echo "FAIL $1"; fail=1; fi; }
 export SCRIPT=$T/script; mkdir -p $SCRIPT
 
@@ -80,6 +83,37 @@ python3 $here/lib/chain.py $T/plan.json >/dev/null 2>&1; rc=$?
 check "resume finishes the chain" '[ $rc = 0 ] && [ -d $DELEGATE_STATE/repo-b/rounds/1 ]'
 python3 $here/lib/chain.py $T/plan.json >/dev/null 2>&1; rc=$?
 check "re-run of a finished chain is a no-op" '[ $rc = 0 ] && [ ! -d $DELEGATE_STATE/repo-b/rounds/2 ]'
+# 5b. model level: "hard" keeps the full gate but runs the normal model; "xhigh": true opts in
+rm -rf $DELEGATE_STATE; mkdir -p $DELEGATE_STATE
+printf 'done\n' > $SCRIPT/a; printf 'done\n' > $SCRIPT/b
+printf '{"name":"t","repo":"%s","base":"main","retries":1,"steps":[{"name":"a","spec":"docs/a.md","verify":"true","hard":true},{"name":"b","spec":"docs/b.md","verify":"true","xhigh":true}]}' "$T/repo" > $T/plan.json
+python3 $here/lib/chain.py $T/plan.json >/dev/null 2>&1; rc=$?
+check "a hard step runs on the normal model, an xhigh step on the hard one" \
+  '[ $rc = 0 ] && [ "$(cat $DELEGATE_STATE/hard-runs 2>/dev/null)" = run ]'
+# 5c. a normal-model step that spends its retries gets one last round on the hard model
+rm -rf $DELEGATE_STATE; mkdir -p $DELEGATE_STATE
+printf 'partial\npartial\ndone\n' > $SCRIPT/a; printf '{"name":"t","repo":"%s","base":"main","retries":1,"steps":[{"name":"a","spec":"docs/a.md","verify":"true"},{"name":"b","spec":"docs/b.md","verify":"true"}]}' "$T/repo" > $T/plan.json
+python3 $here/lib/chain.py $T/plan.json > $T/o5c 2>&1; rc=$?
+check "spent retries escalate once to the hard model, which can finish the step" \
+  '[ $rc = 0 ] && [ -d $DELEGATE_STATE/repo-a/rounds/3 ] && [ "$(cat $DELEGATE_STATE/hard-continues)" = repo-a ] && grep -q "one last round on the hard model" $T/o5c'
+check "the escalated round is recorded" \
+  "python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1]))[\"steps\"][\"a\"].get(\"escalated_round\")==3 else 1)' $DELEGATE_STATE/chains/t.json"
+rm -rf $DELEGATE_STATE; mkdir -p $DELEGATE_STATE
+printf 'partial\npartial\npartial\npartial\n' > $SCRIPT/a; printf '{"name":"t","repo":"%s","base":"main","retries":1,"steps":[{"name":"a","spec":"docs/a.md","verify":"true"},{"name":"b","spec":"docs/b.md","verify":"true"}]}' "$T/repo" > $T/plan.json
+python3 $here/lib/chain.py $T/plan.json > $T/o5d 2>&1; rc=$?
+check "…only once: a failed hard round stops the chain" \
+  '[ $rc = 3 ] && [ -d $DELEGATE_STATE/repo-a/rounds/3 ] && [ ! -d $DELEGATE_STATE/repo-a/rounds/4 ] && grep -q "and one round on the hard model" $T/o5d'
+rm -rf $DELEGATE_STATE; mkdir -p $DELEGATE_STATE
+printf '{"name":"t","repo":"%s","base":"main","retries":1,"escalate":false,"steps":[{"name":"a","spec":"docs/a.md","verify":"true"}]}' "$T/repo" > $T/plan.json
+python3 $here/lib/chain.py $T/plan.json >/dev/null 2>&1; rc=$?
+check "\"escalate\": false stops after the retries, no hard round" \
+  '[ $rc = 3 ] && [ ! -d $DELEGATE_STATE/repo-a/rounds/3 ] && [ ! -f $DELEGATE_STATE/hard-continues ]'
+rm -rf $DELEGATE_STATE; mkdir -p $DELEGATE_STATE
+printf 'partial\npartial\ndone\n' > $SCRIPT/a
+printf '{"name":"t","repo":"%s","base":"main","retries":1,"steps":[{"name":"a","spec":"docs/a.md","verify":"true"}]}' "$T/repo" > $T/plan.json
+DELEGATE_MODEL=m DELEGATE_MODEL_HARD=m python3 $here/lib/chain.py $T/plan.json >/dev/null 2>&1; rc=$?
+check "no escalation when the hard model is the same model" '[ $rc = 3 ] && [ ! -d $DELEGATE_STATE/repo-a/rounds/3 ]'
+plan 2
 # 6. in place: refuses a dirty checkout; otherwise --here, no --base, one commit per accepted step
 rm -rf $DELEGATE_STATE; mkdir -p $DELEGATE_STATE
 printf '{"name":"h","repo":"%s","here":true,"retries":1,"steps":[{"name":"a","spec":"docs/a.md","verify":"true"},{"name":"b","spec":"docs/b.md","verify":"true"}]}' "$T/repo" > $T/hplan.json
@@ -96,7 +130,7 @@ check "in place commits one per accepted step" '[ "$(git -C $T/repo log --format
 # 7. a retry runs the plan's verify as it is now, not the one the task started with (an edited plan takes effect)
 rm -rf $DELEGATE_STATE; mkdir -p $DELEGATE_STATE
 printf 'done-but-verify-failed\ndone-but-verify-failed\ndone\n' > $SCRIPT/a; printf 'done\n' > $SCRIPT/b
-printf '{"name":"t","repo":"%s","base":"main","retries":1,"steps":[{"name":"a","spec":"docs/a.md","verify":"old-check"},{"name":"b","spec":"docs/b.md","verify":"true"}]}' "$T/repo" > $T/plan.json
+printf '{"name":"t","repo":"%s","base":"main","retries":1,"escalate":false,"steps":[{"name":"a","spec":"docs/a.md","verify":"old-check"},{"name":"b","spec":"docs/b.md","verify":"true"}]}' "$T/repo" > $T/plan.json
 python3 $here/lib/chain.py $T/plan.json >/dev/null 2>&1
 sed -i 's/old-check/new-check/' $T/plan.json
 python3 $here/lib/chain.py $T/plan.json >/dev/null 2>&1; rc=$?

@@ -198,13 +198,13 @@ check "a run says nothing about hard marking: the warning is --check's" \
 # 9. the method carries the same rule the warning speaks: one sentence, in the skill (Phase 2's
 #    hard bullet) and in the design template (where it asks the design to mark hard steps). The
 #    files wrap prose at ~80 columns, so match the sentence with its line folds folded back.
-SENT='Everything else runs on the normal model: UI plumbing, tests, docs and pattern-following steps are not hard. When in doubt about a boundary, mark it hard; when in doubt about difficulty, don'"'"'t.'
+SENT='UI plumbing, tests, docs and pattern-following steps are not hard. When in doubt about a boundary, mark it hard; when in doubt about difficulty, don'"'"'t.'
 flat() { tr -s '[:space:]' ' ' < "$1"; }
 flat "$here/claude/skills/delegate/SKILL.md" > $T/skill.flat
 flat "$here/claude/skills/delegate/design-template.md" > $T/template.flat
 check "SKILL.md says it, in Phase 2's bullet about steps that guard a boundary" \
-  'grep -qF "$SENT" $T/skill.flat && awk "/Every step that guards a boundary/{f=1} f&&/runs on the normal model/{print}" '"$here"'/claude/skills/delegate/SKILL.md | grep -q "Everything else"'
+  'grep -qF "$SENT" $T/skill.flat && awk "/Every step that guards a boundary/{f=1} f&&/pattern-following/{print}" '"$here"'/claude/skills/delegate/SKILL.md | grep -q "UI plumbing"'
 check "…and the design template says it where it asks the design to mark hard steps" \
-  'grep -qF "$SENT" $T/template.flat && awk "/A step gets/{f=1} f&&/runs on the normal model/{print}" '"$here"'/claude/skills/delegate/design-template.md | grep -q "Everything else"'
+  'grep -qF "$SENT" $T/template.flat && awk "/A step gets/{f=1} f&&/pattern-following/{print}" '"$here"'/claude/skills/delegate/design-template.md | grep -q "UI plumbing"'
 
 exit $fail

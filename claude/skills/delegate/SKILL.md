@@ -51,7 +51,12 @@ not. Skip a phase only for a reason you can name.
   worker: design, then a chain; I'll verify"), so the user can say no.
 
 **Phase 1: the local worker designs the slice.**
-- Run one design task (`--hard`) from a short brief built on [design-template.md](design-template.md).
+- Run **two design tasks in parallel, on the normal model** (no `--hard`), from the same short
+  brief built on [design-template.md](design-template.md), named `<slice>-design-1` and
+  `<slice>-design-2`. Review both in Phase 2, take the better one, and log one line on why.
+  Measured (LLM-Stats, `2026-11-effort-medium-vs-xhigh`): the high-effort model wrote no better
+  designs and took 25–70% longer, while two runs at the same effort differed far more (scores 10
+  vs 5) than the two efforts did. Two medium runs cost about the wall time of one xhigh run.
   The brief has pointers (the design doc sections, the code, earlier specs to imitate), the
   fixed rules and constraints, and the out-of-scope list. It does NOT contain your own plan.
 - **Give it the settled decisions it can't see.** The measured gap between the worker and
@@ -117,14 +122,18 @@ and runs the chain itself.
   spec and scope.
 - **Every step that guards a boundary runs `"hard": true`:** validating untrusted input,
   building commands or paths from it, auth or tokens, sandboxing, permission checks, crypto.
-  Set it yourself when the plan doesn't. `"hard"` picks the model *and* the verify level: a hard
-  step always runs the full gate. A local design marks steps by algorithmic
-  difficulty only: in one measured slice it ran the command runner and the security step on
-  the normal model, and every bug that reached review sat in exactly those two steps.
-  Everything else runs on the normal model: UI plumbing, tests, docs and pattern-following steps
-  are not hard. When in doubt about a boundary, mark it hard; when in doubt about difficulty,
-  don't. `delegate chain PLAN --check` warns when a plan of 2+ steps marks every one of them
-  hard: that is a design that stopped reading its own steps.
+  Set it yourself when the plan doesn't. `"hard"` sets the verify level and the care, not the
+  model: a hard step always runs the full gate, and its code is what you read line by line in
+  Phase 4. A local design marks steps by algorithmic difficulty only: in one measured slice the
+  command runner and the security step were not marked, and every bug that reached review sat in
+  exactly those two steps. UI plumbing, tests, docs and pattern-following steps are not hard.
+  When in doubt about a boundary, mark it hard; when in doubt about difficulty, don't.
+  `delegate chain PLAN --check` warns when a plan of 2+ steps marks every one of them hard: that
+  is a design that stopped reading its own steps.
+- **Every step runs on the normal model.** A step that spends its retries gets one last round on
+  the high-effort model in the same session before the chain stops (`"escalate": false` turns it
+  off). `"xhigh": true` on a step (or the plan) starts it on the high-effort model; use it only
+  for a step that already failed on the normal model.
 - **The step that grows the project's worker image is its own step, `"image": true` (and so
   `"hard": true`):** anything that edits `.delegate/Dockerfile`. The key is the plan saying the
   toolchain changes: the worker's round verifies in the OLD image, and the chain then rebuilds
@@ -289,8 +298,9 @@ delegate run SPEC.md --repo /path/to/repo --name <short-slug> \
   the worker may do to a device.
 - The worker's network is filtered by default: model endpoint + public internet, no LAN.
   `--egress open` only when the task genuinely needs a LAN service, and say so to the user.
-- `--hard` uses the high-effort model variant — for steps with real algorithmic content, and
-  by default for any step that guards a security boundary (see Phase 2).
+- `--hard` uses the high-effort model variant. It bought no measured quality on hard work, so
+  use it only to retry a task that failed on the normal model (a chain does this by itself: see
+  Phase 2).
 - The task id is `<repo>-<slug>`; the command prints a report when the round ends.
 
 ### Supervised, in place (`--here`)
