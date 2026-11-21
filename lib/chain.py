@@ -938,6 +938,13 @@ def run(plan):
         n, rep = last_report(tid)
         if rep and rep.get("status") == "done":
             note(f"{label}: already done, skipping")
+            # A step the orchestrator finished outside the chain (`delegate continue` after a
+            # blocked round) is done now: the chain's record says so too, or readers of the
+            # state file (`--status`, dashboards) keep showing the old blocked round.
+            rec = st["steps"].setdefault(s["name"], {})
+            if rec.get("status") != "done" or rec.get("rounds") != n:
+                rec.update({"status": "done", "rounds": n})
+                save_state(plan, st)
             if rep.get("new_or_changed_tests_unrun"):
                 note(f"{label}: {newtests.summary_line(rep['new_or_changed_tests_unrun'])}")
             if here:

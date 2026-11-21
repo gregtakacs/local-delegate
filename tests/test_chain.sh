@@ -58,6 +58,13 @@ rm -rf $DELEGATE_STATE; mkdir -p $DELEGATE_STATE
 printf 'blocked\n' > $SCRIPT/a
 python3 $here/lib/chain.py $T/plan.json >/dev/null 2>&1; rc=$?
 check "blocked stops with exit 3" '[ $rc = 3 ] && [ ! -d $DELEGATE_STATE/repo-a/rounds/2 ] && [ ! -d $DELEGATE_STATE/repo-b ]'
+# 3b. the orchestrator answers it outside the chain (`delegate continue`, round 2 done); the
+#     re-run skips step a and its record must say done with 2 rounds, not the stale blocked/1
+mkdir -p $DELEGATE_STATE/repo-a/rounds/2 && printf '{"status":"done","verify_rc":0}\n' > $DELEGATE_STATE/repo-a/rounds/2/report.json
+printf 'done\n' > $SCRIPT/b
+python3 $here/lib/chain.py $T/plan.json >/dev/null 2>&1; rc=$?
+check "a step finished outside the chain is recorded done on resume" \
+  "[ \$rc = 0 ] && python3 -c 'import json,sys; a=json.load(open(sys.argv[1]))[\"steps\"][\"a\"]; sys.exit(0 if a==dict(status=\"done\",rounds=2) else 1)' $DELEGATE_STATE/chains/t.json"
 
 # 4. still failing after the retry budget: stop with exit 3 after 1 + retries rounds
 rm -rf $DELEGATE_STATE; mkdir -p $DELEGATE_STATE
